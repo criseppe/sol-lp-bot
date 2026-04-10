@@ -102,7 +102,9 @@ export function initDb(dbPath: string): Database.Database {
       updated_at     INTEGER NOT NULL,
       cum_fees_sol   REAL DEFAULT 0,
       cum_fees_usdc  REAL DEFAULT 0,
-      realized_il    REAL DEFAULT 0
+      realized_il    REAL DEFAULT 0,
+      tx_count       INTEGER DEFAULT 0,
+      cum_gas_lamports INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS live_snapshots (
