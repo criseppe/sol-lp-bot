@@ -403,6 +403,11 @@ async function main() {
           const walletValueUsdc = balances.sol * price.price + balances.usdc;
           const totalWithPosition = walletValueUsdc + positionValueUsdc;
 
+          // Estimated 24h yield from on-chain liquidity share + pool fee rate
+          const yieldEst = await liveExecutor.getEstimatedYield24h();
+          const estDailyFeesUsdc = yieldEst?.dailyFeesUsdc ?? 0;
+          const estAprPct = yieldEst?.aprPct ?? 0;
+
           // Calculate IL
           let ilUsdc = 0;
           if (livePos && livePos.entryPrice && livePos.entryPrice !== price.price) {
@@ -438,6 +443,8 @@ async function main() {
             ilUsdc,
             realizedIlUsdc: liveRealizedIl,
             ...(() => { const g = liveExecutor!.getGasStats(price.price); return { gasSol: g.gasSol, gasUsdc: g.gasUsdc, txCount: g.txCount }; })(),
+            estDailyFeesUsdc,
+            estAprPct,
             regime: liveRegime,
             botState: liveBotState,
             liveEvents: [],

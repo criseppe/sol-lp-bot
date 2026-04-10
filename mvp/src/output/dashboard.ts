@@ -90,6 +90,8 @@ export interface LiveData {
   gasSol: number;
   gasUsdc: number;
   txCount: number;
+  estDailyFeesUsdc: number;
+  estAprPct: number;
   regime: string;
   botState: BotState;
   liveEvents: RebalanceEvent[];
@@ -1015,6 +1017,8 @@ ${NAV_HTML}
     <div class="row"><span class="label">USDC in Position</span><span class="value">${fmt(live.positionUsdc, 6)}</span></div>
     <div class="row"><span class="label">Position Value</span><span class="value" style="color:#58a6ff">$${fmt(live.positionValueUsdc)}</span></div>
     <div class="row"><span class="label">Entry Price</span><span class="value">$${fmt(live.entryPrice ?? 0)}</span></div>
+    <div class="row"><span class="label">Est. Yield 24h</span><span class="value" style="color:#eab308">$${fmt(live.estDailyFeesUsdc, 4)}</span></div>
+    <div class="row"><span class="label">Est. APR</span><span class="value" style="color:#eab308">${fmt(live.estAprPct, 1)}%</span></div>
     ` : ''}
   </div>
 
