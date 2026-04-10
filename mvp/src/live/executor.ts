@@ -466,6 +466,8 @@ export class LiveExecutor {
       const tickLower = position.getLowerTickData();
       const tickUpper = position.getUpperTickData();
 
+      const solPrice = PriceMath.sqrtPriceX64ToPrice(poolData.sqrtPrice, 9, 6).toNumber();
+
       // Use collectFeesQuote to compute real pending fees from fee growth data
       // This calculates off-chain without needing an updateFeesAndRewards tx
       const quote = collectFeesQuote({
@@ -478,12 +480,28 @@ export class LiveExecutor {
 
       const feeSol = Number(quote.feeOwedA.toString()) / 1e9;
       const feeUsdc = Number(quote.feeOwedB.toString()) / 1e6;
-      const solPrice = PriceMath.sqrtPriceX64ToPrice(poolData.sqrtPrice, 9, 6).toNumber();
+
+      // Sanity check: fees can't exceed position value — if they do,
+      // collectFeesQuote returned garbage (common with uninitialized fee growth checkpoints)
+      const posComp = await this.getPositionComposition();
+      const posValue = posComp?.totalUsdc ?? 0;
+      const feeTotalUsdc = feeSol * solPrice + feeUsdc;
+      if (posValue > 0 && feeTotalUsdc > posValue * 2) {
+        console.log(JSON.stringify({ level: 'warn', msg: 'collectFeesQuote returned invalid value, using feeOwed fallback', rawSol: feeSol, rawUsdc: feeUsdc, posValue, timestamp: Date.now() }));
+        // Fall back to position's stored feeOwed values (updated after updateFeesAndRewards)
+        const fallbackSol = Number(posData.feeOwedA.toString()) / 1e9;
+        const fallbackUsdc = Number(posData.feeOwedB.toString()) / 1e6;
+        return {
+          feeSolDecimal: fallbackSol,
+          feeUsdcDecimal: fallbackUsdc,
+          feeTotalUsdc: fallbackSol * solPrice + fallbackUsdc,
+        };
+      }
 
       return {
         feeSolDecimal: feeSol,
         feeUsdcDecimal: feeUsdc,
-        feeTotalUsdc: feeSol * solPrice + feeUsdc,
+        feeTotalUsdc,
       };
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'getPendingFees failed', error: String(err), timestamp: Date.now() }));
