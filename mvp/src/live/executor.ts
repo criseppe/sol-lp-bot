@@ -543,6 +543,11 @@ export class LiveExecutor {
   }
 
   setCurrentPosition(pos: LivePosition | null): void {
+    if (pos) {
+      // Always derive prices from ticks to match on-chain reality
+      pos.priceLower = PriceMath.tickIndexToPrice(pos.tickLower, SOL_DECIMALS, USDC_DECIMALS).toNumber();
+      pos.priceUpper = PriceMath.tickIndexToPrice(pos.tickUpper, SOL_DECIMALS, USDC_DECIMALS).toNumber();
+    }
     this.currentPosition = pos;
   }
 

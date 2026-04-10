@@ -685,7 +685,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   const effectiveParams = RANGE_WIDTH_OVERRIDE !== null
     ? { ...params, rangeWidthPct: RANGE_WIDTH_OVERRIDE }
     : params;
-  const range = calcRange(price, effectiveParams, (p) => pool.priceToTick(p));
+  const range = calcRange(price, effectiveParams, (p) => pool.priceToTick(p), (p) => pool.priceToTickLower(p), (p) => pool.priceToTickUpper(p));
 
   const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
   const totalWalletUsdc = balances.sol * price + balances.usdc;

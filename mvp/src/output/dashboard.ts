@@ -6,6 +6,7 @@ import type { BotState, RebalanceEvent } from '../types.js';
 import type { ComparisonSnapshot } from '../paper/ledger.js';
 import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { REGIME_PARAMS } from '../constants.js';
 
 interface OnChainTx {
   signature: string;
@@ -684,53 +685,63 @@ ${NAV_HTML}
   if (live.positionRange) {
     const r = live.positionRange;
     const rangeWidth = r.upper - r.lower;
+    const centre = (r.lower + r.upper) / 2;
+    const halfWidth = rangeWidth / 2;
     const cursorPos = Math.max(0, Math.min(100, ((live.solPrice - r.lower) / rangeWidth) * 100));
     const entryPos = live.entryPrice ? Math.max(0, Math.min(100, ((live.entryPrice - r.lower) / rangeWidth) * 100)) : null;
+
+    // Proximity thresholds for current regime
+    const regimeKey = live.regime as keyof typeof REGIME_PARAMS;
+    const params = REGIME_PARAMS[regimeKey] ?? REGIME_PARAMS.RANGING;
+    // Downside threshold: triggers when price drops to centre - threshold * halfWidth
+    const downsidePrice = centre - params.proxThresholdLower * halfWidth;
+    const downsidePos = Math.max(0, Math.min(100, ((downsidePrice - r.lower) / rangeWidth) * 100));
+    // Upside threshold: triggers when price rises to centre + threshold * halfWidth
+    const upsidePrice = centre + params.proxThresholdUpper * halfWidth;
+    const upsidePos = Math.max(0, Math.min(100, ((upsidePrice - r.lower) / rangeWidth) * 100));
+    // Current proximity values
+    const proxToLower = Math.max(0, (centre - live.solPrice) / halfWidth);
+    const proxToUpper = Math.max(0, (live.solPrice - centre) / halfWidth);
+    const proxDownPct = Math.round(proxToLower * 100);
+    const proxUpPct = Math.round(proxToUpper * 100);
+    const downThreshPct = Math.round(params.proxThresholdLower * 100);
+    const upThreshPct = Math.round(params.proxThresholdUpper * 100);
+
     rangeBarHtml = `
       <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:4px">
         <span>$${fmt(r.lower)}</span>
         <span style="color:#f0883e">$${fmt(live.solPrice)} (current)</span>
         <span>$${fmt(r.upper)}</span>
       </div>
-      <div class="range-bar">
+      <div class="range-bar" style="height:32px">
         <div class="range-fill" style="left:0;width:100%"></div>
+        <!-- Danger zones: beyond thresholds -->
+        <div style="position:absolute;top:0;left:0;width:${downsidePos}%;height:100%;background:rgba(249,115,22,0.15);border-right:2px dashed #f97316" title="Downside exit at $${fmt(downsidePrice)} (${downThreshPct}%)"></div>
+        <div style="position:absolute;top:0;right:0;width:${(100 - upsidePos).toFixed(1)}%;height:100%;background:rgba(88,166,255,0.15);border-left:2px dashed #58a6ff" title="Upside exit at $${fmt(upsidePrice)} (${upThreshPct}%)"></div>
+        <!-- Threshold labels -->
+        <div style="position:absolute;top:1px;left:${downsidePos}%;transform:translateX(-100%);font-size:9px;color:#f97316;padding:0 3px;white-space:nowrap">&#x25BC; ${downThreshPct}%</div>
+        <div style="position:absolute;top:1px;left:${upsidePos}%;transform:translateX(0%);font-size:9px;color:#58a6ff;padding:0 3px;white-space:nowrap">${upThreshPct}% &#x25B2;</div>
         ${entryPos !== null ? `<div style="position:absolute;top:0;width:3px;height:100%;background:#a855f7;left:${entryPos}%" title="Entry: $${fmt(live.entryPrice!)}"></div>` : ''}
         <div class="range-cursor" style="left:${cursorPos}%"></div>
       </div>
-      <div style="display:flex;gap:16px;font-size:10px;margin-top:4px;flex-wrap:wrap">
+      <div style="display:flex;gap:12px;font-size:10px;margin-top:4px;flex-wrap:wrap;align-items:center">
         <span><span style="display:inline-block;width:8px;height:8px;background:#f0883e;border-radius:2px;margin-right:3px"></span>Current: $${fmt(live.solPrice)}</span>
         ${live.entryPrice ? `<span><span style="display:inline-block;width:8px;height:8px;background:#a855f7;border-radius:2px;margin-right:3px"></span>Entry: $${fmt(live.entryPrice)}</span>` : ''}
+        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #f97316;margin-right:3px;vertical-align:middle"></span>Down exit: $${fmt(downsidePrice)}</span>
+        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #58a6ff;margin-right:3px;vertical-align:middle"></span>Up exit: $${fmt(upsidePrice)}</span>
+      </div>
+      <div style="display:flex;gap:16px;font-size:10px;margin-top:4px;color:#8b949e">
+        <span>Prox &#x25BC; <b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b> / ${downThreshPct}%</span>
+        <span>Prox &#x25B2; <b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b> / ${upThreshPct}%</span>
+        <span style="color:#8b949e">(${live.regime})</span>
       </div>
       ${(() => {
-        const rw = r.upper - r.lower;
-        // Current ratio
-        const curRatio = Math.max(0, Math.min(1, (live.solPrice - r.lower) / rw));
-        const curUsdcPct = Math.round(curRatio * 100);
-        const curSolPct = 100 - curUsdcPct;
-        // Entry ratio
         let entryStr = '';
         if (live.entryPrice) {
-          const entryRatio = Math.max(0, Math.min(1, (live.entryPrice - r.lower) / rw));
-          const entryUsdcPct = Math.round(entryRatio * 100);
-          const entrySolPct = 100 - entryUsdcPct;
-          entryStr = `<div style="display:flex;align-items:center;gap:6px">
-            <span style="color:#a855f7;font-size:10px">At entry:</span>
-            <div style="flex:1;height:8px;border-radius:4px;overflow:hidden;display:flex">
-              <div style="width:${entrySolPct}%;background:#f97316" title="SOL ${entrySolPct}%"></div>
-              <div style="width:${entryUsdcPct}%;background:#58a6ff" title="USDC ${entryUsdcPct}%"></div>
-            </div>
-            <span style="font-size:10px;color:#8b949e;white-space:nowrap">${entrySolPct}% SOL / ${entryUsdcPct}% USDC</span>
-          </div>`;
+          entryStr = `<span style="color:#a855f7;font-size:10px">At entry: ${fmt(live.entrySol ?? 0)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</span>`;
         }
-        return `<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px">
-          <div style="display:flex;align-items:center;gap:6px">
-            <span style="color:#f0883e;font-size:10px">Now:</span>
-            <div style="flex:1;height:8px;border-radius:4px;overflow:hidden;display:flex;margin-left:14px">
-              <div style="width:${curSolPct}%;background:#f97316" title="SOL ${curSolPct}%"></div>
-              <div style="width:${curUsdcPct}%;background:#58a6ff" title="USDC ${curUsdcPct}%"></div>
-            </div>
-            <span style="font-size:10px;color:#8b949e;white-space:nowrap">${curSolPct}% SOL / ${curUsdcPct}% USDC</span>
-          </div>
+        return `<div style="margin-top:6px;display:flex;flex-direction:column;gap:2px;font-size:10px">
+          <span style="color:#f0883e">Now: ${fmt(live.positionSol)} SOL + ${fmt(live.positionUsdc)} USDC</span>
           ${entryStr}
         </div>`;
       })()}`;
@@ -1406,6 +1417,33 @@ proxToUpper = (price - centre) / halfWidth
 
 Downside: proxToLower &#x2265; threshold &#x2192; close + reopen at current price
 Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch</div>
+  <table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:12px">
+    <tr style="border-bottom:1px solid #21262d">
+      <th style="text-align:left;padding:6px 8px;color:#8b949e">Regime</th>
+      <th style="text-align:center;padding:6px 8px;color:#f97316">Downside Threshold</th>
+      <th style="text-align:center;padding:6px 8px;color:#58a6ff">Upside Threshold</th>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#c9d1d9">RANGING</td>
+      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">65%</td>
+      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">88%</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#c9d1d9">BULLISH</td>
+      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">70%</td>
+      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">92%</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#c9d1d9">BEARISH</td>
+      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">55%</td>
+      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">82%</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 8px;color:#c9d1d9">EXTREME</td>
+      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">50%</td>
+      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">80%</td>
+    </tr>
+  </table>
   <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
     <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: T1_DOWNSIDE trigger</div>
     <div style="color:#c9d1d9">Position range: $84.62 &#x2014; $85.89, centre = $85.26, halfWidth = $0.64</div>

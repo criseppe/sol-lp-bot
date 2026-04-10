@@ -29,12 +29,14 @@ export function calcRange(
   currentPrice: number,
   params: RegimeParams,
   priceToTick: (price: number) => number,
+  priceToTickLower?: (price: number) => number,
+  priceToTickUpper?: (price: number) => number,
 ): RangeBounds {
   const lower = currentPrice * (1 - (params.rangeWidthPct / 100) * params.skewDown);
   const upper = currentPrice * (1 + (params.rangeWidthPct / 100) * params.skewUp);
   return {
-    tickLower: priceToTick(lower),
-    tickUpper: priceToTick(upper),
+    tickLower: (priceToTickLower ?? priceToTick)(lower),
+    tickUpper: (priceToTickUpper ?? priceToTick)(upper),
     priceLower: lower,
     priceUpper: upper,
   };

@@ -87,6 +87,22 @@ export class PoolService {
     );
   }
 
+  /** Round tick DOWN so the price is at or below the target — use for lower bounds */
+  priceToTickLower(price: number): number {
+    const tick = this.priceToTick(price);
+    const tickPrice = PriceMath.tickIndexToPrice(tick, SOL_DECIMALS, USDC_DECIMALS).toNumber();
+    // If rounding pushed the price above target, step down one tick spacing
+    return tickPrice > price ? tick - this.tickSpacing : tick;
+  }
+
+  /** Round tick UP so the price is at or above the target — use for upper bounds */
+  priceToTickUpper(price: number): number {
+    const tick = this.priceToTick(price);
+    const tickPrice = PriceMath.tickIndexToPrice(tick, SOL_DECIMALS, USDC_DECIMALS).toNumber();
+    // If rounding pushed the price below target, step up one tick spacing
+    return tickPrice < price ? tick + this.tickSpacing : tick;
+  }
+
   getTickSpacing(): number {
     return this.tickSpacing;
   }
