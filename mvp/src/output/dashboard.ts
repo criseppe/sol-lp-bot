@@ -881,20 +881,15 @@ ${pool ? `<div class="card" style="margin-top:12px">
           <tr style="border-bottom:1px solid #21262d">
             <td style="padding:6px 8px;color:#8b949e">Down</td>
             <td style="padding:6px 8px;color:#f97316">$${fmt(downsidePrice)}</td>
-            <td style="padding:6px 8px;color:#8b949e">Regime</td>
-            <td style="padding:6px 8px;color:#c9d1d9;font-weight:bold">${live.regime}</td>
+            <td style="padding:6px 8px;color:#8b949e">Now</td>
+            <td style="padding:6px 8px;color:#f0883e">${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc)} USDC</td>
           </tr>
           <tr style="border-bottom:1px solid #21262d">
             <td style="padding:6px 8px;color:#8b949e">Up</td>
             <td style="padding:6px 8px;color:#58a6ff">$${fmt(upsidePrice)}</td>
-            <td style="padding:6px 8px;color:#8b949e">Now</td>
-            <td style="padding:6px 8px;color:#f0883e">${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc)} USDC</td>
-          </tr>
-          ${live.entryPrice ? `<tr>
-            <td colspan="2"></td>
             <td style="padding:6px 8px;color:#8b949e">At entry</td>
             <td style="padding:6px 8px;color:#a855f7">${fmt(live.entrySol ?? 0, 4)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</td>
-          </tr>` : ''}
+          </tr>
         </tbody>
       </table>`;
   }
