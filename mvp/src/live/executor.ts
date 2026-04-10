@@ -279,8 +279,8 @@ export class LiveExecutor {
       positionAddress,
       tickLower: range.tickLower,
       tickUpper: range.tickUpper,
-      priceLower: range.priceLower,
-      priceUpper: range.priceUpper,
+      priceLower: PriceMath.tickIndexToPrice(range.tickLower, SOL_DECIMALS, USDC_DECIMALS).toNumber(),
+      priceUpper: PriceMath.tickIndexToPrice(range.tickUpper, SOL_DECIMALS, USDC_DECIMALS).toNumber(),
       entryPrice: currentPrice,
       entryTime: Date.now(),
       regime,
@@ -407,7 +407,7 @@ export class LiveExecutor {
     return result;
   }
 
-  async getPositionData(): Promise<{ liquidity: string; feeOwedA: string; feeOwedB: string } | null> {
+  async getPositionData(): Promise<{ liquidity: string; feeOwedA: string; feeOwedB: string; tickLower: number; tickUpper: number; priceLower: number; priceUpper: number } | null> {
     if (!this.currentPosition) return null;
     try {
       const position = await this.client.getPosition(this.currentPosition.positionAddress, IGNORE_CACHE);
@@ -416,6 +416,10 @@ export class LiveExecutor {
         liquidity: data.liquidity.toString(),
         feeOwedA: data.feeOwedA.toString(),
         feeOwedB: data.feeOwedB.toString(),
+        tickLower: data.tickLowerIndex,
+        tickUpper: data.tickUpperIndex,
+        priceLower: PriceMath.tickIndexToPrice(data.tickLowerIndex, SOL_DECIMALS, USDC_DECIMALS).toNumber(),
+        priceUpper: PriceMath.tickIndexToPrice(data.tickUpperIndex, SOL_DECIMALS, USDC_DECIMALS).toNumber(),
       };
     } catch {
       return null;

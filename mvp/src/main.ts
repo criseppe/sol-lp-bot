@@ -326,7 +326,7 @@ async function main() {
             totalValueUsdc: walletValueUsdc,
             solPrice: price.price,
             positionMint: livePos?.positionMint.toBase58() ?? null,
-            positionRange: livePos ? { lower: livePos.priceLower, upper: livePos.priceUpper } : null,
+            positionRange: posData ? { lower: posData.priceLower, upper: posData.priceUpper } : null,
             positionLiquidity: posData?.liquidity ?? null,
             feeOwedSol: posData?.feeOwedA ?? null,
             feeOwedUsdc: posData?.feeOwedB ?? null,
@@ -354,7 +354,7 @@ async function main() {
           dashboard.updateLiveData(liveDataUpdate);
 
           // Record live snapshot for historical tracking
-          const isInRange = livePos && price.price >= livePos.priceLower && price.price <= livePos.priceUpper;
+          const isInRange = posData && price.price >= posData.priceLower && price.price <= posData.priceUpper;
           insertLiveSnapshot(db, {
             timestamp: Date.now(),
             price: price.price,
