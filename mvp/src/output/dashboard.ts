@@ -1349,7 +1349,8 @@ function renderStrategyHtml(): string {
 .flow-step{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px}
 .flow-step h3{font-size:13px;margin-bottom:6px}
 .flow-arrow{text-align:center;color:#30363d;font-size:18px}
-.param-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#30363d;border-radius:8px;overflow:hidden;margin:12px 0}
+.param-grid{background:#30363d;border-radius:8px;overflow:hidden;margin:12px 0}
+.param-grid-inner{display:grid;grid-template-columns:repeat(5,1fr);gap:1px}
 .param-grid .cell{background:#161b22;padding:8px;font-size:11px;text-align:center}
 .param-grid .header{background:#0d1117;color:#8b949e;font-weight:bold;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
 .param-grid .regime-col{font-weight:bold}
@@ -1365,8 +1366,8 @@ function renderStrategyHtml(): string {
 .tag-extreme{background:#a855f720;color:#a855f7}
 .adv-risks{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:700px){
-  .param-grid{overflow-x:auto;display:block;-webkit-overflow-scrolling:touch}
-  .param-grid-inner{display:grid;grid-template-columns:repeat(5,minmax(70px,1fr));gap:1px;min-width:400px}
+  .param-grid{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .param-grid-inner{grid-template-columns:repeat(5,minmax(70px,1fr));min-width:400px}
   .flow-step{padding:10px 12px}
   .flow-step h3{font-size:12px}
   .rule-card{padding:12px}
