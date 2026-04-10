@@ -465,35 +465,50 @@ function fmt(n: number, d = 2): string {
 
 const SHARED_STYLES = `
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Menlo,monospace;font-size:13px;padding:16px}
-.banner{text-align:center;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:16px}
+body{background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Menlo,monospace;font-size:13px;padding:16px;-webkit-text-size-adjust:100%}
+.banner{text-align:center;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:12px}
 .banner h1{font-size:16px;color:#58a6ff}
 .banner .mode{font-size:11px;text-transform:uppercase;letter-spacing:2px}
-.nav{display:flex;gap:8px;justify-content:center;margin-bottom:16px}
-.nav a{color:#8b949e;text-decoration:none;padding:6px 16px;border:1px solid #30363d;border-radius:6px;font-size:12px;transition:all 0.2s}
+.nav{display:flex;gap:6px;justify-content:center;margin-bottom:12px;flex-wrap:wrap}
+.nav a{color:#8b949e;text-decoration:none;padding:8px 14px;border:1px solid #30363d;border-radius:6px;font-size:12px;transition:all 0.2s;white-space:nowrap}
 .nav a:hover,.nav a.active{color:#c9d1d9;border-color:#58a6ff;background:#161b22}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:700px){.grid{grid-template-columns:1fr}}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
-.card h2{font-size:13px;color:#8b949e;margin-bottom:12px;text-transform:uppercase;letter-spacing:1px}
-.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
-.row .label{color:#8b949e}
-.row .value{font-weight:bold}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.card h2{font-size:13px;color:#8b949e;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
+.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d;gap:8px;flex-wrap:wrap}
+.row .label{color:#8b949e;flex-shrink:0}
+.row .value{font-weight:bold;text-align:right;word-break:break-word}
 .green{color:#22c55e}.red{color:#ef4444}.amber{color:#eab308}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold}
 .full{grid-column:1/-1}
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d;white-space:nowrap}
 td{padding:6px 4px;border-bottom:1px solid #21262d;vertical-align:top}
 td:last-child{color:#8b949e;font-size:11px;line-height:1.4;max-width:500px}
 .dots{display:flex;gap:8px;align-items:center}
 .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
-.big-number{text-align:center;padding:16px 0}
+.big-number{text-align:center;padding:12px 0}
 .big-number .val{font-size:28px;font-weight:bold}
 .big-number .sub{color:#8b949e;font-size:11px;margin-top:4px}
 .range-bar{position:relative;height:24px;background:#21262d;border-radius:4px;margin:8px 0;overflow:hidden}
 .range-fill{position:absolute;height:100%;background:#58a6ff20;border-left:2px solid #58a6ff;border-right:2px solid #58a6ff}
 .range-cursor{position:absolute;top:0;width:3px;height:100%;background:#f0883e}
+@media(max-width:700px){
+  body{padding:8px;font-size:12px}
+  .grid{grid-template-columns:1fr;gap:10px}
+  .card{padding:12px}
+  .card h2{font-size:12px;margin-bottom:8px}
+  .banner{padding:10px}
+  .banner h1{font-size:15px}
+  .nav a{padding:8px 10px;font-size:11px;flex:1;text-align:center;min-width:0}
+  .big-number .val{font-size:22px}
+  .row{font-size:12px}
+  .row .value{font-size:12px}
+  table{font-size:11px}
+  th,td{padding:5px 3px}
+  td:last-child{max-width:200px}
+}
 `;
 
 const NAV_HTML = `
@@ -724,16 +739,16 @@ ${NAV_HTML}
         ${entryPos !== null ? `<div style="position:absolute;top:0;width:3px;height:100%;background:#a855f7;left:${entryPos}%" title="Entry: $${fmt(live.entryPrice!)}"></div>` : ''}
         <div class="range-cursor" style="left:${cursorPos}%"></div>
       </div>
-      <div style="display:flex;gap:12px;font-size:10px;margin-top:4px;flex-wrap:wrap;align-items:center">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:10px;margin-top:6px">
         <span><span style="display:inline-block;width:8px;height:8px;background:#f0883e;border-radius:2px;margin-right:3px"></span>Current: $${fmt(live.solPrice)}</span>
-        ${live.entryPrice ? `<span><span style="display:inline-block;width:8px;height:8px;background:#a855f7;border-radius:2px;margin-right:3px"></span>Entry: $${fmt(live.entryPrice)}</span>` : ''}
-        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #f97316;margin-right:3px;vertical-align:middle"></span>Down exit: $${fmt(downsidePrice)}</span>
-        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #58a6ff;margin-right:3px;vertical-align:middle"></span>Up exit: $${fmt(upsidePrice)}</span>
+        ${live.entryPrice ? `<span><span style="display:inline-block;width:8px;height:8px;background:#a855f7;border-radius:2px;margin-right:3px"></span>Entry: $${fmt(live.entryPrice)}</span>` : '<span></span>'}
+        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #f97316;margin-right:3px;vertical-align:middle"></span>Down: $${fmt(downsidePrice)}</span>
+        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #58a6ff;margin-right:3px;vertical-align:middle"></span>Up: $${fmt(upsidePrice)}</span>
       </div>
-      <div style="display:flex;gap:16px;font-size:10px;margin-top:4px;color:#8b949e">
-        <span>Prox &#x25BC; <b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b> / ${downThreshPct}%</span>
-        <span>Prox &#x25B2; <b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b> / ${upThreshPct}%</span>
-        <span style="color:#8b949e">(${live.regime})</span>
+      <div style="display:flex;gap:12px;font-size:10px;margin-top:6px;color:#8b949e;flex-wrap:wrap">
+        <span>Prox &#x25BC; <b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b>/${downThreshPct}%</span>
+        <span>Prox &#x25B2; <b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b>/${upThreshPct}%</span>
+        <span>(${live.regime})</span>
       </div>
       ${(() => {
         let entryStr = '';
@@ -790,13 +805,34 @@ ${NAV_HTML}
 .event-meta{font-size:11px;color:#8b949e}
 .event-desc{font-size:12px;color:#c9d1d9;line-height:1.5;margin-bottom:4px}
 .event-balances{font-size:11px;color:#8b949e;border-top:1px solid #21262d;padding-top:6px;margin-top:6px}
-.ctrl-btn{border:none;padding:12px 24px;border-radius:8px;font-size:13px;font-weight:bold;cursor:pointer;font-family:inherit;width:100%;transition:all 0.2s}
+.ctrl-btn{border:none;padding:12px 24px;border-radius:8px;font-size:13px;font-weight:bold;cursor:pointer;font-family:inherit;width:100%;transition:all 0.2s;-webkit-tap-highlight-color:transparent}
 .ctrl-btn:disabled{background:#555!important;cursor:not-allowed;color:#888!important}
 .ctrl-red{background:#dc2626;color:white}.ctrl-red:hover{background:#b91c1c}
 .ctrl-amber{background:#d97706;color:white}.ctrl-amber:hover{background:#b45309}
 .ctrl-green{background:#16a34a;color:white}.ctrl-green:hover{background:#15803d}
 .ctrl-blue{background:#2563eb;color:white}.ctrl-blue:hover{background:#1d4ed8}
 .stop-confirm{display:none;background:#1c1917;border:2px solid #dc2626;border-radius:8px;padding:16px;margin-top:12px;text-align:center}
+.ctrl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+.fees-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.fees-cell{text-align:center;padding:12px 0}
+.fees-cell:not(:last-child){border-right:1px solid #21262d}
+.il-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.il-cell{text-align:center;padding:8px 0}
+.wallet-split{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:12px;border-top:1px solid #21262d;padding-top:12px}
+.wallet-half{text-align:center}
+.wallet-half:first-child{border-right:1px solid #21262d}
+@media(max-width:700px){
+  .ctrl-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .fees-grid{grid-template-columns:1fr}
+  .fees-cell{border-right:none!important;border-bottom:1px solid #21262d;padding:10px 0}
+  .fees-cell:last-child{border-bottom:none}
+  .il-grid{grid-template-columns:1fr}
+  .il-cell{border-bottom:1px solid #21262d;padding:10px 0}
+  .il-cell:last-child{border-bottom:none}
+  .wallet-split{grid-template-columns:1fr}
+  .wallet-half{padding:8px 0}
+  .wallet-half:first-child{border-right:none;border-bottom:1px solid #21262d}
+}
 </style>
 </head>
 <body>
@@ -818,13 +854,13 @@ ${NAV_HTML}
       <div class="val" style="color:#58a6ff">$${fmt(live.totalValueWithPosition)}</div>
       <div class="sub">Wallet + Liquidity Position</div>
     </div>
-    <div class="grid" style="grid-template-columns:1fr 1fr;gap:0;margin-top:12px;border-top:1px solid #21262d;padding-top:12px">
-      <div style="text-align:center;border-right:1px solid #21262d">
+    <div class="wallet-split">
+      <div class="wallet-half">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Wallet</div>
         <div style="font-size:16px;font-weight:bold">$${fmt(live.totalValueUsdc)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.solBalance, 4)} SOL + ${fmt(live.usdcBalance, 2)} USDC</div>
       </div>
-      <div style="text-align:center">
+      <div class="wallet-half">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Liquidity Position</div>
         <div style="font-size:16px;font-weight:bold">${live.positionMint ? `$${fmt(live.positionValueUsdc)}` : '--'}</div>
         <div style="font-size:11px;color:#8b949e">${live.positionMint ? `${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc, 2)} USDC` : 'No position open'}</div>
@@ -852,38 +888,38 @@ ${NAV_HTML}
 
   <div class="card full">
     <h2>Fees, IL &amp; PnL</h2>
-    <div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:12px">
-      <div style="text-align:center;padding:12px 0;border-right:1px solid #21262d">
+    <div class="fees-grid">
+      <div class="fees-cell">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Pending Fees</div>
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.pendingFeesTotal)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.pendingFeesSol, 6)} SOL</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.pendingFeesUsdc, 4)} USDC</div>
       </div>
-      <div style="text-align:center;padding:12px 0;border-right:1px solid #21262d">
+      <div class="fees-cell">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Harvested Fees</div>
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.cumHarvestedFeesSol * live.solPrice + live.cumHarvestedFeesUsdc)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.cumHarvestedFeesSol, 6)} SOL</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.cumHarvestedFeesUsdc, 4)} USDC</div>
       </div>
-      <div style="text-align:center;padding:12px 0">
+      <div class="fees-cell" style="border-right:none">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Total Fees Earned</div>
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.totalFeesUsdc)}</div>
         <div style="font-size:11px;color:#8b949e">Pending + Harvested</div>
       </div>
     </div>
     <div style="border-top:1px solid #21262d;margin-top:8px;padding-top:12px">
-      <div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:12px">
-        <div style="text-align:center;padding:8px 0">
+      <div class="il-grid">
+        <div class="il-cell">
           <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Potential IL (unrealized)</div>
           <div style="font-size:20px;font-weight:bold;color:${live.ilUsdc < 0 ? '#ef4444' : '#22c55e'}">${live.ilUsdc < 0 ? '-' : '+'}$${fmt(Math.abs(live.ilUsdc), 4)}</div>
           <div style="font-size:11px;color:#8b949e">${live.entryPrice ? `Entry $${fmt(live.entryPrice)} → $${fmt(live.solPrice)} (${((live.solPrice - live.entryPrice) / live.entryPrice * 100).toFixed(2)}%)` : '--'}</div>
         </div>
-        <div style="text-align:center;padding:8px 0">
+        <div class="il-cell">
           <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Realized IL (from closes)</div>
           <div style="font-size:20px;font-weight:bold;color:${live.realizedIlUsdc < 0 ? '#ef4444' : '#22c55e'}">${live.realizedIlUsdc < 0 ? '-' : '+'}$${fmt(Math.abs(live.realizedIlUsdc), 4)}</div>
           <div style="font-size:11px;color:#8b949e">Cumulative from closed positions</div>
         </div>
-        <div style="text-align:center;padding:8px 0">
+        <div class="il-cell">
           <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Gas Fees (on-chain)</div>
           <div style="font-size:20px;font-weight:bold;color:#ef4444">-$${fmt(live.gasUsdc, 4)}</div>
           <div style="font-size:11px;color:#8b949e">${fmt(live.gasSol, 6)} SOL (${live.txCount} txs)</div>
@@ -904,7 +940,7 @@ ${NAV_HTML}
 
   <div class="card full">
     <h2>Bot Controls</h2>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+    <div class="ctrl-grid">
       <div>
         <button id="harvest-btn" class="ctrl-btn ctrl-blue" onclick="harvestFees()">
           Harvest Fees
@@ -1142,6 +1178,11 @@ function renderInsightsHtml(data: InsightsData): string {
 <title>SOL/USDC LP Bot - Insights</title>
 <style>${SHARED_STYLES}
 .section-title{font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d}
+.gauge-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+@media(max-width:700px){
+  .gauge-row{grid-template-columns:1fr;gap:8px}
+  .section-title{font-size:13px;margin:16px 0 10px}
+}
 </style>
 </head>
 <body>
@@ -1212,8 +1253,8 @@ ${(() => {
 </div>`;
 })()}
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">In-Range Performance</div>
-<div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+<div class="section-title">In-Range Performance</div>
+<div class="gauge-row">
   <div class="card">${gauge(data.inRangePct1h, 'Last 1 Hour')}</div>
   <div class="card">${gauge(data.inRangePct24h, 'Last 24 Hours')}</div>
   <div class="card">${gauge(data.inRangePctAll, 'All Time')}</div>
@@ -1249,7 +1290,7 @@ ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
 <div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">On-Chain Transactions (last 10)</div>
 <div class="card" style="margin-bottom:16px">
 ${data.recentTxs.length > 0 ? `
-  <table style="width:100%;border-collapse:collapse;font-size:12px">
+  <div class="table-wrap"><table style="width:100%;border-collapse:collapse;font-size:12px">
     <thead>
       <tr>
         <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Time</th>
@@ -1268,7 +1309,7 @@ ${data.recentTxs.length > 0 ? `
         </tr>
       `).join('')}
     </tbody>
-  </table>
+  </table></div>
   <div style="font-size:11px;color:#8b949e;margin-top:8px;text-align:right">
     <a href="https://solscan.io/account/${data.recentTxs.length > 0 ? '' : ''}Evga86Xco1D5XCeSF2T3Ff8DsJAhr2SoaVrPWALoLU6z" target="_blank" style="color:#58a6ff;text-decoration:none">View all on Solscan &rarr;</a>
   </div>
@@ -1278,11 +1319,11 @@ ${data.recentTxs.length > 0 ? `
 <div class="card" style="margin-bottom:16px">
   <h2>Download Logs</h2>
   <p style="color:#8b949e;font-size:12px;margin-bottom:12px">Decision logs and regime evaluations are recorded every 60 seconds. Download for offline analysis.</p>
-  <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="/api/export" target="_blank" style="background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:12px">Full JSON Export</a>
-    <a href="/api/decisions?limit=500" target="_blank" style="background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:12px">Decision Log (500)</a>
-    <a href="/api/snapshots?hours=168" target="_blank" style="background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:12px">Snapshots (7 days)</a>
-    <a href="/api/regime-history" target="_blank" style="background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:12px">Regime History</a>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <a href="/api/export" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Full JSON Export</a>
+    <a href="/api/decisions?limit=500" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Decision Log (500)</a>
+    <a href="/api/snapshots?hours=168" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Snapshots (7 days)</a>
+    <a href="/api/regime-history" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Regime History</a>
   </div>
 </div>
 
@@ -1312,12 +1353,23 @@ function renderStrategyHtml(): string {
 .rule-card h3{color:#58a6ff;font-size:14px;margin-bottom:8px}
 .rule-card .trigger{color:#f0883e;font-size:12px;font-style:italic;margin-top:8px}
 .rule-num{display:inline-block;background:#58a6ff20;color:#58a6ff;width:24px;height:24px;border-radius:50%;text-align:center;line-height:24px;font-size:12px;font-weight:bold;margin-right:8px}
-.logic-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:12px;font-family:monospace;color:#c9d1d9;margin:8px 0;line-height:1.6;white-space:pre-wrap}
+.logic-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:12px;font-family:monospace;color:#c9d1d9;margin:8px 0;line-height:1.6;white-space:pre-wrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
 .tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin:0 2px}
 .tag-ranging{background:#4a9eff20;color:#4a9eff}
 .tag-bull{background:#22c55e20;color:#22c55e}
 .tag-bear{background:#ef444420;color:#ef4444}
 .tag-extreme{background:#a855f720;color:#a855f7}
+.adv-risks{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){
+  .param-grid{overflow-x:auto;display:block;-webkit-overflow-scrolling:touch}
+  .param-grid-inner{display:grid;grid-template-columns:repeat(5,minmax(70px,1fr));gap:1px;min-width:400px}
+  .flow-step{padding:10px 12px}
+  .flow-step h3{font-size:12px}
+  .rule-card{padding:12px}
+  .rule-card h3{font-size:13px}
+  .logic-box{font-size:11px;padding:10px;overflow-x:auto}
+  .adv-risks{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
@@ -1375,6 +1427,7 @@ ${NAV_HTML}
 <div class="card" style="margin-bottom:16px">
   <h2>Strategy Parameters by Regime</h2>
   <div class="param-grid">
+  <div class="param-grid-inner">
     <div class="cell header">Parameter</div>
     <div class="cell header" style="color:#4a9eff">Ranging</div>
     <div class="cell header" style="color:#22c55e">Bullish</div>
@@ -1388,7 +1441,7 @@ ${NAV_HTML}
     <div class="cell" style="text-align:left;color:#8b949e">SOL Re-entry Split</div><div class="cell">50%</div><div class="cell">50%</div><div class="cell">30%</div><div class="cell">20%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Harvest Interval</div><div class="cell">7 days</div><div class="cell">4 days</div><div class="cell">2 days</div><div class="cell">1 day</div>
     <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC on Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
-  </div>
+  </div></div>
   <div style="font-size:11px;color:#8b949e">Ranging = tight, max fees. Trending = wider, less risk. Extreme = widest, minimal exposure.</div>
 </div>
 
@@ -1417,7 +1470,7 @@ proxToUpper = (price - centre) / halfWidth
 
 Downside: proxToLower &#x2265; threshold &#x2192; close + reopen at current price
 Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch</div>
-  <table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:12px">
+  <div class="table-wrap"><table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:12px">
     <tr style="border-bottom:1px solid #21262d">
       <th style="text-align:left;padding:6px 8px;color:#8b949e">Regime</th>
       <th style="text-align:center;padding:6px 8px;color:#f97316">Downside Threshold</th>
@@ -1443,7 +1496,7 @@ Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch</
       <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">50%</td>
       <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">80%</td>
     </tr>
-  </table>
+  </table></div>
   <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
     <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: T1_DOWNSIDE trigger</div>
     <div style="color:#c9d1d9">Position range: $84.62 &#x2014; $85.89, centre = $85.26, halfWidth = $0.64</div>
@@ -1570,7 +1623,7 @@ Slippage tolerance: 2%. Swap uses the same Orca SOL/USDC pool.
     Unlike traditional AMMs (liquidity spread $0 to &#x221E;), concentrated liquidity focuses your capital in a <b>specific price range</b>.
     Higher fee yield per $, but you must actively manage the range.
   </p>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <div class="adv-risks">
     <div style="background:#0d1117;border-radius:6px;padding:12px">
       <div style="color:#22c55e;font-weight:bold;font-size:12px;margin-bottom:4px">Advantages</div>
       <ul style="font-size:11px;color:#c9d1d9;padding-left:16px;line-height:1.6">
@@ -1613,15 +1666,15 @@ function renderStatusHtml(checks: Array<{ name: string; description: string; sta
 
   const rows = checks.map(c => {
     const dot = c.status === 'ok' ? '#22c55e' : '#ef4444';
-    return `<div style="display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid #21262d">
-      <div style="min-width:12px;padding-top:3px"><div class="dot" style="background:${dot}"></div></div>
-      <div style="flex:1">
-        <div style="display:flex;justify-content:space-between;align-items:center">
+    return `<div style="display:flex;align-items:flex-start;gap:12px;padding:14px 0;border-bottom:1px solid #21262d">
+      <div style="min-width:12px;padding-top:3px;flex-shrink:0"><div class="dot" style="background:${dot}"></div></div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <div style="font-weight:bold;font-size:13px;color:#c9d1d9">${c.name}</div>
           <div style="font-size:10px;color:#8b949e">${new Date(c.lastChecked).toLocaleTimeString('en-US', { hour12: false })}</div>
         </div>
         <div style="font-size:11px;color:#8b949e;margin-top:2px">${c.description}</div>
-        <div style="font-size:12px;color:${c.status === 'ok' ? '#c9d1d9' : '#ef4444'};margin-top:4px;font-family:monospace">${c.detail}</div>
+        <div style="font-size:12px;color:${c.status === 'ok' ? '#c9d1d9' : '#ef4444'};margin-top:4px;font-family:monospace;word-break:break-word">${c.detail}</div>
       </div>
     </div>`;
   }).join('');

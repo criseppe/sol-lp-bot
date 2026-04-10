@@ -106,12 +106,12 @@ async function generateAndSend(
 <!DOCTYPE html>
 <html>
 <head><style>
-  body { font-family: 'SF Mono', Menlo, monospace; font-size: 13px; background: #0d1117; color: #c9d1d9; padding: 20px; }
+  body { font-family: 'SF Mono', Menlo, monospace; font-size: 13px; background: #0d1117; color: #c9d1d9; padding: 20px; margin: 0; -webkit-text-size-adjust: 100%; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-  .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; }
-  .label { color: #8b949e; }
-  .value { font-weight: bold; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; gap: 8px; flex-wrap: wrap; }
+  .label { color: #8b949e; flex-shrink: 0; }
+  .value { font-weight: bold; text-align: right; word-break: break-word; }
   .green { color: #22c55e; } .red { color: #ef4444; } .amber { color: #eab308; } .blue { color: #58a6ff; }
   .issue { background: #1c1917; border-left: 3px solid #ef4444; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
   .suggestion { background: #0c1f0c; border-left: 3px solid #22c55e; padding: 8px 12px; margin-bottom: 8px; font-size: 12px; }
@@ -120,6 +120,12 @@ async function generateAndSend(
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: #8b949e; padding: 4px; font-size: 11px; border-bottom: 1px solid #30363d; }
   td { padding: 4px; font-size: 12px; border-bottom: 1px solid #21262d; }
+  @media screen and (max-width: 600px) {
+    body { padding: 8px; font-size: 12px; }
+    .card { padding: 12px; }
+    .row { font-size: 12px; }
+    table { font-size: 11px; }
+  }
 </style></head>
 <body>
 <div style="text-align:center;margin-bottom:20px">

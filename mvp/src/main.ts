@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { Connection } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { WhirlpoolContext, ORCA_WHIRLPOOL_PROGRAM_ID } from '@orca-so/whirlpools-sdk';
 import { OracleService } from './data/oracle.js';
 import { PoolService } from './data/pool.js';
 import { PaperTradingEngine } from './paper/ledger.js';
@@ -12,7 +13,7 @@ import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine/regime.js';
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, getDownsideReentrySplit, isHarvestDue } from './engine/rules.js';
-import { REENTRY, RISK } from './constants.js';
+import { REENTRY, RISK, MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
@@ -191,7 +192,6 @@ async function main() {
       try {
         const pos = JSON.parse(savedState.position_json);
         if (pos?.positionMint) {
-          const { PublicKey } = await import('@solana/web3.js');
           liveExecutor.setCurrentPosition({
             ...pos,
             positionMint: new PublicKey(pos.positionMint),
@@ -207,6 +207,99 @@ async function main() {
         }
       } catch {
         console.log(JSON.stringify({ level: 'warn', msg: 'could not restore live position', timestamp: Date.now() }));
+      }
+    }
+
+    // Orphaned position recovery: if DB says no position, scan on-chain for any open positions
+    if (!liveExecutor.getCurrentPosition()) {
+      try {
+        console.log(JSON.stringify({ level: 'info', msg: 'scanning for orphaned on-chain positions...', timestamp: Date.now() }));
+        const tokenAccounts = await conn.getParsedTokenAccountsByOwner(wallet.publicKey, {
+          programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        });
+
+        const orphanMints: PublicKey[] = [];
+        for (const { account } of tokenAccounts.value) {
+          const info = account.data.parsed.info;
+          const mint = info.mint as string;
+          const amount = info.tokenAmount.uiAmount as number;
+          if (amount === 1 && info.tokenAmount.decimals === 0 && mint !== MINTS.SOL && mint !== MINTS.USDC) {
+            const mintPk = new PublicKey(mint);
+            const [posAddr] = PublicKey.findProgramAddressSync(
+              [Buffer.from('position'), mintPk.toBuffer()],
+              ORCA_WHIRLPOOL_PROGRAM_ID,
+            );
+            const accInfo = await conn.getAccountInfo(posAddr);
+            if (accInfo && accInfo.owner.equals(ORCA_WHIRLPOOL_PROGRAM_ID)) {
+              orphanMints.push(mintPk);
+            }
+          }
+        }
+
+        if (orphanMints.length > 0) {
+          console.log(JSON.stringify({ level: 'warn', msg: `found ${orphanMints.length} orphaned position(s), recovering...`, mints: orphanMints.map(m => m.toBase58()), timestamp: Date.now() }));
+          const { buildWhirlpoolClient: bwc, PriceMath: PM } = await import('@orca-so/whirlpools-sdk');
+          const { Percentage: Pct } = await import('@orca-so/common-sdk');
+          const recoveryCtx = WhirlpoolContext.from(conn, wallet, ORCA_WHIRLPOOL_PROGRAM_ID);
+          const recoveryClient = bwc(recoveryCtx);
+          const whirlpool = await recoveryClient.getPool(new PublicKey(WHIRLPOOL_ADDRESS));
+          const poolData = whirlpool.getData();
+          const price = PM.sqrtPriceX64ToPrice(poolData.sqrtPrice, 9, 6).toNumber();
+          const slippage = Pct.fromFraction(2, 100);
+
+          const solBefore = await conn.getBalance(wallet.publicKey) / 1e9;
+          const usdcAtaBefore = await (async () => { try { const { getAssociatedTokenAddress: gata, getAccount: ga } = await import('@solana/spl-token'); const ata = await gata(new PublicKey(MINTS.USDC), wallet.publicKey); return Number((await ga(conn, ata)).amount) / 1e6; } catch { return 0; } })();
+
+          for (const mint of orphanMints) {
+            const [posAddr] = PublicKey.findProgramAddressSync(
+              [Buffer.from('position'), mint.toBuffer()],
+              ORCA_WHIRLPOOL_PROGRAM_ID,
+            );
+            try {
+              const position = await recoveryClient.getPosition(posAddr);
+              const posData = position.getData();
+              const priceLower = PM.tickIndexToPrice(posData.tickLowerIndex, 9, 6).toNumber();
+              const priceUpper = PM.tickIndexToPrice(posData.tickUpperIndex, 9, 6).toNumber();
+              console.log(JSON.stringify({ level: 'info', msg: `closing orphan: ${mint.toBase58().slice(0, 12)}... range $${priceLower.toFixed(2)}-$${priceUpper.toFixed(2)}, liq=${posData.liquidity.toString()}`, timestamp: Date.now() }));
+
+              const txBuilders = await whirlpool.closePosition(posAddr, slippage, wallet.publicKey, wallet.publicKey, wallet.publicKey);
+              for (const txb of txBuilders) {
+                const sig = await txb.buildAndExecute();
+                liveExecutor.txCount++;
+                console.log(JSON.stringify({ level: 'info', msg: `orphan close tx: ${sig.slice(0, 20)}...`, timestamp: Date.now() }));
+                await new Promise(r => setTimeout(r, 2000));
+              }
+
+              console.log(JSON.stringify({ level: 'info', msg: `orphan ${mint.toBase58().slice(0, 12)}... closed successfully`, timestamp: Date.now() }));
+            } catch (err) {
+              console.log(JSON.stringify({ level: 'error', msg: `failed to close orphan ${mint.toBase58().slice(0, 12)}...`, error: String(err), timestamp: Date.now() }));
+            }
+          }
+
+          // Log recovery
+          await new Promise(r => setTimeout(r, 2000));
+          const solAfter = await conn.getBalance(wallet.publicKey) / 1e9;
+          const usdcAtaAfter = await (async () => { try { const { getAssociatedTokenAddress: gata, getAccount: ga } = await import('@solana/spl-token'); const ata = await gata(new PublicKey(MINTS.USDC), wallet.publicKey); return Number((await ga(conn, ata)).amount) / 1e6; } catch { return 0; } })();
+          const recoveredUsdc = (solAfter - solBefore) * price + (usdcAtaAfter - usdcAtaBefore);
+          console.log(JSON.stringify({ level: 'info', msg: `orphan recovery complete: recovered ${(solAfter - solBefore).toFixed(4)} SOL + ${(usdcAtaAfter - usdcAtaBefore).toFixed(2)} USDC (~$${recoveredUsdc.toFixed(2)})`, timestamp: Date.now() }));
+
+          insertRebalanceEvent(db, {
+            timestamp: Date.now(), eventType: 'POSITION_CLOSED', price, regime: liveRegime,
+            note: `ORPHAN RECOVERY: Found ${orphanMints.length} position(s) not tracked by DB. Closed and recovered ~$${recoveredUsdc.toFixed(2)} to wallet.`,
+            solBefore: solBefore, usdcBefore: usdcAtaBefore, solAfter, usdcAfter: usdcAtaAfter,
+            feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+          });
+          insertDecisionLog(db, {
+            timestamp: Date.now(), price, regime: liveRegime, bot_state: 'IDLE',
+            prox_lower: null, prox_upper: null, in_range: null,
+            decision: 'ORPHAN_RECOVERY', reasoning: `Detected ${orphanMints.length} on-chain position(s) not in DB. Closed all and recovered ~$${recoveredUsdc.toFixed(2)}. Mints: ${orphanMints.map(m => m.toBase58().slice(0, 12)).join(', ')}`,
+            params_json: null,
+          });
+        } else {
+          console.log(JSON.stringify({ level: 'info', msg: 'no orphaned positions found', timestamp: Date.now() }));
+        }
+      } catch (err) {
+        console.log(JSON.stringify({ level: 'warn', msg: `orphan scan failed (non-fatal): ${String(err)}`, timestamp: Date.now() }));
       }
     }
   }
