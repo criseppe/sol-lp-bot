@@ -743,27 +743,39 @@ ${NAV_HTML}
         ${entryPos !== null ? `<div style="position:absolute;top:0;width:3px;height:100%;background:#a855f7;left:${entryPos}%" title="Entry: $${fmt(live.entryPrice!)}"></div>` : ''}
         <div class="range-cursor" style="left:${cursorPos}%"></div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:10px;margin-top:6px">
-        <span><span style="display:inline-block;width:8px;height:8px;background:#f0883e;border-radius:2px;margin-right:3px"></span>Current: $${fmt(live.solPrice)}</span>
-        ${live.entryPrice ? `<span><span style="display:inline-block;width:8px;height:8px;background:#a855f7;border-radius:2px;margin-right:3px"></span>Entry: $${fmt(live.entryPrice)}</span>` : '<span></span>'}
-        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #f97316;margin-right:3px;vertical-align:middle"></span>Down: $${fmt(downsidePrice)}</span>
-        <span><span style="display:inline-block;width:8px;height:2px;border-top:2px dashed #58a6ff;margin-right:3px;vertical-align:middle"></span>Up: $${fmt(upsidePrice)}</span>
-      </div>
-      <div style="display:flex;gap:12px;font-size:10px;margin-top:6px;color:#8b949e;flex-wrap:wrap">
-        <span>Prox &#x25BC; <b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b>/${downThreshPct}%</span>
-        <span>Prox &#x25B2; <b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b>/${upThreshPct}%</span>
-        <span>(${live.regime})</span>
-      </div>
-      ${(() => {
-        let entryStr = '';
-        if (live.entryPrice) {
-          entryStr = `<span style="color:#a855f7;font-size:10px">At entry: ${fmt(live.entrySol ?? 0)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</span>`;
-        }
-        return `<div style="margin-top:6px;display:flex;flex-direction:column;gap:2px;font-size:10px">
-          <span style="color:#f0883e">Now: ${fmt(live.positionSol)} SOL + ${fmt(live.positionUsdc)} USDC</span>
-          ${entryStr}
-        </div>`;
-      })()}`;
+      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:10px">
+        <tbody>
+          <tr style="border-bottom:1px solid #21262d">
+            <td style="padding:6px 8px;color:#8b949e">Current</td>
+            <td style="padding:6px 8px;color:#f0883e;font-weight:bold">$${fmt(live.solPrice)}</td>
+            <td style="padding:6px 8px;color:#8b949e">Prox &#x25BC;</td>
+            <td style="padding:6px 8px"><b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b><span style="color:#8b949e">/${downThreshPct}%</span></td>
+          </tr>
+          <tr style="border-bottom:1px solid #21262d">
+            <td style="padding:6px 8px;color:#8b949e">Entry</td>
+            <td style="padding:6px 8px;color:#a855f7;font-weight:bold">${live.entryPrice ? `$${fmt(live.entryPrice)}` : '--'}</td>
+            <td style="padding:6px 8px;color:#8b949e">Prox &#x25B2;</td>
+            <td style="padding:6px 8px"><b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b><span style="color:#8b949e">/${upThreshPct}%</span></td>
+          </tr>
+          <tr style="border-bottom:1px solid #21262d">
+            <td style="padding:6px 8px;color:#8b949e">Down</td>
+            <td style="padding:6px 8px;color:#f97316">$${fmt(downsidePrice)}</td>
+            <td style="padding:6px 8px;color:#8b949e">Regime</td>
+            <td style="padding:6px 8px;color:#c9d1d9;font-weight:bold">${live.regime}</td>
+          </tr>
+          <tr style="border-bottom:1px solid #21262d">
+            <td style="padding:6px 8px;color:#8b949e">Up</td>
+            <td style="padding:6px 8px;color:#58a6ff">$${fmt(upsidePrice)}</td>
+            <td style="padding:6px 8px;color:#8b949e">Now</td>
+            <td style="padding:6px 8px;color:#f0883e">${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc)} USDC</td>
+          </tr>
+          ${live.entryPrice ? `<tr>
+            <td colspan="2"></td>
+            <td style="padding:6px 8px;color:#8b949e">At entry</td>
+            <td style="padding:6px 8px;color:#a855f7">${fmt(live.entrySol ?? 0, 4)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</td>
+          </tr>` : ''}
+        </tbody>
+      </table>`;
   }
 
   // Events — each event is a full card with description
