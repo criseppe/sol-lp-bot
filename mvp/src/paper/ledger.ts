@@ -128,7 +128,7 @@ export class PaperTradingEngine {
       }
 
       // Run bot logic
-      const eventType = this.runBotCycle(price, db);
+      const eventType = this.runBotCycle(price, db, poolState.feeRate);
 
       // Run naive logic
       this.runNaiveCycle(price);
@@ -199,7 +199,7 @@ export class PaperTradingEngine {
     }
   }
 
-  private runBotCycle(price: number, db: Database.Database): EventType {
+  private runBotCycle(price: number, db: Database.Database, feeRate = 3000): EventType {
     const now = Date.now();
 
     // Step 1: If HALTED, return early
@@ -314,7 +314,7 @@ export class PaperTradingEngine {
     // Step 7: Fee harvest
     if (this.bot.openPosition && isHarvestDue(this.lastHarvestTime, params, now)) {
       const daysHeld = (now - this.bot.openPosition.entryTime) / 86400_000;
-      const harvest = calcHarvestFees(this.bot.openPosition, price, daysHeld);
+      const harvest = calcHarvestFees(this.bot.openPosition, price, daysHeld, undefined, undefined, feeRate);
       this.bot.cumFeesSol += harvest.solFees / price; // convert to SOL
       this.bot.cumFeesUsdc += harvest.usdcFees;
       this.lastHarvestTime = now;

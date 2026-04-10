@@ -9,7 +9,7 @@ const identity = (p: number) => Math.round(p * 100);
 let db: Database.Database;
 
 function makePoolState(tick = 100): PoolState {
-  return { tickCurrentIndex: tick, sqrtPriceX64: '0', liquidity: '0', lastUpdated: Date.now() };
+  return { tickCurrentIndex: tick, sqrtPriceX64: '0', liquidity: '0', feeRate: 3000, lastUpdated: Date.now() };
 }
 
 function seedHistory(db: Database.Database, days: number, basePrice: number) {

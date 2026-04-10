@@ -53,6 +53,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 100,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -66,6 +67,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 50,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -79,6 +81,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 150,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -92,6 +95,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 49,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -105,6 +109,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 151,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -120,6 +125,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 100,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now(),
       };
       (service as any).lastFetchTime = Date.now();
@@ -135,6 +141,7 @@ describe('PoolService', () => {
         tickCurrentIndex: 100,
         sqrtPriceX64: '0',
         liquidity: '0',
+        feeRate: 3000,
         lastUpdated: Date.now() - 11_000,
       };
       (service as any).lastFetchTime = Date.now() - 11_000;

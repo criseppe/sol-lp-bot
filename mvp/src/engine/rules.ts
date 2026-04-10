@@ -125,11 +125,13 @@ export function calcHarvestFees(
   daysHeld: number,
   poolDailyVolume = EST_POOL_DAILY_VOLUME,
   poolTvl = EST_POOL_TVL,
+  feeRate = 3000,
 ): HarvestEstimate {
-  const feeTier = 0.0005;
+  const feePct = feeRate / 1_000_000; // e.g. 3000 → 0.003 (0.30%)
   const positionValue = position.solAmount * currentPrice + position.usdcAmount;
+  if (poolTvl <= 0) return { solFees: 0, usdcFees: 0, totalUsdcValue: 0 };
   const positionShare = positionValue / poolTvl;
-  const dailyFees = positionShare * poolDailyVolume * feeTier;
+  const dailyFees = positionShare * poolDailyVolume * feePct;
   const totalFees = dailyFees * daysHeld;
   const solFees = totalFees * 0.5;
   const usdcFees = totalFees * 0.5;

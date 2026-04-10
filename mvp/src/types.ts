@@ -34,6 +34,7 @@ export interface PoolState {
   tickCurrentIndex: number;
   sqrtPriceX64: string;
   liquidity: string;
+  feeRate: number;         // on-chain feeRate (e.g. 3000 = 0.30%)
   lastUpdated: number;
 }
 

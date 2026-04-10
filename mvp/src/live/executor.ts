@@ -491,7 +491,7 @@ export class LiveExecutor {
     }
   }
 
-  async getEstimatedYield24h(): Promise<{ dailyFeesUsdc: number; aprPct: number } | null> {
+  async getEstimatedYield24h(dailyVolume?: number): Promise<{ dailyFeesUsdc: number; aprPct: number } | null> {
     if (!this.currentPosition) return null;
     try {
       const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
@@ -506,21 +506,16 @@ export class LiveExecutor {
                       poolData.tickCurrentIndex <= this.currentPosition.tickUpper;
       if (!inRange) return { dailyFeesUsdc: 0, aprPct: 0 };
 
-      // Fee rate: poolData.feeRate is in hundredths of a basis point
-      // e.g. 500 = 0.05% = 5 bps
+      // Fee rate from on-chain data (e.g. 3000 = 0.30%)
       const feeRatePct = poolData.feeRate / 1_000_000;
 
       // Position's share of pool liquidity at current tick
-      // Pool liquidity = active liquidity at current tick
       const poolLiquidity = poolData.liquidity;
       const posLiquidity = posData.liquidity;
       const liquidityShare = poolLiquidity.isZero() ? 0 : posLiquidity.toNumber() / poolLiquidity.toNumber();
 
-      // Estimate daily volume from the pool
-      // We use a conservative estimate based on typical SOL/USDC pool volume
-      // The Orca SOL/USDC whirlpool typically does $50M-500M/day
-      // For a more accurate estimate, we'd need historical volume data
-      const estDailyVolume = 100_000_000; // $100M conservative estimate
+      // Use real daily volume from Orca API if available, fallback to estimate
+      const estDailyVolume = dailyVolume ?? 100_000_000;
 
       const dailyFeesUsdc = liquidityShare * estDailyVolume * feeRatePct;
 

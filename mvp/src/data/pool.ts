@@ -47,6 +47,7 @@ export class PoolService {
         tickCurrentIndex: data.tickCurrentIndex,
         sqrtPriceX64: data.sqrtPrice.toString(),
         liquidity: data.liquidity.toString(),
+        feeRate: data.feeRate ?? 0,
         lastUpdated: now,
       };
       this.lastFetchTime = now;
