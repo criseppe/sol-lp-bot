@@ -32,8 +32,8 @@ export async function getWalletBalances(
   return { sol, usdc, totalUsdc: 0, solPrice: 0 }; // totalUsdc filled by caller
 }
 
-export function validateWalletForLive(sol: number, usdc: number, maxCapitalUsdc: number): void {
-  const estimatedTotal = sol * 150 + usdc; // rough estimate
+export function validateWalletForLive(sol: number, usdc: number, maxCapitalUsdc: number, solPrice = 150): void {
+  const estimatedTotal = sol * solPrice + usdc;
   if (estimatedTotal > maxCapitalUsdc) {
     throw new Error(
       `Wallet balance (~$${estimatedTotal.toFixed(0)}) exceeds safety cap ($${maxCapitalUsdc}). ` +

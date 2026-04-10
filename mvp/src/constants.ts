@@ -70,7 +70,7 @@ export const RISK = {
 // Rule 3 re-entry config
 export const REENTRY = {
   PULLBACK_THRESHOLD_PCT:    2.5,
-  TIMEOUT_HOURS:             0.083,  // ~5 minutes (for testing)
+  TIMEOUT_HOURS:             4,      // 4 hours before timeout re-entry
   FLASH_CRASH_PCT:           5,     // single candle drop
   FLASH_CRASH_WAIT_MINUTES:  15,
 } as const;

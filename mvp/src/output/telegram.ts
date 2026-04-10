@@ -26,9 +26,8 @@ export function startTelegramReporter(
   };
 
   const scheduleNext = (delayMs: number) => {
-    timer = setTimeout(async () => {
-      await send();
-      scheduleNext(config.intervalMs);
+    timer = setTimeout(() => {
+      send().finally(() => scheduleNext(config.intervalMs));
     }, delayMs);
   };
 

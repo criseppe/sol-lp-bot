@@ -152,7 +152,7 @@ async function main() {
       timestamp: Date.now(),
     }));
 
-    validateWalletForLive(balances.sol, balances.usdc, MAX_LIVE_CAPITAL_USDC);
+    validateWalletForLive(balances.sol, balances.usdc, MAX_LIVE_CAPITAL_USDC, solPrice);
     liveExecutor = new LiveExecutor(conn, wallet, WHIRLPOOL_ADDRESS);
 
     // Read actual gas from blockchain on startup (always accurate)
@@ -336,8 +336,12 @@ async function main() {
   // ── DECISION LOOP ─────────────────────────────────────────────────────
 
   let lastEventType = '';
+  let cycleRunning = false;
+  let lastPruneTime = Date.now();
 
   const decisionLoop = setInterval(async () => {
+    if (cycleRunning) return;
+    cycleRunning = true;
     try {
       const price = oracle.getPrice();
       if (!price) return;
@@ -485,8 +489,19 @@ async function main() {
       });
 
       checkAndWriteDailyPnl(comparison);
+
+      // Prune old price ticks once per day
+      const now2 = Date.now();
+      if (now2 - lastPruneTime > 86400_000) {
+        lastPruneTime = now2;
+        const { pruneOldPriceTicks } = await import('./db/sqlite.js');
+        pruneOldPriceTicks(db, 30);
+        console.log(JSON.stringify({ level: 'info', msg: 'pruned price ticks older than 30 days', timestamp: now2 }));
+      }
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'cycle error', error: String(err), timestamp: Date.now() }));
+    } finally {
+      cycleRunning = false;
     }
   }, DECISION_INTERVAL_SECONDS * 1000);
 
@@ -750,13 +765,14 @@ async function runLiveCycle(price: number): Promise<void> {
   // Fee harvest
   if (isHarvestDue(liveLastHarvestTime, params, now)) {
     try {
+      const daysSinceHarvest = ((now - liveLastHarvestTime) / 86400_000).toFixed(1);
       const fees = await liveExecutor.collectFees();
       liveCumFeesSol += fees.feeSol;
       liveCumFeesUsdc += fees.feeUsdc;
       liveLastHarvestTime = now;
       insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
         prox_lower: null, prox_upper: null, in_range: null,
-        decision: 'FEE_HARVEST', reasoning: `Harvest due: ${((now - liveLastHarvestTime)/86400_000).toFixed(1)} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+        decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
         params_json: null });
       insertRebalanceEvent(db, {
         timestamp: now, eventType: 'FEE_HARVEST', price, regime: liveRegime,
@@ -786,7 +802,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   // The executor will quote by USDC first, then re-quote by SOL if SOL-limited
   // Pass the USDC portion of what we want to deploy (executor handles the SOL side)
   const deployUsdc = Math.min(deployTarget, balances.usdc - 1);
-  if (deployUsdc < 5 && balances.sol * price < 5) {
+  if (deployUsdc < 5 || balances.sol * price < 5) {
     console.log(JSON.stringify({ level: 'warn', msg: 'insufficient funds to open position', sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));
     return;
   }

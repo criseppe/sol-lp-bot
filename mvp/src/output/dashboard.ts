@@ -332,7 +332,7 @@ export function startDashboard(port: number): DashboardServer {
   }
 
   // Run health checks every 30 minutes
-  setInterval(() => { runHealthChecks().catch(() => {}); }, 30 * 60_000);
+  setInterval(() => { runHealthChecks().catch((err) => { console.log(JSON.stringify({ level: 'error', msg: 'health check error', error: String(err), timestamp: Date.now() })); }); }, 30 * 60_000);
 
   // Status page
   app.get('/status', async (_req, res) => {
@@ -453,6 +453,10 @@ export function startDashboard(port: number): DashboardServer {
       server.close();
     },
   };
+}
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function fmt(n: number, d = 2): string {
@@ -780,7 +784,7 @@ ${NAV_HTML}
         <span class="badge" style="background:${col}20;color:${col}">${e.eventType}</span>
         <span class="event-meta">${d} ${t} &middot; $${fmt(e.price)} &middot; ${e.regime}</span>
       </div>
-      <div class="event-desc">${(e.note || 'No description').replace(/\n/g, '<br/>')}</div>
+      <div class="event-desc">${escHtml(e.note || 'No description').replace(/\n/g, '<br/>')}</div>
       ${e.feeSol || e.feeUsdc ? `<div class="event-balances" style="color:#22c55e">Fees: ${fmt(e.feeSol, 6)} SOL + ${fmt(e.feeUsdc, 4)} USDC${e.ilAtClose ? ` | IL: $${fmt(e.ilAtClose, 4)}` : ''}</div>` : ''}
       ${e.solBefore || e.usdcBefore || e.solAfter || e.usdcAfter ? `<div class="event-balances">Before: ${fmt(e.solBefore, 4)} SOL / ${fmt(e.usdcBefore, 2)} USDC &rarr; After: ${fmt(e.solAfter, 4)} SOL / ${fmt(e.usdcAfter, 2)} USDC${!e.feeSol && !e.feeUsdc && e.ilAtClose ? ` | IL: $${fmt(e.ilAtClose, 4)}` : ''}</div>` : ''}
     </div>`;
@@ -1282,7 +1286,7 @@ ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
         <span class="badge" style="background:${col}20;color:${col}">${e.eventType}</span>
         <span style="color:#8b949e;font-size:11px">${t} &middot; $${fmt(e.price)} &middot; ${e.regime}</span>
       </div>
-      <div style="font-size:12px;color:#c9d1d9;line-height:1.5">${(e.note || 'No description').replace(/\n/g, '<br/>')}</div>
+      <div style="font-size:12px;color:#c9d1d9;line-height:1.5">${escHtml(e.note || 'No description').replace(/\n/g, '<br/>')}</div>
       ${e.solBefore || e.usdcBefore || e.solAfter || e.usdcAfter ? `<div style="font-size:11px;color:#8b949e;border-top:1px solid #21262d;padding-top:6px;margin-top:6px">Before: ${fmt(e.solBefore, 4)} SOL / ${fmt(e.usdcBefore, 2)} USDC &rarr; After: ${fmt(e.solAfter, 4)} SOL / ${fmt(e.usdcAfter, 2)} USDC</div>` : ''}
     </div>`;
   }).join('') : '<div class="card" style="text-align:center;color:#8b949e;padding:20px">No events yet</div>'}

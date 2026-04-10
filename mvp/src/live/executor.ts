@@ -17,7 +17,7 @@ import type { RangeBounds, Regime } from '../types.js';
 
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
-const SLIPPAGE = Percentage.fromFraction(2, 100); // 2% slippage
+const SLIPPAGE = Percentage.fromFraction(50, 10000); // 0.5% slippage
 
 export interface LivePosition {
   positionMint: PublicKey;
@@ -85,7 +85,7 @@ export class LiveExecutor {
     currentPrice: number,
     regime: Regime,
     usdcToDeposit: number,
-  ): Promise<LivePosition> {
+  ): Promise<LivePosition | null> {
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
 
     // Initialize tick arrays if needed
@@ -236,7 +236,7 @@ export class LiveExecutor {
         msg: `Cannot open position: SOL=${solAvailable.toFixed(4)}, USDC=${usdcAvailable.toFixed(2)}. No valid quote.`,
         timestamp: Date.now(),
       }));
-      return null as unknown as LivePosition;
+      return null;
     }
 
     const estSol = Number(quote.tokenEstA.toString()) / 1e9;
@@ -380,20 +380,18 @@ export class LiveExecutor {
   async collectFees(): Promise<{ feeSol: number; feeUsdc: number }> {
     if (!this.currentPosition) return { feeSol: 0, feeUsdc: 0 };
 
-    const solBefore = await this.getSolBalance();
-    const usdcBefore = await this.getUsdcBalance();
+    // Get expected fees via quote BEFORE collecting (balance delta is skewed by gas)
+    const pendingFees = await this.getPendingFees();
+    const expectedSol = pendingFees?.feeSolDecimal ?? 0;
+    const expectedUsdc = pendingFees?.feeUsdcDecimal ?? 0;
 
     const position = await this.client.getPosition(this.currentPosition.positionAddress, IGNORE_CACHE);
     const tx = await position.collectFees();
     await this.execTx(tx);
 
-    const solAfter = await this.getSolBalance();
-    const usdcAfter = await this.getUsdcBalance();
-
-    // Use collectFeesQuote to know expected fees (balance diff is skewed by gas)
     const result = {
-      feeSol: Math.max(0, solAfter - solBefore),
-      feeUsdc: Math.max(0, usdcAfter - usdcBefore),
+      feeSol: expectedSol,
+      feeUsdc: expectedUsdc,
     };
 
     console.log(JSON.stringify({

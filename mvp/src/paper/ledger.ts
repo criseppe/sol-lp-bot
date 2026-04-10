@@ -352,8 +352,9 @@ export class PaperTradingEngine {
       regime,
     };
 
+    const previousSolBalance = this.bot.solBalance;
     this.bot.solBalance = 0;
-    this.bot.usdcBalance = this.bot.solBalance * price + this.bot.usdcBalance - deploy.deployUsdc;
+    this.bot.usdcBalance = previousSolBalance * price + this.bot.usdcBalance - deploy.deployUsdc;
     this.bot.openPosition = position;
     this.bot.rebalanceCount++;
     this.rebalancesThisHour++;
@@ -412,13 +413,20 @@ export class PaperTradingEngine {
     currentPrice: number,
   ): { sol: number; usdc: number } {
     const totalValue = position.solAmount * currentPrice + position.usdcAmount;
+    if (currentPrice <= 0) {
+      return { sol: position.solAmount, usdc: position.usdcAmount };
+    }
     if (currentPrice <= position.priceLower) {
       return { sol: totalValue / currentPrice, usdc: 0 };
     }
     if (currentPrice >= position.priceUpper) {
       return { sol: 0, usdc: totalValue };
     }
-    const ratio = (currentPrice - position.priceLower) / (position.priceUpper - position.priceLower);
+    const rangeWidth = position.priceUpper - position.priceLower;
+    if (rangeWidth <= 0) {
+      return { sol: position.solAmount, usdc: position.usdcAmount };
+    }
+    const ratio = (currentPrice - position.priceLower) / rangeWidth;
     return {
       usdc: totalValue * ratio,
       sol: (totalValue * (1 - ratio)) / currentPrice,
@@ -502,9 +510,7 @@ export class PaperTradingEngine {
     let value = ledger.solBalance * currentPrice + ledger.usdcBalance;
     if (ledger.openPosition) {
       const comp = this.estimateCurrentComposition(ledger.openPosition, currentPrice);
-      value = comp.sol * currentPrice + comp.usdc;
-      // Add reserve
-      value += ledger.solBalance * currentPrice + ledger.usdcBalance;
+      value += comp.sol * currentPrice + comp.usdc;
     }
     value += ledger.cumFeesSol * currentPrice + ledger.cumFeesUsdc;
     return value;

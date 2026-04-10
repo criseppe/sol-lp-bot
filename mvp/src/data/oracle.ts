@@ -74,9 +74,19 @@ export class OracleService {
       return;
     }
 
+    // Validate price is positive
+    if (rawPrice <= 0 || !isFinite(rawPrice)) {
+      this.badPriceCount++;
+      console.log(JSON.stringify({
+        level: 'warn', msg: 'pyth price rejected', reason: `invalid price: ${rawPrice}`,
+        badPriceCount: this.badPriceCount, timestamp: Date.now(),
+      }));
+      return;
+    }
+
     // Validate confidence
     const confidencePct = (rawConf / rawPrice) * 100;
-    if (confidencePct > this.maxConfidencePct) {
+    if (!isFinite(confidencePct) || confidencePct > this.maxConfidencePct) {
       this.badPriceCount++;
       console.log(JSON.stringify({
         level: 'warn',

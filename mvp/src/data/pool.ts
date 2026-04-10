@@ -60,7 +60,11 @@ export class PoolService {
         error: String(err),
         timestamp: Date.now(),
       }));
-      if (this.cachedState) return this.cachedState;
+      if (this.cachedState) {
+        // Update lastFetchTime on error to prevent rapid retry loops
+        this.lastFetchTime = now;
+        return this.cachedState;
+      }
       throw err;
     }
   }

@@ -47,6 +47,9 @@ export function calcRange(
 export function calcProximity(currentPrice: number, position: PaperPosition): ProximityState {
   const centre = (position.priceLower + position.priceUpper) / 2;
   const halfWidth = (position.priceUpper - position.priceLower) / 2;
+  if (halfWidth <= 0) {
+    return { proxToLower: 0, proxToUpper: 0, inRange: false, centre };
+  }
   const proxToLower = Math.max(0, (centre - currentPrice) / halfWidth);
   const proxToUpper = Math.max(0, (currentPrice - centre) / halfWidth);
   const inRange = currentPrice >= position.priceLower && currentPrice <= position.priceUpper;
@@ -75,6 +78,7 @@ export function shouldReenterAfterUpside(
   watchStartTime: number,
   now: number,
 ): ReentryDecision {
+  if (peakPrice <= 0) return { should: true, reason: 'TIMEOUT' };
   const pullbackPct = ((peakPrice - currentPrice) / peakPrice) * 100;
   const hoursWaiting = (now - watchStartTime) / 3600000;
   if (pullbackPct >= REENTRY.PULLBACK_THRESHOLD_PCT) {
@@ -88,6 +92,7 @@ export function shouldReenterAfterUpside(
 
 export function isFlashCrash(prices: number[]): boolean {
   if (prices.length < 2) return false;
+  if (prices[0] <= 0) return false;
   const drop = ((prices[0] - prices[prices.length - 1]) / prices[0]) * 100;
   return drop >= REENTRY.FLASH_CRASH_PCT;
 }

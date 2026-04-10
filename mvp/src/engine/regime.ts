@@ -32,7 +32,10 @@ export function detectRegimeWithMetrics(prices: number[], trendThreshold = 0.35)
   let totalPath = 0;
   for (let i = 1; i <= last; i++) totalPath += Math.abs(prices[i] - prices[i - 1]);
   const dirRatio = totalPath === 0 ? 0 : netMove / totalPath;
-  const logReturns = prices.slice(1).map((p, i) => Math.log(p / prices[i]));
+  const logReturns = prices.slice(1).map((p, i) => {
+    if (prices[i] <= 0) return 0;
+    return Math.log(p / prices[i]);
+  });
   const realisedVol = stdDev(logReturns);
   return { regime, dirRatio, realisedVol, priceCount: prices.length };
 }
@@ -56,10 +59,13 @@ export function detectRegime(prices: number[], trendThreshold = 0.35): Regime {
   }
   const dirRatio = totalPath === 0 ? 0 : netMove / totalPath;
 
-  const logReturns = prices.slice(1).map((p, i) => Math.log(p / prices[i]));
+  const logReturns = prices.slice(1).map((p, i) => {
+    if (prices[i] <= 0) return 0;
+    return Math.log(p / prices[i]);
+  });
   const realisedVol = stdDev(logReturns);
 
-  if (realisedVol > 0.08) return 'EXTREME';
+  if (!isFinite(realisedVol) || realisedVol > 0.08) return 'EXTREME';
   if (dirRatio > trendThreshold) {
     return prices[last] > prices[0] ? 'BULLISH_TREND' : 'BEARISH_TREND';
   }
