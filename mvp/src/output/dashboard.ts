@@ -40,6 +40,27 @@ async function fetchRecentTransactions(rpcUrl: string, walletAddress: string, li
   }
 }
 
+export interface PoolStats {
+  tvlUsdc: number;
+  price: number;
+  feeRate: number;          // e.g. 3000 = 0.30%
+  volume24h: number;
+  volume7d: number;
+  volume30d: number;
+  fees24h: number;
+  fees7d: number;
+  fees30d: number;
+  yield24h: number;         // yieldOverTvl 24h
+  yield7d: number;
+  yield30d: number;
+  priceDelta24h: number;    // % change
+  volumeDelta24h: number;   // % change
+  tokenBalanceA: number;    // SOL in pool
+  tokenBalanceB: number;    // USDC in pool
+  tickSpacing: number;
+  lastFetched: number;
+}
+
 export interface LiveData {
   walletAddress: string;
   solBalance: number;
@@ -124,7 +145,50 @@ export function startDashboard(port: number): DashboardServer {
   let currentBotState: BotState = 'IDLE';
   let currentDailyPnl: DailyPnlRow[] = [];
   let currentLive: LiveData | null = null;
+  let poolStats: PoolStats | null = null;
+  let poolStatsFetchTime = 0;
+  const POOL_STATS_TTL = 5 * 60_000; // refresh every 5 minutes
   const startTime = Date.now();
+
+  async function fetchPoolStats(): Promise<void> {
+    const now = Date.now();
+    if (poolStats && now - poolStatsFetchTime < POOL_STATS_TTL) return;
+    const whirlpoolAddr = process.env.WHIRLPOOL_ADDRESS;
+    if (!whirlpoolAddr) return;
+    try {
+      const res = await fetch(`https://api.orca.so/v2/solana/pools/${whirlpoolAddr}`);
+      if (!res.ok) return;
+      const json = await res.json() as any;
+      const d = json.data;
+      if (!d) return;
+      const s24 = d.stats?.['24h'] ?? {};
+      const s7d = d.stats?.['7d'] ?? {};
+      const s30d = d.stats?.['30d'] ?? {};
+      poolStats = {
+        tvlUsdc: parseFloat(d.tvlUsdc) || 0,
+        price: parseFloat(d.price) || 0,
+        feeRate: d.feeRate ?? 0,
+        volume24h: parseFloat(s24.volume) || 0,
+        volume7d: parseFloat(s7d.volume) || 0,
+        volume30d: parseFloat(s30d.volume) || 0,
+        fees24h: parseFloat(s24.fees) || 0,
+        fees7d: parseFloat(s7d.fees) || 0,
+        fees30d: parseFloat(s30d.fees) || 0,
+        yield24h: parseFloat(s24.yieldOverTvl) || 0,
+        yield7d: parseFloat(s7d.yieldOverTvl) || 0,
+        yield30d: parseFloat(s30d.yieldOverTvl) || 0,
+        priceDelta24h: parseFloat(s24.priceDelta) || 0,
+        volumeDelta24h: parseFloat(s24.volumeDelta) || 0,
+        tokenBalanceA: (parseFloat(d.tokenBalanceA) || 0) / 1e9,
+        tokenBalanceB: (parseFloat(d.tokenBalanceB) || 0) / 1e6,
+        tickSpacing: d.tickSpacing ?? 0,
+        lastFetched: now,
+      };
+      poolStatsFetchTime = now;
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: 'pool stats fetch failed', error: String(err), timestamp: now }));
+    }
+  }
 
   app.get('/api/data', (_req, res) => {
     res.json({
@@ -352,10 +416,11 @@ export function startDashboard(port: number): DashboardServer {
   });
 
   // Live wallet page — reads events from DB for full history
-  app.get('/live', (_req, res) => {
+  app.get('/live', async (_req, res) => {
+    await fetchPoolStats();
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
-    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime));
+    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats));
   });
 
   // Bot control APIs
@@ -657,7 +722,7 @@ ${NAV_HTML}
 
 // ── Live page ─────────────────────────────────────────────────────────────
 
-function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number): string {
+function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null): string {
   const regimeColours: Record<string, string> = {
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
@@ -953,6 +1018,66 @@ ${NAV_HTML}
     ${rangeBarHtml}
     ${live.positionMint ? `<div style="font-size:11px;color:#8b949e;margin-top:8px">Position: <a href="https://solscan.io/token/${live.positionMint}" target="_blank" class="wallet-addr">${live.positionMint.slice(0, 12)}...</a> | Liquidity: ${live.positionLiquidity || '--'}</div>` : ''}
   </div>
+
+  ${pool ? `<div class="card full">
+    <h2>SOL/USDC Pool <span style="font-size:10px;color:#8b949e;font-weight:normal;text-transform:none;letter-spacing:0">(Orca Whirlpool &middot; tick ${pool.tickSpacing} &middot; ${(pool.feeRate / 10000).toFixed(2)}% fee)</span></h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:bold;color:#58a6ff">$${fmt(pool.tvlUsdc, 0)}</div>
+        <div style="font-size:10px;color:#8b949e">TVL</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:bold;color:#22c55e">$${fmt(pool.volume24h, 0)}</div>
+        <div style="font-size:10px;color:#8b949e">Volume 24h</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:22px;font-weight:bold;color:#eab308">${fmt(pool.yield24h * 365 * 100, 1)}%</div>
+        <div style="font-size:10px;color:#8b949e">APR (24h)</div>
+      </div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr>
+          <th style="text-align:left;padding:6px 8px;color:#8b949e;border-bottom:1px solid #30363d"></th>
+          <th style="text-align:right;padding:6px 8px;color:#8b949e;border-bottom:1px solid #30363d">24h</th>
+          <th style="text-align:right;padding:6px 8px;color:#8b949e;border-bottom:1px solid #30363d">7d</th>
+          <th style="text-align:right;padding:6px 8px;color:#8b949e;border-bottom:1px solid #30363d">30d</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid #21262d">
+          <td style="padding:6px 8px;color:#8b949e">Volume</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.volume24h, 0)}</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.volume7d, 0)}</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.volume30d, 0)}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #21262d">
+          <td style="padding:6px 8px;color:#8b949e">Fees</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.fees24h)}</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.fees7d)}</td>
+          <td style="padding:6px 8px;text-align:right">$${fmt(pool.fees30d)}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #21262d">
+          <td style="padding:6px 8px;color:#8b949e">Yield / TVL</td>
+          <td style="padding:6px 8px;text-align:right">${fmt(pool.yield24h * 100, 4)}%</td>
+          <td style="padding:6px 8px;text-align:right">${fmt(pool.yield7d * 100, 4)}%</td>
+          <td style="padding:6px 8px;text-align:right">${fmt(pool.yield30d * 100, 3)}%</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 8px;color:#8b949e">APR</td>
+          <td style="padding:6px 8px;text-align:right;color:#eab308;font-weight:bold">${fmt(pool.yield24h * 365 * 100, 1)}%</td>
+          <td style="padding:6px 8px;text-align:right;color:#eab308;font-weight:bold">${fmt(pool.yield7d * (365/7) * 100, 1)}%</td>
+          <td style="padding:6px 8px;text-align:right;color:#eab308;font-weight:bold">${fmt(pool.yield30d * (365/30) * 100, 1)}%</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="display:flex;gap:16px;margin-top:10px;font-size:11px;color:#8b949e;flex-wrap:wrap">
+      <span>Pool SOL: ${fmt(pool.tokenBalanceA, 2)}</span>
+      <span>Pool USDC: ${fmt(pool.tokenBalanceB, 0)}</span>
+      <span>Price 24h: <span style="color:${pool.priceDelta24h >= 0 ? '#22c55e' : '#ef4444'}">${pool.priceDelta24h >= 0 ? '+' : ''}${fmt(pool.priceDelta24h * 100, 2)}%</span></span>
+      <span>Vol 24h: <span style="color:${pool.volumeDelta24h >= 0 ? '#22c55e' : '#ef4444'}">${pool.volumeDelta24h >= 0 ? '+' : ''}${fmt(pool.volumeDelta24h * 100, 1)}%</span> vs prior</span>
+    </div>
+  </div>` : ''}
 
   <div class="card full">
     <h2>Bot Controls</h2>
