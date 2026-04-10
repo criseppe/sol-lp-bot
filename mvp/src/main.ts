@@ -389,10 +389,12 @@ async function main() {
           const posData = await liveExecutor.getPositionData();
           const posComp = await liveExecutor.getPositionComposition();
 
-          // Convert raw fee amounts to decimals (SOL=9 decimals, USDC=6 decimals)
-          const feesSolDecimal = posData?.feeOwedA ? Number(posData.feeOwedA) / 1e9 : 0;
-          const feesUsdcDecimal = posData?.feeOwedB ? Number(posData.feeOwedB) / 1e6 : 0;
-          const feesTotalUsdc = feesSolDecimal * price.price + feesUsdcDecimal;
+          // Real pending fees from on-chain fee growth data (collectFeesQuote)
+          const pendingFees = await liveExecutor.getPendingFees();
+          const pendingFeesSol = pendingFees?.feeSolDecimal ?? 0;
+          const pendingFeesUsdc = pendingFees?.feeUsdcDecimal ?? 0;
+          const pendingFeesTotal = pendingFees?.feeTotalUsdc ?? 0;
+          const totalFeesUsdc = pendingFeesTotal + liveCumFeesSol * price.price + liveCumFeesUsdc;
 
           // Position composition
           const positionSol = posComp?.sol ?? 0;
@@ -409,13 +411,6 @@ async function main() {
             ilUsdc = ilPct * totalWithPosition;
           }
 
-          // Real pending fees from on-chain data
-          const pendingFees = await liveExecutor.getPendingFees();
-          const pendingFeesSol = pendingFees?.feeSolDecimal ?? 0;
-          const pendingFeesUsdc = pendingFees?.feeUsdcDecimal ?? 0;
-          const pendingFeesTotal = pendingFees?.feeTotalUsdc ?? 0;
-          const totalFeesUsdc = pendingFeesTotal + liveCumFeesSol * price.price + liveCumFeesUsdc;
-
           const liveDataUpdate: LiveData = {
             walletAddress: wallet.publicKey.toBase58(),
             solBalance: balances.sol,
@@ -425,8 +420,8 @@ async function main() {
             positionMint: livePos?.positionMint.toBase58() ?? null,
             positionRange: posData ? { lower: posData.priceLower, upper: posData.priceUpper } : null,
             positionLiquidity: posData?.liquidity ?? null,
-            feeOwedSol: posData?.feeOwedA ?? null,
-            feeOwedUsdc: posData?.feeOwedB ?? null,
+            feeOwedSol: pendingFeesSol > 0 ? pendingFeesSol.toString() : null,
+            feeOwedUsdc: pendingFeesUsdc > 0 ? pendingFeesUsdc.toString() : null,
             positionSol,
             positionUsdc,
             positionValueUsdc,
@@ -458,8 +453,8 @@ async function main() {
             sol_balance: balances.sol,
             usdc_balance: balances.usdc,
             total_value_usdc: walletValueUsdc,
-            pending_fees_sol: feesSolDecimal,
-            pending_fees_usdc: feesUsdcDecimal,
+            pending_fees_sol: pendingFeesSol,
+            pending_fees_usdc: pendingFeesUsdc,
             cum_fees_sol: liveCumFeesSol,
             cum_fees_usdc: liveCumFeesUsdc,
             il_usdc: ilUsdc,
