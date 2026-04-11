@@ -4,7 +4,7 @@ import { WhirlpoolContext, ORCA_WHIRLPOOL_PROGRAM_ID } from '@orca-so/whirlpools
 import { OracleService } from './data/oracle.js';
 import { PoolService } from './data/pool.js';
 import { PaperTradingEngine } from './paper/ledger.js';
-import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData } from './db/sqlite.js';
+import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled } from './db/sqlite.js';
 import { printCycle, printEvent } from './output/terminal.js';
 import { startDashboard } from './output/dashboard.js';
 import { LiveExecutor, type LivePosition } from './live/executor.js';
@@ -12,7 +12,7 @@ import { startTelegramReporter } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine/regime.js';
-import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, getDownsideReentrySplit, isHarvestDue } from './engine/rules.js';
+import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
 import { REENTRY, RISK, MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 
@@ -44,6 +44,10 @@ const PYTH_MAX_CONFIDENCE_PCT = parseFloat(process.env.PYTH_MAX_CONFIDENCE_PCT ?
 const PYTH_MAX_STALENESS_SECONDS = parseInt(process.env.PYTH_MAX_STALENESS_SECONDS ?? '60');
 const MAX_LIVE_CAPITAL_USDC = parseFloat(process.env.MAX_LIVE_CAPITAL_USDC ?? '150');
 const RANGE_WIDTH_OVERRIDE = process.env.RANGE_WIDTH_OVERRIDE ? parseFloat(process.env.RANGE_WIDTH_OVERRIDE) : null;
+const MIN_IDLE_USDC = parseFloat(process.env.MIN_IDLE_USDC ?? '5');
+const MIN_IDLE_SOL = parseFloat(process.env.MIN_IDLE_SOL ?? '0.05');
+const MIN_DEPLOY_USDC = parseFloat(process.env.MIN_DEPLOY_USDC ?? '10');
+const DEPLOY_RATIO_TOLERANCE = parseFloat(process.env.DEPLOY_RATIO_TOLERANCE ?? '0.02');
 
 // ── 2. INIT DATABASE ──────────────────────────────────────────────────────
 
@@ -91,6 +95,7 @@ let livePullbackPeak = 0;
 let livePullbackStart = 0;
 let liveLastHarvestTime = Date.now();
 let liveLastRegimeCheck = 0;
+let liveLastRegimeEvalLog = 0;
 let liveRebalancesThisHour = 0;
 let liveRebalanceHourStart = Date.now();
 let liveCumFeesSol = savedState?.cum_fees_sol ?? 0;
@@ -101,12 +106,29 @@ if (liveCumFeesSol || liveCumFeesUsdc || liveRealizedIl) {
 }
 let lastHoldLogTime = 0;
 let currentLiveData: LiveData | null = null;
+let liveLastAutoDeployTime = 0;
+let liveLastAutoDeployCheck = 0;
+let liveLastHarvestCheck = 0;
+let autoDeployEnabled = true; // will be loaded from DB
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
 const oracle = new OracleService(PYTH_SOL_USD_FEED, PYTH_MAX_CONFIDENCE_PCT, PYTH_MAX_STALENESS_SECONDS);
 const dashboard = startDashboard(DASHBOARD_PORT);
 dashboard.setDb(db);
+
+// Load Rule 2 toggle state from DB
+let rule2Enabled = getRuleEnabled(db, 'rule2');
+dashboard.setRule2Enabled(rule2Enabled);
+
+// Load auto-deploy toggle state from DB
+autoDeployEnabled = getRuleEnabled(db, 'autoDeploy');
+dashboard.setAutoDeployEnabled(autoDeployEnabled);
+
+// Wrapper to auto-tag rebalance events with rule2 state
+function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1]) {
+  insertRebalanceEvent(db_, { ...event, rule2Active: rule2Enabled ? 1 : 0 });
+}
 
 // ── MAIN ──────────────────────────────────────────────────────────────────
 
@@ -174,7 +196,7 @@ async function main() {
 
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
-      insertRebalanceEvent(db, {
+      insertRebalanceEventWithRule2(db, {
         timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: currentLiveData?.solPrice ?? 0, regime: liveRegime,
         note: `SWAP: ${event.reason}`,
         solBefore: 0, usdcBefore: event.fromAmount, solAfter: event.toAmount, usdcAfter: 0,
@@ -283,7 +305,7 @@ async function main() {
           const recoveredUsdc = (solAfter - solBefore) * price + (usdcAtaAfter - usdcAtaBefore);
           console.log(JSON.stringify({ level: 'info', msg: `orphan recovery complete: recovered ${(solAfter - solBefore).toFixed(4)} SOL + ${(usdcAtaAfter - usdcAtaBefore).toFixed(2)} USDC (~$${recoveredUsdc.toFixed(2)})`, timestamp: Date.now() }));
 
-          insertRebalanceEvent(db, {
+          insertRebalanceEventWithRule2(db, {
             timestamp: Date.now(), eventType: 'POSITION_CLOSED', price, regime: liveRegime,
             note: `ORPHAN RECOVERY: Found ${orphanMints.length} position(s) not tracked by DB. Closed and recovered ~$${recoveredUsdc.toFixed(2)} to wallet.`,
             solBefore: solBefore, usdcBefore: usdcAtaBefore, solAfter, usdcAfter: usdcAtaAfter,
@@ -438,8 +460,8 @@ async function main() {
             cumHarvestedFeesUsdc: liveCumFeesUsdc,
             totalFeesUsdc,
             entryPrice: livePos?.entryPrice ?? null,
-            entrySol: positionSol,
-            entryUsdc: positionUsdc,
+            entrySol: livePos?.entrySol ?? positionSol,
+            entryUsdc: livePos?.entryUsdc ?? positionUsdc,
             ilUsdc,
             realizedIlUsdc: liveRealizedIl,
             ...(() => { const g = liveExecutor!.getGasStats(price.price); return { gasSol: g.gasSol, gasUsdc: g.gasUsdc, txCount: g.txCount }; })(),
@@ -534,6 +556,50 @@ async function main() {
         params_json: null });
     });
 
+    dashboard.onToggleRule2((enabled) => {
+      rule2Enabled = enabled;
+      setRuleEnabled(db, 'rule2', enabled);
+      const action = enabled ? 'ENABLED' : 'DISABLED';
+      console.log(JSON.stringify({ level: 'info', msg: `Rule 2 (proximity exit) ${action} from dashboard`, timestamp: Date.now() }));
+      insertDecisionLog(db, { timestamp: Date.now(), price: 0, regime: liveRegime, bot_state: liveBotState,
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: `RULE2_${action}`, reasoning: `Rule 2 (proximity early exit) ${action.toLowerCase()} from dashboard. ${enabled ? 'Positions will now exit early based on proximity thresholds.' : 'Positions will only close when fully out of range (OOR).'}`,
+        params_json: null });
+    });
+
+    dashboard.onToggleAutoDeploy((enabled) => {
+      autoDeployEnabled = enabled;
+      setRuleEnabled(db, 'autoDeploy', enabled);
+      const action = enabled ? 'ENABLED' : 'DISABLED';
+      console.log(JSON.stringify({ level: 'info', msg: `Auto Capital Deploy ${action} from dashboard`, timestamp: Date.now() }));
+      insertDecisionLog(db, { timestamp: Date.now(), price: 0, regime: liveRegime, bot_state: liveBotState,
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: `AUTODEPLOY_${action}`, reasoning: `Auto capital deployment ${action.toLowerCase()} from dashboard. ${enabled ? 'Idle wallet funds will be automatically deployed into the position when conditions are met.' : 'Auto deployment disabled. Use manual Add Liquidity to deploy capital.'}`,
+        params_json: null });
+    });
+
+    dashboard.onAddLiquidityPreview(async () => {
+      const currentPrice = currentLiveData?.solPrice ?? 0;
+      return executor.getAddLiquidityPreview(currentPrice);
+    });
+
+    dashboard.onAddLiquidity(async () => {
+      const currentPrice = currentLiveData?.solPrice ?? 0;
+      console.log(JSON.stringify({ level: 'info', msg: 'ADD LIQUIDITY triggered from dashboard', timestamp: Date.now() }));
+      const result = await executor.increaseLiquidity(currentPrice);
+      insertRebalanceEventWithRule2(db, {
+        timestamp: Date.now(), eventType: 'LIQUIDITY_ADDED', price: currentPrice, regime: liveRegime,
+        note: `Manual add liquidity from dashboard. Deposited ${result.solDeposited.toFixed(6)} SOL + ${result.usdcDeposited.toFixed(2)} USDC = $${result.totalUsdc.toFixed(2)}. Liquidity added: ${result.liquidityAdded}.`,
+        solBefore: 0, usdcBefore: 0, solAfter: result.solDeposited, usdcAfter: result.usdcDeposited,
+        feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+      });
+      insertDecisionLog(db, { timestamp: Date.now(), price: currentPrice, regime: liveRegime, bot_state: liveBotState,
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: 'LIQUIDITY_ADDED', reasoning: `Added liquidity to existing position from dashboard. Deposited ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}). Position range unchanged.`,
+        params_json: null });
+      return result;
+    });
+
     dashboard.onHarvest(async () => {
       const currentPrice = currentLiveData?.solPrice ?? 0;
       console.log(JSON.stringify({ level: 'info', msg: 'Manual fee harvest from dashboard', timestamp: Date.now() }));
@@ -541,7 +607,7 @@ async function main() {
       liveCumFeesSol += fees.feeSol;
       liveCumFeesUsdc += fees.feeUsdc;
       const feeTotalUsdc = fees.feeSol * currentPrice + fees.feeUsdc;
-      insertRebalanceEvent(db, {
+      insertRebalanceEventWithRule2(db, {
         timestamp: Date.now(), eventType: 'FEE_HARVEST', price: currentPrice, regime: liveRegime,
         note: `Manual harvest from dashboard. Collected ${fees.feeSol.toFixed(6)} SOL ($${(fees.feeSol * currentPrice).toFixed(4)}) + ${fees.feeUsdc.toFixed(6)} USDC = $${feeTotalUsdc.toFixed(4)} total. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
@@ -567,7 +633,7 @@ async function main() {
       liveCumFeesUsdc += result.feeUsdcCollected;
       liveRealizedIl += result.ilAtClose;
 
-      insertRebalanceEvent(db, {
+      insertRebalanceEventWithRule2(db, {
         timestamp: Date.now(), eventType: 'POSITION_CLOSED', price: result.closePrice, regime: liveRegime,
         note: `WHY: Close Position triggered from dashboard. Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}.\nEXECUTED: Fees collected: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC ($${result.feeTotalUsdc.toFixed(4)}). Received ${result.solReceived.toFixed(4)} SOL + ${result.usdcReceived.toFixed(2)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Wallet: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC.`,
         solBefore: balBefore.sol, usdcBefore: balBefore.usdc,
@@ -606,7 +672,7 @@ async function main() {
         liveCumFeesUsdc += result.feeUsdcCollected;
         liveRealizedIl += result.ilAtClose;
 
-        insertRebalanceEvent(db, {
+        insertRebalanceEventWithRule2(db, {
           timestamp: Date.now(), eventType: 'POSITION_CLOSED', price: result.closePrice, regime: liveRegime,
           note: `WHY: Emergency stop triggered from dashboard. Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}.\nEXECUTED: Fees collected: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC ($${result.feeTotalUsdc.toFixed(4)}). Received ${result.solReceived.toFixed(4)} SOL + ${result.usdcReceived.toFixed(2)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Wallet: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC.`,
           solBefore: balBefore.sol, usdcBefore: balBefore.usdc,
@@ -682,8 +748,8 @@ async function runLiveCycle(price: number): Promise<void> {
 
   if (liveBotState === 'HALTED') return;
 
-  // Regime update (every 60s)
-  if (now - liveLastRegimeCheck > 60_000) {
+  // Regime update (every 1 hour)
+  if (now - liveLastRegimeCheck > 3_600_000) {
     const closes = getDailyCloses(db, REGIME_WINDOW_DAYS);
     const result = closes.length >= 3
       ? detectRegimeWithMetrics(closes, TREND_THRESHOLD)
@@ -695,15 +761,18 @@ async function runLiveCycle(price: number): Promise<void> {
     const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
     const changed = result.regime !== liveRegime;
 
-    // Log every evaluation
-    insertDecisionLog(db, { timestamp: now, price, regime: result.regime, bot_state: liveBotState,
-      prox_lower: null, prox_upper: null, in_range: null,
-      decision: changed ? 'REGIME_CHANGE' : 'REGIME_EVAL',
-      reasoning: `Regime evaluation: ${result.priceCount} daily closes analyzed over ${REGIME_WINDOW_DAYS} days. ` +
-        `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
-        `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'} ` +
-        `Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
-      params_json: JSON.stringify({ dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount, trendThreshold: TREND_THRESHOLD }) });
+    // Log regime changes immediately; unchanged evals only every 1 hour
+    if (changed || now - liveLastRegimeEvalLog >= 3_600_000) {
+      liveLastRegimeEvalLog = now;
+      insertDecisionLog(db, { timestamp: now, price, regime: result.regime, bot_state: liveBotState,
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: changed ? 'REGIME_CHANGE' : 'REGIME_EVAL',
+        reasoning: `Regime evaluation: ${result.priceCount} daily closes analyzed over ${REGIME_WINDOW_DAYS} days. ` +
+          `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
+          `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'} ` +
+          `Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
+        params_json: JSON.stringify({ dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount, trendThreshold: TREND_THRESHOLD }) });
+    }
 
     if (changed) {
       const oldRegime = liveRegime;
@@ -713,7 +782,7 @@ async function runLiveCycle(price: number): Promise<void> {
         timestamp: now, old_regime: oldRegime, new_regime: result.regime, price,
         dir_ratio: result.dirRatio, realised_vol: result.realisedVol, price_count: result.priceCount,
       });
-      insertRebalanceEvent(db, {
+      insertRebalanceEventWithRule2(db, {
         timestamp: now, eventType: 'REGIME_CHANGE', price, regime: result.regime,
         note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${TREND_THRESHOLD}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
@@ -763,29 +832,32 @@ async function runLiveCycle(price: number): Promise<void> {
   });
 
   if (prox.inRange) {
-    if (shouldFireDownside(prox, params.proxThresholdLower, 0, 0)) {
-      const proxPct = (prox.proxToLower * 100).toFixed(0);
-      const reason = `Rule 2 early downside exit: proxToLower=${proxPct}% >= threshold ${(params.proxThresholdLower*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} drifting toward lower bound $${currentPos.priceLower.toFixed(2)}. Closing to avoid full OOR impermanent loss.`;
-      await liveCloseAndReopen(price, 'T1_DOWNSIDE', reason);
-      return;
+    if (rule2Enabled) {
+      if (shouldFireDownside(prox, params.proxThresholdLower, 0, 0)) {
+        const proxPct = (prox.proxToLower * 100).toFixed(0);
+        const reason = `Rule 2 early downside exit: proxToLower=${proxPct}% >= threshold ${(params.proxThresholdLower*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} drifting toward lower bound $${currentPos.priceLower.toFixed(2)}. Closing to avoid full OOR impermanent loss.`;
+        await liveCloseAndReopen(price, 'T1_DOWNSIDE', reason);
+        return;
+      }
+      if (shouldFireUpside(prox, params.proxThresholdUpper)) {
+        const proxPct = (prox.proxToUpper * 100).toFixed(0);
+        const timeoutStr = REENTRY.TIMEOUT_HOURS >= 1 ? `${REENTRY.TIMEOUT_HOURS}h` : `${Math.round(REENTRY.TIMEOUT_HOURS * 60)}min`;
+        const reason = `Rule 2 early upside exit: proxToUpper=${proxPct}% >= threshold ${(params.proxThresholdUpper*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} nearing upper bound $${currentPos.priceUpper.toFixed(2)}. Closing and entering Rule 3 pullback watch — will wait for ${REENTRY.PULLBACK_THRESHOLD_PCT}% pullback or ${timeoutStr} timeout.`;
+        await liveClosePosition(price, 'T1_UPSIDE', reason);
+        livePullbackActive = true;
+        livePullbackPeak = price;
+        livePullbackStart = now;
+        liveBotState = 'WAITING_PULLBACK';
+        return;
+      }
     }
-    if (shouldFireUpside(prox, params.proxThresholdUpper)) {
-      const proxPct = (prox.proxToUpper * 100).toFixed(0);
-      const timeoutStr = REENTRY.TIMEOUT_HOURS >= 1 ? `${REENTRY.TIMEOUT_HOURS}h` : `${Math.round(REENTRY.TIMEOUT_HOURS * 60)}min`;
-      const reason = `Rule 2 early upside exit: proxToUpper=${proxPct}% >= threshold ${(params.proxThresholdUpper*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} nearing upper bound $${currentPos.priceUpper.toFixed(2)}. Closing and entering Rule 3 pullback watch — will wait for ${REENTRY.PULLBACK_THRESHOLD_PCT}% pullback or ${timeoutStr} timeout.`;
-      await liveClosePosition(price, 'T1_UPSIDE', reason);
-      livePullbackActive = true;
-      livePullbackPeak = price;
-      livePullbackStart = now;
-      liveBotState = 'WAITING_PULLBACK';
-      return;
-    }
-    // Log HOLD decision every 5 minutes
-    if (now - lastHoldLogTime >= 300_000) {
+    // Log HOLD decision every 30 minutes
+    if (now - lastHoldLogTime >= 1_800_000) {
       lastHoldLogTime = now;
+      const rule2Note = rule2Enabled ? '' : ' [Rule 2 BYPASSED — proximity exit disabled, will only close on full OOR]';
       insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
         prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
-        decision: 'HOLD', reasoning: `Position in range. Price $${price.toFixed(2)} within $${currentPos.priceLower.toFixed(2)}-$${currentPos.priceUpper.toFixed(2)}. proxDown=${(prox.proxToLower*100).toFixed(0)}% (need ${(params.proxThresholdLower*100).toFixed(0)}% to trigger downside exit), proxUp=${(prox.proxToUpper*100).toFixed(0)}% (need ${(params.proxThresholdUpper*100).toFixed(0)}% to trigger upside exit). Regime: ${liveRegime}. Holding — position is earning fees.`,
+        decision: 'HOLD', reasoning: `Position in range. Price $${price.toFixed(2)} within $${currentPos.priceLower.toFixed(2)}-$${currentPos.priceUpper.toFixed(2)}. proxDown=${(prox.proxToLower*100).toFixed(0)}% (need ${(params.proxThresholdLower*100).toFixed(0)}% to trigger downside exit), proxUp=${(prox.proxToUpper*100).toFixed(0)}% (need ${(params.proxThresholdUpper*100).toFixed(0)}% to trigger upside exit). Regime: ${liveRegime}. Holding — position is earning fees.${rule2Note}`,
         params_json: null });
     }
   } else {
@@ -805,26 +877,85 @@ async function runLiveCycle(price: number): Promise<void> {
     }
   }
 
-  // Fee harvest
-  if (isHarvestDue(liveLastHarvestTime, params, now)) {
+  // Fee harvest (check every 1 hour)
+  if (now - liveLastHarvestCheck >= 3_600_000) {
+    liveLastHarvestCheck = now;
+    if (isHarvestDue(liveLastHarvestTime, params, now)) {
+      try {
+        const daysSinceHarvest = ((now - liveLastHarvestTime) / 86400_000).toFixed(1);
+        const fees = await liveExecutor.collectFees();
+        liveCumFeesSol += fees.feeSol;
+        liveCumFeesUsdc += fees.feeUsdc;
+        liveLastHarvestTime = now;
+        insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+          prox_lower: null, prox_upper: null, in_range: null,
+          decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+          params_json: null });
+        insertRebalanceEventWithRule2(db, {
+          timestamp: now, eventType: 'FEE_HARVEST', price, regime: liveRegime,
+          note: `Collected fees: ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative total: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+          solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
+          feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
+        });
+      } catch (err) {
+        console.log(JSON.stringify({ level: 'error', msg: 'fee harvest failed', error: String(err), timestamp: now }));
+      }
+    }
+  }
+
+  // Auto capital deployment — check every 5 minutes for idle wallet funds to deploy
+  if (prox.inRange && now - liveLastAutoDeployCheck >= 300_000) {
+    liveLastAutoDeployCheck = now;
     try {
-      const daysSinceHarvest = ((now - liveLastHarvestTime) / 86400_000).toFixed(1);
-      const fees = await liveExecutor.collectFees();
-      liveCumFeesSol += fees.feeSol;
-      liveCumFeesUsdc += fees.feeUsdc;
-      liveLastHarvestTime = now;
-      insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
-        prox_lower: null, prox_upper: null, in_range: null,
-        decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
-        params_json: null });
-      insertRebalanceEvent(db, {
-        timestamp: now, eventType: 'FEE_HARVEST', price, regime: liveRegime,
-        note: `Collected fees: ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative total: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
-        solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
-        feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
+      const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+      const posComp = await liveExecutor.getPositionComposition();
+      const posValue = posComp?.totalUsdc ?? 0;
+
+      const deployCheck = checkAutoDeploy({
+        currentPrice: price,
+        priceLower: currentPos.priceLower,
+        priceUpper: currentPos.priceUpper,
+        walletSol: balances.sol,
+        walletUsdc: balances.usdc,
+        positionValueUsdc: posValue,
+        regime: liveRegime,
+        params,
+        lastDeployTime: liveLastAutoDeployTime,
+        now,
+        enabled: autoDeployEnabled,
+        minIdleUsdc: MIN_IDLE_USDC,
+        minIdleSol: MIN_IDLE_SOL,
+        minDeployUsdc: MIN_DEPLOY_USDC,
+        deployRatioTolerance: DEPLOY_RATIO_TOLERANCE,
       });
+
+      if (deployCheck.shouldDeploy) {
+        console.log(JSON.stringify({ level: 'info', msg: `AUTO_DEPLOY: deploying $${deployCheck.deployableUsdc.toFixed(2)} idle capital`, timestamp: now }));
+        const result = await liveExecutor.increaseLiquidity(price);
+        liveLastAutoDeployTime = now;
+
+        insertRebalanceEventWithRule2(db, {
+          timestamp: now, eventType: 'AUTO_DEPLOY', price, regime: liveRegime,
+          note: `WHY: ${deployCheck.reason}\nEXECUTED: Auto-deployed ${result.solDeposited.toFixed(6)} SOL + ${result.usdcDeposited.toFixed(2)} USDC = $${result.totalUsdc.toFixed(2)}. Liquidity added: ${result.liquidityAdded}. Ideal price: $${deployCheck.idealPrice.toFixed(2)}, cap: ${(deployCheck.currentDeployPct * 100).toFixed(0)}%.`,
+          solBefore: balances.sol, usdcBefore: balances.usdc,
+          solAfter: balances.sol - result.solDeposited, usdcAfter: balances.usdc - result.usdcDeposited,
+          feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+        });
+        insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+          prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
+          decision: 'AUTO_DEPLOY', reasoning: `${deployCheck.reason}\nDeposited ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}). Position range: $${currentPos.priceLower.toFixed(2)}-$${currentPos.priceUpper.toFixed(2)}.`,
+          params_json: JSON.stringify({ idleUsdc: deployCheck.idleUsdc, idealPrice: deployCheck.idealPrice, deployPct: deployCheck.currentDeployPct, deployableUsdc: deployCheck.deployableUsdc }) });
+      } else {
+        // Log skip reason periodically (every 30 min, same cadence as HOLD log)
+        if (now - lastHoldLogTime >= 1_800_000 && deployCheck.reason !== 'DEPLOY_SKIPPED_DISABLED') {
+          insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+            prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
+            decision: 'DEPLOY_SKIP', reasoning: deployCheck.reason,
+            params_json: JSON.stringify({ idleUsdc: deployCheck.idleUsdc, idealPrice: deployCheck.idealPrice, deployPct: deployCheck.currentDeployPct, deployableUsdc: deployCheck.deployableUsdc }) });
+        }
+      }
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'fee harvest failed', error: String(err), timestamp: now }));
+      console.log(JSON.stringify({ level: 'error', msg: 'auto-deploy check failed', error: String(err), timestamp: now }));
     }
   }
 
@@ -869,7 +1000,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
     const execution = `Deposited ${depositedSol.toFixed(4)} SOL ($${(depositedSol * price).toFixed(2)}) + ${depositedUsdc.toFixed(2)} USDC = $${depositedTotal.toFixed(2)} total. Wallet after: ${balancesAfter.sol.toFixed(4)} SOL + ${balancesAfter.usdc.toFixed(2)} USDC. Mint: ${pos.positionMint.toBase58().slice(0, 12)}...`;
 
-    insertRebalanceEvent(db, {
+    insertRebalanceEventWithRule2(db, {
       timestamp: Date.now(), eventType, price, regime: liveRegime,
       note: `WHY: ${logic}\nEXECUTED: ${execution}`,
       solBefore: balances.sol, usdcBefore: balances.usdc,
@@ -902,7 +1033,7 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     const feeStr = `Fees collected: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC ($${result.feeTotalUsdc.toFixed(4)}). `;
     const execution = `${feeStr}Received ${result.solReceived.toFixed(4)} SOL ($${(result.solReceived * price).toFixed(2)}) + ${result.usdcReceived.toFixed(2)} USDC. Realized IL: $${result.ilAtClose.toFixed(4)}. Wallet: ${balancesAfter.sol.toFixed(4)} SOL + ${balancesAfter.usdc.toFixed(2)} USDC = $${(balancesAfter.sol * price + balancesAfter.usdc).toFixed(2)} total.`;
 
-    insertRebalanceEvent(db, {
+    insertRebalanceEventWithRule2(db, {
       timestamp: Date.now(), eventType, price, regime: liveRegime,
       note: `WHY: ${why}${posInfo}\nEXECUTED: ${execution}`,
       solBefore: balancesBefore.sol, usdcBefore: balancesBefore.usdc,

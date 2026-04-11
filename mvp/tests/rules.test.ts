@@ -10,22 +10,22 @@ import type { PaperPosition } from '../src/types.js';
 const identity = (p: number) => Math.round(p * 100); // mock priceToTick
 
 describe('Rule 1: calcRange', () => {
-  it('SOL=$150, RANGING → lower=$148.65, upper=$153.15', () => {
+  it('SOL=$150, RANGING → lower=$149.33, upper=$151.58', () => {
     const params = REGIME_PARAMS.RANGING;
-    // lower = 150 * (1 - 0.03 * 0.30) = 150 * 0.991 = 148.65
-    // upper = 150 * (1 + 0.03 * 0.70) = 150 * 1.021 = 153.15
+    // lower = 150 * (1 - 0.015 * 0.30) = 150 * 0.9955 = 149.325
+    // upper = 150 * (1 + 0.015 * 0.70) = 150 * 1.0105 = 151.575
     const range = calcRange(150, params, identity);
-    expect(range.priceLower).toBeCloseTo(148.65, 2);
-    expect(range.priceUpper).toBeCloseTo(153.15, 2);
+    expect(range.priceLower).toBeCloseTo(149.325, 1);
+    expect(range.priceUpper).toBeCloseTo(151.575, 1);
   });
 
-  it('SOL=$150, BEARISH → lower=$145.20, upper=$157.20', () => {
+  it('SOL=$150, BEARISH → lower=$147.60, upper=$153.60', () => {
     const params = REGIME_PARAMS.BEARISH_TREND;
-    // lower = 150 * (1 - 0.08 * 0.40) = 150 * 0.968 = 145.20
-    // upper = 150 * (1 + 0.08 * 0.60) = 150 * 1.048 = 157.20
+    // lower = 150 * (1 - 0.04 * 0.40) = 150 * 0.984 = 147.60
+    // upper = 150 * (1 + 0.04 * 0.60) = 150 * 1.024 = 153.60
     const range = calcRange(150, params, identity);
-    expect(range.priceLower).toBeCloseTo(145.20, 2);
-    expect(range.priceUpper).toBeCloseTo(157.20, 2);
+    expect(range.priceLower).toBeCloseTo(147.60, 2);
+    expect(range.priceUpper).toBeCloseTo(153.60, 2);
   });
 });
 

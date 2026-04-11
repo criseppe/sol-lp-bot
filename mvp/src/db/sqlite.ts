@@ -75,7 +75,8 @@ export function initDb(dbPath: string): Database.Database {
       usdc_after  REAL,
       fee_sol     REAL DEFAULT 0,
       fee_usdc    REAL DEFAULT 0,
-      il_at_close REAL DEFAULT 0
+      il_at_close REAL DEFAULT 0,
+      rule2_active INTEGER DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -153,7 +154,18 @@ export function initDb(dbPath: string): Database.Database {
       realised_vol    REAL,
       price_count     INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS rule_toggles (
+      rule_name       TEXT PRIMARY KEY,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      updated_at      INTEGER NOT NULL
+    );
   `);
+
+  // Migration: add rule2_active column to existing rebalance_events tables
+  try {
+    db.exec(`ALTER TABLE rebalance_events ADD COLUMN rule2_active INTEGER DEFAULT 1`);
+  } catch (_) { /* column already exists */ }
 
   return db;
 }
@@ -199,12 +211,12 @@ export function getHistoryDayCount(db: Database.Database): number {
   return row.count;
 }
 
-export function insertRebalanceEvent(db: Database.Database, event: RebalanceEvent): void {
+export function insertRebalanceEvent(db: Database.Database, event: RebalanceEvent & { rule2Active?: number }): void {
   const stmt = db.prepare(`
-    INSERT INTO rebalance_events (timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close)
-    VALUES (@timestamp, @eventType, @price, @regime, @note, @solBefore, @usdcBefore, @solAfter, @usdcAfter, @feeSol, @feeUsdc, @ilAtClose)
+    INSERT INTO rebalance_events (timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close, rule2_active)
+    VALUES (@timestamp, @eventType, @price, @regime, @note, @solBefore, @usdcBefore, @solAfter, @usdcAfter, @feeSol, @feeUsdc, @ilAtClose, @rule2Active)
   `);
-  stmt.run(event);
+  stmt.run({ ...event, rule2Active: event.rule2Active ?? 1 });
 }
 
 export function getRebalanceEvents(db: Database.Database, limit: number): RebalanceEvent[] {
@@ -383,6 +395,70 @@ export function getRegimeHistory(db: Database.Database, limit: number): RegimeHi
   return db.prepare(`
     SELECT * FROM regime_history ORDER BY timestamp DESC LIMIT ?
   `).all(limit) as RegimeHistoryRow[];
+}
+
+// ── Rule 2 performance comparison ────────────────────────────────────────
+
+export interface Rule2PerfRow {
+  rule2_active: number;
+  event_count: number;
+  total_fee_sol: number;
+  total_fee_usdc: number;
+  total_il: number;
+  avg_fee_sol: number;
+  avg_fee_usdc: number;
+  avg_il: number;
+  first_event: number;
+  last_event: number;
+}
+
+export function getRule2PerfComparison(db: Database.Database): Rule2PerfRow[] {
+  return db.prepare(`
+    SELECT
+      rule2_active,
+      COUNT(*) as event_count,
+      COALESCE(SUM(fee_sol), 0) as total_fee_sol,
+      COALESCE(SUM(fee_usdc), 0) as total_fee_usdc,
+      COALESCE(SUM(il_at_close), 0) as total_il,
+      COALESCE(AVG(fee_sol), 0) as avg_fee_sol,
+      COALESCE(AVG(fee_usdc), 0) as avg_fee_usdc,
+      COALESCE(AVG(il_at_close), 0) as avg_il,
+      MIN(timestamp) as first_event,
+      MAX(timestamp) as last_event
+    FROM rebalance_events
+    WHERE event_type IN ('T1_DOWNSIDE', 'T1_UPSIDE', 'OOR_BELOW', 'OOR_ABOVE', 'POSITION_CLOSED')
+    GROUP BY rule2_active
+  `).all() as Rule2PerfRow[];
+}
+
+export function getRule2EventsCsv(db: Database.Database): string {
+  const rows = db.prepare(`
+    SELECT timestamp, event_type, price, regime, fee_sol, fee_usdc, il_at_close, rule2_active,
+           sol_before, usdc_before, sol_after, usdc_after, note
+    FROM rebalance_events
+    ORDER BY timestamp ASC
+  `).all() as Array<any>;
+  const header = 'timestamp,datetime,event_type,price,regime,fee_sol,fee_usdc,il_at_close,rule2_active,sol_before,usdc_before,sol_after,usdc_after,note';
+  const lines = rows.map(r => {
+    const dt = new Date(r.timestamp).toISOString();
+    const note = (r.note ?? '').replace(/,/g, ';').replace(/\n/g, ' ');
+    return `${r.timestamp},${dt},${r.event_type},${r.price},${r.regime},${r.fee_sol},${r.fee_usdc},${r.il_at_close},${r.rule2_active},${r.sol_before},${r.usdc_before},${r.sol_after},${r.usdc_after},"${note}"`;
+  });
+  return [header, ...lines].join('\n');
+}
+
+// ── Rule toggles ─────────────────────────────────────────────────────────
+
+export function getRuleEnabled(db: Database.Database, ruleName: string): boolean {
+  const row = db.prepare(`SELECT enabled FROM rule_toggles WHERE rule_name = ?`).get(ruleName) as { enabled: number } | undefined;
+  return row ? row.enabled === 1 : true; // default enabled if no row
+}
+
+export function setRuleEnabled(db: Database.Database, ruleName: string, enabled: boolean): void {
+  db.prepare(`
+    INSERT INTO rule_toggles (rule_name, enabled, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(rule_name) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at
+  `).run(ruleName, enabled ? 1 : 0, Date.now());
 }
 
 // ── Export helpers ─────────────────────────────────────────────────────────

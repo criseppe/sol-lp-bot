@@ -21,7 +21,9 @@ export type EventType =
   | 'PULLBACK_TIMEOUT'
   | 'FEE_HARVEST'
   | 'CIRCUIT_BREAKER'
-  | 'CYCLE_SKIP';
+  | 'CYCLE_SKIP'
+  | 'LIQUIDITY_ADDED'
+  | 'AUTO_DEPLOY';
 
 export interface PythPrice {
   price: number;

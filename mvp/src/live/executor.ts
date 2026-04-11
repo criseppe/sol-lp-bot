@@ -29,6 +29,8 @@ export interface LivePosition {
   entryPrice: number;
   entryTime: number;
   regime: Regime;
+  entrySol: number;
+  entryUsdc: number;
 }
 
 export interface SwapEvent {
@@ -284,6 +286,8 @@ export class LiveExecutor {
       entryPrice: currentPrice,
       entryTime: Date.now(),
       regime,
+      entrySol: estSol,
+      entryUsdc: estUsdc,
     };
 
     console.log(JSON.stringify({
@@ -573,12 +577,178 @@ export class LiveExecutor {
     }
   }
 
+  async getAddLiquidityPreview(currentPrice: number): Promise<{
+    solAvailable: number; usdcAvailable: number; totalAvailableUsdc: number;
+    estSolDeposit: number; estUsdcDeposit: number; estTotalUsdc: number;
+    positionRange: string; needsSwap: string;
+  } | null> {
+    if (!this.currentPosition) return null;
+    const solBal = await this.getSolBalance();
+    const usdcBal = await this.getUsdcBalance();
+    const solReserve = 0.05;
+    const usdcReserve = 1;
+    const solAvailable = Math.max(0, solBal - solReserve);
+    const usdcAvailable = Math.max(0, usdcBal - usdcReserve);
+    if (solAvailable < 0.001 && usdcAvailable < 0.5) return null;
+
+    const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
+    const solMint = new PublicKey(MINTS.SOL);
+    const { tickLower, tickUpper } = this.currentPosition;
+
+    const ratioQuote = increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(1), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+    );
+    const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
+    const valuePerSolUnit = currentPrice + usdcPer1Sol;
+    const totalAvailableUsdc = solAvailable * currentPrice + usdcAvailable;
+    const idealSol = totalAvailableUsdc / valuePerSolUnit;
+    const idealUsdc = idealSol * usdcPer1Sol;
+
+    const solDeficit = idealSol - solAvailable;
+    const usdcDeficit = idealUsdc - usdcAvailable;
+    let needsSwap = 'none';
+    if (solDeficit > 0.01) needsSwap = `~$${(solDeficit * currentPrice).toFixed(2)} USDC -> SOL`;
+    else if (usdcDeficit > 1) needsSwap = `~${(usdcDeficit / currentPrice).toFixed(4)} SOL -> USDC`;
+
+    return {
+      solAvailable, usdcAvailable, totalAvailableUsdc,
+      estSolDeposit: idealSol, estUsdcDeposit: idealUsdc,
+      estTotalUsdc: idealSol * currentPrice + idealUsdc,
+      positionRange: `$${this.currentPosition.priceLower.toFixed(2)}-$${this.currentPosition.priceUpper.toFixed(2)}`,
+      needsSwap,
+    };
+  }
+
+  async increaseLiquidity(currentPrice: number): Promise<{
+    solDeposited: number; usdcDeposited: number; totalUsdc: number; liquidityAdded: string;
+  }> {
+    if (!this.currentPosition) throw new Error('No open position');
+
+    const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
+    const solMint = new PublicKey(MINTS.SOL);
+    const usdcMint = new PublicKey(MINTS.USDC);
+    const solReserve = 0.05;
+    const usdcReserve = 1;
+    const { tickLower, tickUpper } = this.currentPosition;
+
+    let solBal = await this.getSolBalance();
+    let usdcBal = await this.getUsdcBalance();
+    let solAvailable = Math.max(0, solBal - solReserve);
+    let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
+
+    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail)`, timestamp: Date.now() }));
+
+    // Calculate ideal ratio (same logic as openPosition)
+    const ratioQuote = increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(1), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+    );
+    const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
+    const valuePerSolUnit = currentPrice + usdcPer1Sol;
+    const totalAvailableUsdc = solAvailable * currentPrice + usdcAvailable;
+    const idealSol = totalAvailableUsdc / valuePerSolUnit;
+    const idealUsdc = idealSol * usdcPer1Sol;
+
+    const solDeficit = idealSol - solAvailable;
+    const usdcDeficit = idealUsdc - usdcAvailable;
+
+    // Swap to match ideal ratio
+    if (solDeficit > 0.01) {
+      const usdcToSwap = Math.min(solDeficit * currentPrice * 1.03, usdcAvailable - 2);
+      if (usdcToSwap > 1) {
+        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${usdcToSwap.toFixed(2)} USDC -> SOL`, timestamp: Date.now() }));
+        const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
+        const swapQuote = await swapQuoteByInputToken(
+          whirlpool, usdcMint, new BN(Math.floor(usdcToSwap * 1e6)),
+          SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
+        );
+        const swapTx = await whirlpool.swap(swapQuote);
+        await this.execTx(swapTx);
+        await new Promise(r => setTimeout(r, 2000));
+        solBal = await this.getSolBalance();
+        usdcBal = await this.getUsdcBalance();
+        solAvailable = Math.max(0, solBal - solReserve);
+        usdcAvailable = Math.max(0, usdcBal - usdcReserve);
+        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcToSwap, toAmount: solAvailable, reason: `Add liquidity: swapped USDC -> SOL to match position ratio` });
+      }
+    } else if (usdcDeficit > 1) {
+      const solToSwap = Math.min(usdcDeficit / currentPrice * 1.03, solAvailable - 0.02);
+      if (solToSwap > 0.005) {
+        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${solToSwap.toFixed(4)} SOL -> USDC`, timestamp: Date.now() }));
+        const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
+        const swapQuote = await swapQuoteByInputToken(
+          whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
+          SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
+        );
+        const swapTx = await whirlpool.swap(swapQuote);
+        await this.execTx(swapTx);
+        await new Promise(r => setTimeout(r, 2000));
+        solBal = await this.getSolBalance();
+        usdcBal = await this.getUsdcBalance();
+        solAvailable = Math.max(0, solBal - solReserve);
+        usdcAvailable = Math.max(0, usdcBal - usdcReserve);
+        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solToSwap, toAmount: usdcAvailable, reason: `Add liquidity: swapped SOL -> USDC to match position ratio` });
+      }
+    }
+
+    // Refresh pool data after swap
+    await whirlpool.refreshData();
+
+    // Quote with updated balances
+    let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(solAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+    ) : null;
+
+    if (quote) {
+      const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
+      if (usdcNeeded > usdcAvailable) {
+        quote = increaseLiquidityQuoteByInputToken(
+          usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        );
+      }
+    } else if (usdcAvailable > 0.5) {
+      quote = increaseLiquidityQuoteByInputToken(
+        usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      );
+    }
+
+    if (!quote || quote.liquidityAmount.isZero()) {
+      throw new Error(`Cannot add liquidity: SOL=${solAvailable.toFixed(4)}, USDC=${usdcAvailable.toFixed(2)}. No valid quote.`);
+    }
+
+    const estSol = Number(quote.tokenEstA.toString()) / 1e9;
+    const estUsdc = Number(quote.tokenEstB.toString()) / 1e6;
+    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity quote: ${estSol.toFixed(4)} SOL + ${estUsdc.toFixed(2)} USDC = $${(estSol * currentPrice + estUsdc).toFixed(2)}`, timestamp: Date.now() }));
+
+    // Increase liquidity on existing position
+    const position = await this.client.getPosition(this.currentPosition.positionAddress, IGNORE_CACHE);
+    const tx = await position.increaseLiquidity(quote);
+    await this.execTx(tx);
+
+    const liquidityAdded = quote.liquidityAmount.toString();
+
+    // Update entry composition to include the added liquidity
+    this.currentPosition.entrySol += estSol;
+    this.currentPosition.entryUsdc += estUsdc;
+
+    console.log(JSON.stringify({
+      level: 'info', msg: 'liquidity added to position',
+      positionMint: this.currentPosition.positionMint.toBase58(),
+      solDeposited: estSol.toFixed(6), usdcDeposited: estUsdc.toFixed(6),
+      liquidityAdded, timestamp: Date.now(),
+    }));
+
+    return { solDeposited: estSol, usdcDeposited: estUsdc, totalUsdc: estSol * currentPrice + estUsdc, liquidityAdded };
+  }
+
   getCurrentPosition(): LivePosition | null {
     return this.currentPosition;
   }
 
   setCurrentPosition(pos: LivePosition | null): void {
     if (pos) {
+      // Preserve entrySol/entryUsdc — only default if truly missing
+      if (pos.entrySol == null || pos.entrySol === undefined) pos.entrySol = 0;
+      if (pos.entryUsdc == null || pos.entryUsdc === undefined) pos.entryUsdc = 0;
       // Always derive prices from ticks to match on-chain reality
       pos.priceLower = PriceMath.tickIndexToPrice(pos.tickLower, SOL_DECIMALS, USDC_DECIMALS).toNumber();
       pos.priceUpper = PriceMath.tickIndexToPrice(pos.tickUpper, SOL_DECIMALS, USDC_DECIMALS).toNumber();

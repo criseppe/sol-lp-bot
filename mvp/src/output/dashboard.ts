@@ -4,7 +4,7 @@ import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
 import type { ComparisonSnapshot } from '../paper/ledger.js';
-import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData } from '../db/sqlite.js';
+import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 
@@ -110,6 +110,14 @@ export interface DashboardServer {
   onResume(handler: () => void): void;
   onHarvest(handler: () => Promise<{ feeSol: number; feeUsdc: number }>): void;
   onClosePosition(handler: () => Promise<void>): void;
+  onToggleRule2(handler: (enabled: boolean) => void): void;
+  onToggleAutoDeploy(handler: (enabled: boolean) => void): void;
+  onAddLiquidity(handler: () => Promise<{ solDeposited: number; usdcDeposited: number; totalUsdc: number; liquidityAdded: string }>): void;
+  onAddLiquidityPreview(handler: () => Promise<{ solAvailable: number; usdcAvailable: number; totalAvailableUsdc: number; estSolDeposit: number; estUsdcDeposit: number; estTotalUsdc: number; positionRange: string; needsSwap: string } | null>): void;
+  getRule2Enabled(): boolean;
+  setRule2Enabled(enabled: boolean): void;
+  getAutoDeployEnabled(): boolean;
+  setAutoDeployEnabled(enabled: boolean): void;
   setDb(db: any): void;
   stop(): void;
 }
@@ -233,6 +241,18 @@ export function startDashboard(port: number): DashboardServer {
 
   app.get('/api/events', (_req, res) => {
     res.json(currentEvents.slice(0, 50));
+  });
+
+  app.get('/api/rule2-perf', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
+    res.json(getRule2PerfComparison(dbRef));
+  });
+
+  app.get('/api/rule2-events.csv', (_req, res) => {
+    if (!dbRef) { res.status(500).send('DB not available'); return; }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="rebalance_events_rule2.csv"');
+    res.send(getRule2EventsCsv(dbRef));
   });
 
   // Insights page
@@ -442,7 +462,7 @@ export function startDashboard(port: number): DashboardServer {
     await fetchPoolStats();
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
-    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats));
+    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled));
   });
 
   // Bot control APIs
@@ -514,6 +534,63 @@ export function startDashboard(port: number): DashboardServer {
     }
   });
 
+  // Rule 2 toggle
+  let onToggleRule2: ((enabled: boolean) => void) | null = null;
+  let rule2Enabled = true;
+
+  app.post('/api/toggle-rule2', (req, res) => {
+    rule2Enabled = !rule2Enabled;
+    if (onToggleRule2) {
+      onToggleRule2(rule2Enabled);
+    }
+    res.json({ success: true, rule2Enabled, msg: rule2Enabled ? 'Rule 2 (proximity exit) enabled.' : 'Rule 2 (proximity exit) disabled. Positions will only close when fully out of range.' });
+  });
+
+  app.get('/api/rule2-status', (_req, res) => {
+    res.json({ rule2Enabled });
+  });
+
+  // Auto-deploy toggle
+  let onToggleAutoDeploy: ((enabled: boolean) => void) | null = null;
+  let autoDeployEnabled = true;
+
+  app.post('/api/toggle-auto-deploy', (_req, res) => {
+    autoDeployEnabled = !autoDeployEnabled;
+    if (onToggleAutoDeploy) {
+      onToggleAutoDeploy(autoDeployEnabled);
+    }
+    res.json({ success: true, autoDeployEnabled, msg: autoDeployEnabled ? 'Auto capital deployment enabled.' : 'Auto capital deployment disabled.' });
+  });
+
+  app.get('/api/auto-deploy-status', (_req, res) => {
+    res.json({ autoDeployEnabled });
+  });
+
+  // Add liquidity
+  let onAddLiquidity: (() => Promise<{ solDeposited: number; usdcDeposited: number; totalUsdc: number; liquidityAdded: string }>) | null = null;
+  let onAddLiquidityPreview: (() => Promise<{ solAvailable: number; usdcAvailable: number; totalAvailableUsdc: number; estSolDeposit: number; estUsdcDeposit: number; estTotalUsdc: number; positionRange: string; needsSwap: string } | null>) | null = null;
+
+  app.get('/api/add-liquidity-preview', async (_req, res) => {
+    if (!onAddLiquidityPreview) { res.status(400).json({ error: 'No handler registered' }); return; }
+    try {
+      const preview = await onAddLiquidityPreview();
+      if (!preview) { res.json({ available: false, reason: 'No open position or insufficient wallet balance' }); return; }
+      res.json({ available: true, ...preview });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post('/api/add-liquidity', async (_req, res) => {
+    if (!onAddLiquidity) { res.status(400).json({ success: false, msg: 'No handler registered' }); return; }
+    try {
+      const result = await onAddLiquidity();
+      res.json({ success: true, ...result, msg: `Added ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}) to position` });
+    } catch (err) {
+      res.status(500).json({ success: false, msg: String(err) });
+    }
+  });
+
   app.get('/api/bot-status', (_req, res) => {
     res.json({ paused: isPaused, botState: currentBotState });
   });
@@ -550,6 +627,30 @@ export function startDashboard(port: number): DashboardServer {
     },
     onClosePosition(handler) {
       onClosePosition = handler;
+    },
+    onToggleRule2(handler) {
+      onToggleRule2 = handler;
+    },
+    onToggleAutoDeploy(handler) {
+      onToggleAutoDeploy = handler;
+    },
+    onAddLiquidity(handler) {
+      onAddLiquidity = handler;
+    },
+    onAddLiquidityPreview(handler) {
+      onAddLiquidityPreview = handler;
+    },
+    getRule2Enabled() {
+      return rule2Enabled;
+    },
+    setRule2Enabled(enabled: boolean) {
+      rule2Enabled = enabled;
+    },
+    getAutoDeployEnabled() {
+      return autoDeployEnabled;
+    },
+    setAutoDeployEnabled(enabled: boolean) {
+      autoDeployEnabled = enabled;
     },
     setDb(d) {
       dbRef = d;
@@ -762,7 +863,7 @@ ${NAV_HTML}
 
 // ── Live page ─────────────────────────────────────────────────────────────
 
-function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null): string {
+function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null, rule2Enabled = true, autoDeployEnabled = true): string {
   const regimeColours: Record<string, string> = {
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
@@ -925,7 +1026,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
       OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308',
       PULLBACK_REENTRY: '#22c55e', PULLBACK_TIMEOUT: '#a855f7',
       FEE_HARVEST: '#58a6ff', CIRCUIT_BREAKER: '#ef4444',
-      REGIME_CHANGE: '#a855f7',
+      REGIME_CHANGE: '#a855f7', LIQUIDITY_ADDED: '#22c55e',
     };
     const col = typeColors[e.eventType] || '#8b949e';
     return `<div class="event-card">
@@ -1026,6 +1127,8 @@ ${NAV_HTML}
     <div class="row"><span class="label">SOL Price</span><span class="value">$${fmt(live.solPrice)}</span></div>
     <div class="row"><span class="label">Regime</span><span class="badge" style="background:${regimeCol}20;color:${regimeCol}">${live.regime}</span></div>
     <div class="row"><span class="label">Bot State</span><span class="value" style="color:${stateCol}">${live.botState}</span></div>
+    <div class="row"><span class="label">Proximity Exit</span><span id="rule2-market-badge" class="badge" style="background:${rule2Enabled ? '#22c55e20' : '#f9731620'};color:${rule2Enabled ? '#22c55e' : '#f97316'}">${rule2Enabled ? 'ACTIVE' : 'BYPASSED'}</span></div>
+    <div class="row"><span class="label">Auto Deploy</span><span id="autodeploy-market-badge" class="badge" style="background:${autoDeployEnabled ? '#22c55e20' : '#f9731620'};color:${autoDeployEnabled ? '#22c55e' : '#f97316'}">${autoDeployEnabled ? 'ENABLED' : 'DISABLED'}</span></div>
   </div>
 
   <div class="card">
@@ -1038,6 +1141,16 @@ ${NAV_HTML}
     <div class="row"><span class="label">Entry Price</span><span class="value">$${fmt(live.entryPrice ?? 0)}</span></div>
     <div class="row"><span class="label">Est. Yield 24h</span><span class="value" style="color:#eab308">$${fmt(live.estDailyFeesUsdc, 4)}</span></div>
     <div class="row"><span class="label">Est. APR</span><span class="value" style="color:#eab308">${fmt(live.estAprPct, 1)}%</span></div>
+    ${(() => {
+      const solReserve = 0.05; const usdcReserve = 1;
+      const idleSol = Math.max(0, live.solBalance - solReserve);
+      const idleUsdcRaw = Math.max(0, live.usdcBalance - usdcReserve);
+      const idleUsdc = idleSol * live.solPrice + idleUsdcRaw;
+      const idealPrice = live.positionRange ? Math.sqrt(live.positionRange.lower * live.positionRange.upper).toFixed(2) : '--';
+      const deviation = live.positionRange ? Math.abs(live.solPrice / Math.sqrt(live.positionRange.lower * live.positionRange.upper) - 1) * 100 : 0;
+      return `<div class="row"><span class="label">Idle Capital</span><span class="value" style="color:${idleUsdc > 10 ? '#eab308' : '#8b949e'}">$${fmt(idleUsdc)}</span></div>
+    <div class="row"><span class="label">Ideal Deploy Price</span><span class="value">$${idealPrice} <span style="color:#8b949e;font-weight:normal">(${deviation.toFixed(1)}% off)</span></span></div>`;
+    })()}
     ` : ''}
   </div>
 
@@ -1186,6 +1299,24 @@ ${NAV_HTML}
         </button>
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Closes position, withdraws all, shuts down.</div>
       </div>
+      <div>
+        <button id="rule2-btn" class="ctrl-btn ${rule2Enabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="toggleRule2()">
+          ${rule2Enabled ? 'Disable' : 'Enable'} Rule 2
+        </button>
+        <div style="font-size:10px;margin-top:4px;text-align:center"><span id="rule2-status" style="color:${rule2Enabled ? '#22c55e' : '#f97316'};font-weight:600">${rule2Enabled ? 'ACTIVE' : 'BYPASSED'}</span> <span style="color:#8b949e">— Proximity early exit.</span></div>
+      </div>
+      <div>
+        <button id="add-liq-btn" class="ctrl-btn ctrl-blue" onclick="previewAddLiquidity()" ${live?.positionMint ? '' : 'disabled'}>
+          Add Liquidity
+        </button>
+        <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">${live?.positionMint ? 'Add wallet balance to open position.' : 'No open position.'}</div>
+      </div>
+      <div>
+        <button id="autodeploy-btn" class="ctrl-btn ${autoDeployEnabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="toggleAutoDeploy()">
+          ${autoDeployEnabled ? 'Disable' : 'Enable'} Auto Deploy
+        </button>
+        <div style="font-size:10px;margin-top:4px;text-align:center"><span id="autodeploy-status" style="color:${autoDeployEnabled ? '#22c55e' : '#f97316'};font-weight:600">${autoDeployEnabled ? 'ENABLED' : 'DISABLED'}</span> <span style="color:#8b949e">— Auto capital deployment.</span></div>
+      </div>
     </div>
     <div id="ctrl-result" style="font-size:12px;text-align:center;min-height:20px"></div>
     <div class="stop-confirm" id="close-pos-confirm">
@@ -1209,6 +1340,17 @@ ${NAV_HTML}
         Cancel
       </button>
       <div id="stop-result" style="margin-top:12px;font-size:12px"></div>
+    </div>
+    <div class="stop-confirm" id="add-liq-confirm" style="display:none">
+      <p style="color:#58a6ff;font-weight:bold;margin-bottom:8px">Add Liquidity to Position</p>
+      <div id="add-liq-preview" style="font-size:12px;color:#c9d1d9;margin-bottom:12px">Loading preview...</div>
+      <button class="ctrl-btn ctrl-blue" id="confirm-add-liq-btn" onclick="executeAddLiquidity()">
+        Yes, Add Liquidity
+      </button>
+      <button style="background:#30363d;color:#c9d1d9;border:none;padding:10px 24px;border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;width:100%;margin-top:8px" onclick="document.getElementById('add-liq-confirm').style.display='none'">
+        Cancel
+      </button>
+      <div id="add-liq-result" style="margin-top:12px;font-size:12px"></div>
     </div>
   </div>
 
@@ -1276,6 +1418,142 @@ function controlBot(action) {
     .catch(function(err) {
       result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
       btn.disabled = false;
+    });
+}
+
+function toggleRule2() {
+  var btn = document.getElementById('rule2-btn');
+  var status = document.getElementById('rule2-status');
+  var result = document.getElementById('ctrl-result');
+  btn.disabled = true;
+  result.innerHTML = '<span style="color:#eab308">Toggling Rule 2...</span>';
+
+  fetch('/api/toggle-rule2', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        result.innerHTML = '<span style="color:#22c55e">' + data.msg + '</span>';
+        var mBadge = document.getElementById('rule2-market-badge');
+        if (data.rule2Enabled) {
+          btn.textContent = 'Disable Rule 2';
+          btn.className = 'ctrl-btn ctrl-amber';
+          status.textContent = 'ACTIVE';
+          status.style.color = '#22c55e';
+          if (mBadge) { mBadge.textContent = 'ACTIVE'; mBadge.style.background = '#22c55e20'; mBadge.style.color = '#22c55e'; }
+        } else {
+          btn.textContent = 'Enable Rule 2';
+          btn.className = 'ctrl-btn ctrl-green';
+          status.textContent = 'BYPASSED';
+          status.style.color = '#f97316';
+          if (mBadge) { mBadge.textContent = 'BYPASSED'; mBadge.style.background = '#f9731620'; mBadge.style.color = '#f97316'; }
+        }
+      } else {
+        result.innerHTML = '<span style="color:#ef4444">' + data.msg + '</span>';
+      }
+      btn.disabled = false;
+    })
+    .catch(function(err) {
+      result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+      btn.disabled = false;
+    });
+}
+
+function toggleAutoDeploy() {
+  var btn = document.getElementById('autodeploy-btn');
+  var status = document.getElementById('autodeploy-status');
+  var result = document.getElementById('ctrl-result');
+  btn.disabled = true;
+  result.innerHTML = '<span style="color:#eab308">Toggling Auto Deploy...</span>';
+
+  fetch('/api/toggle-auto-deploy', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        result.innerHTML = '<span style="color:#22c55e">' + data.msg + '</span>';
+        var mBadge = document.getElementById('autodeploy-market-badge');
+        if (data.autoDeployEnabled) {
+          btn.textContent = 'Disable Auto Deploy';
+          btn.className = 'ctrl-btn ctrl-amber';
+          status.textContent = 'ENABLED';
+          status.style.color = '#22c55e';
+          if (mBadge) { mBadge.textContent = 'ENABLED'; mBadge.style.background = '#22c55e20'; mBadge.style.color = '#22c55e'; }
+        } else {
+          btn.textContent = 'Enable Auto Deploy';
+          btn.className = 'ctrl-btn ctrl-green';
+          status.textContent = 'DISABLED';
+          status.style.color = '#f97316';
+          if (mBadge) { mBadge.textContent = 'DISABLED'; mBadge.style.background = '#f9731620'; mBadge.style.color = '#f97316'; }
+        }
+      } else {
+        result.innerHTML = '<span style="color:#ef4444">' + data.msg + '</span>';
+      }
+      btn.disabled = false;
+    })
+    .catch(function(err) {
+      result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+      btn.disabled = false;
+    });
+}
+
+function previewAddLiquidity() {
+  stopAutoRefresh();
+  var preview = document.getElementById('add-liq-preview');
+  var confirmDiv = document.getElementById('add-liq-confirm');
+  var resultDiv = document.getElementById('add-liq-result');
+  resultDiv.innerHTML = '';
+  preview.innerHTML = '<span style="color:#eab308">Loading preview...</span>';
+  confirmDiv.style.display = 'block';
+
+  fetch('/api/add-liquidity-preview')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.available) {
+        preview.innerHTML = '<span style="color:#ef4444">' + (data.reason || 'Not available') + '</span>';
+        document.getElementById('confirm-add-liq-btn').disabled = true;
+        return;
+      }
+      document.getElementById('confirm-add-liq-btn').disabled = false;
+      preview.innerHTML =
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-bottom:8px">' +
+        '<span style="color:#8b949e">Position Range</span><span>' + data.positionRange + '</span>' +
+        '<span style="color:#8b949e">Available SOL</span><span>' + data.solAvailable.toFixed(4) + ' SOL</span>' +
+        '<span style="color:#8b949e">Available USDC</span><span>$' + data.usdcAvailable.toFixed(2) + '</span>' +
+        '<span style="color:#8b949e">Total Available</span><span style="color:#58a6ff;font-weight:bold">$' + data.totalAvailableUsdc.toFixed(2) + '</span>' +
+        '</div>' +
+        '<div style="border-top:1px solid #21262d;padding-top:8px;margin-top:4px">' +
+        '<div style="color:#8b949e;margin-bottom:4px">Estimated deposit:</div>' +
+        '<div style="font-weight:bold;color:#22c55e">' + data.estSolDeposit.toFixed(4) + ' SOL + $' + data.estUsdcDeposit.toFixed(2) + ' USDC = $' + data.estTotalUsdc.toFixed(2) + '</div>' +
+        (data.needsSwap !== 'none' ? '<div style="color:#eab308;font-size:11px;margin-top:4px">Swap needed: ' + data.needsSwap + '</div>' : '') +
+        '</div>';
+    })
+    .catch(function(err) {
+      preview.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+    });
+}
+
+function executeAddLiquidity() {
+  var btn = document.getElementById('confirm-add-liq-btn');
+  var result = document.getElementById('add-liq-result');
+  btn.disabled = true;
+  btn.textContent = 'Adding liquidity...';
+  result.innerHTML = '<span style="color:#eab308">Executing swap + deposit on Solana...</span>';
+
+  fetch('/api/add-liquidity', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        result.innerHTML = '<span style="color:#22c55e">' + data.msg + '</span>';
+        setTimeout(function() { location.reload(); }, 3000);
+      } else {
+        result.innerHTML = '<span style="color:#ef4444">' + data.msg + '</span>';
+        btn.disabled = false;
+        btn.textContent = 'Yes, Add Liquidity';
+      }
+    })
+    .catch(function(err) {
+      result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+      btn.disabled = false;
+      btn.textContent = 'Yes, Add Liquidity';
     });
 }
 
@@ -1355,6 +1633,27 @@ function renderInsightsHtml(data: InsightsData): string {
   const uptimeStr = uptimeH > 0 ? `${uptimeH}h ${uptimeMin % 60}m` : `${uptimeMin}m`;
 
   const snaps = data.snapshots;
+  // Detect capital injections from snapshot jumps (covers both LIQUIDITY_ADDED and wallet deposits)
+  // An injection is a jump where wallet balance increases significantly between consecutive snapshots
+  // that can't be explained by price movement alone (price would need to change >50% in one cycle)
+  interface Injection { timestamp: number; amount: number; price: number }
+  const detectedInjections: Injection[] = [];
+  for (let i = 1; i < snaps.length; i++) {
+    const prev = snaps[i - 1];
+    const curr = snaps[i];
+    const prevTotal = (prev as any).total_with_position ?? prev.total_value_usdc;
+    const currTotal = (curr as any).total_with_position ?? curr.total_value_usdc;
+    const jump = currTotal - prevTotal;
+    // If total jumped by more than 5% of previous value in a single cycle, it's likely an injection
+    // (SOL price can't move 5%+ in 30 seconds under normal conditions)
+    if (jump > Math.max(5, prevTotal * 0.05)) {
+      detectedInjections.push({ timestamp: curr.timestamp, amount: jump, price: curr.price });
+    }
+  }
+  // Also include LIQUIDITY_ADDED events not captured by snapshot jumps (e.g. if position value stayed flat)
+  const liqEvents = data.events.filter(e => e.eventType === 'LIQUIDITY_ADDED');
+  const totalInjected = detectedInjections.reduce((sum, inj) => sum + inj.amount, 0);
+
   let chartSvg = '<text x="200" y="40" text-anchor="middle" fill="#8b949e" font-size="12">Collecting data...</text>';
   if (snaps.length > 2) {
     const values = snaps.map(s => (s as any).total_with_position ?? s.total_value_usdc);
@@ -1377,8 +1676,21 @@ function renderInsightsHtml(data: InsightsData): string {
     const lineColor = lastVal >= firstVal ? '#22c55e' : '#ef4444';
     const changePct = firstVal > 0 ? ((lastVal - firstVal) / firstVal * 100) : 0;
 
+    // Mark capital injections as vertical dashed lines
+    const tMin = snaps[0].timestamp;
+    const tMax = snaps[snaps.length - 1].timestamp;
+    const tRange = tMax - tMin || 1;
+    const injectionMarkers = detectedInjections
+      .filter(inj => inj.timestamp >= tMin && inj.timestamp <= tMax)
+      .map(inj => {
+        const x = ((inj.timestamp - tMin) / tRange) * w + 10;
+        return `<line x1="${x}" y1="5" x2="${x}" y2="${h}" stroke="#a855f7" stroke-width="1" stroke-dasharray="3,3"/>
+          <text x="${x}" y="${h + 9}" text-anchor="middle" fill="#a855f7" font-size="8">+$${fmt(inj.amount, 0)}</text>`;
+      }).join('');
+
     chartSvg = `
       <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="2"/>
+      ${injectionMarkers}
       <text x="10" y="98" fill="#8b949e" font-size="9">${firstTime}</text>
       <text x="${w}" y="98" text-anchor="end" fill="#8b949e" font-size="9">${lastTime}</text>
       <text x="10" y="12" fill="#8b949e" font-size="9">$${fmt(maxV)}</text>
@@ -1420,6 +1732,7 @@ function renderInsightsHtml(data: InsightsData): string {
       HOLD: '#8b949e', T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
       OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308', PULLBACK_REENTRY: '#22c55e',
       PULLBACK_TIMEOUT: '#a855f7', FEE_HARVEST: '#58a6ff', POSITION_OPENED: '#22c55e',
+      LIQUIDITY_ADDED: '#22c55e', RULE2_ENABLED: '#22c55e', RULE2_DISABLED: '#f97316',
     };
     const col = decColours[d.decision] || '#8b949e';
     const proxStr = d.prox_lower !== null ? `prox: ${(d.prox_lower * 100).toFixed(0)}%down ${((d.prox_upper ?? 0) * 100).toFixed(0)}%up` : '';
@@ -1460,6 +1773,7 @@ ${NAV_HTML}
 
 <div class="card" style="margin-bottom:16px">
   <h2>Total Portfolio Value (24h) — Wallet + Liquidity Position</h2>
+  ${detectedInjections.length > 0 ? `<div style="font-size:11px;color:#a855f7;margin-bottom:6px">Capital injected: $${fmt(totalInjected, 2)} (${detectedInjections.length} event${detectedInjections.length > 1 ? 's' : ''}) — marked with <span style="border-left:2px dashed #a855f7;padding-left:4px">dashed lines</span></div>` : ''}
   <svg width="100%" height="105" viewBox="0 0 600 105" preserveAspectRatio="xMidYMid meet">
     ${chartSvg}
   </svg>
@@ -1476,13 +1790,29 @@ ${(() => {
   });
   const days = Array.from(dailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-7);
 
+  // Detect capital injections from 7d snapshot jumps (same logic as 24h chart)
+  const dailyInjections = new Map<string, number>();
+  const allSnaps7d = data.snapshots7d;
+  for (let i = 1; i < allSnaps7d.length; i++) {
+    const prev = allSnaps7d[i - 1];
+    const curr = allSnaps7d[i];
+    const prevTotal = (prev as any).total_with_position ?? prev.total_value_usdc;
+    const currTotal = (curr as any).total_with_position ?? curr.total_value_usdc;
+    const jump = currTotal - prevTotal;
+    if (jump > Math.max(5, prevTotal * 0.05)) {
+      const date = new Date(curr.timestamp).toISOString().slice(0, 10);
+      dailyInjections.set(date, (dailyInjections.get(date) ?? 0) + jump);
+    }
+  }
+
   if (days.length === 0) return '<div class="card" style="margin-bottom:16px"><h2>Daily Portfolio Value (7 days)</h2><div style="color:#8b949e;text-align:center;padding:20px">Collecting data...</div></div>';
 
   const maxVal = Math.max(...days.map(d => d[1].total));
   const minVal = Math.min(...days.map(d => d[1].total));
   const barW = Math.floor(500 / days.length) - 8;
   const chartH = 100;
-  const baseY = chartH + 5;
+  const topPad = 35; // space for labels above bars
+  const baseY = chartH + topPad;
   // Scale bars relative to min-max range, but start bars from bottom
   const scaleRange = maxVal - minVal || 1;
 
@@ -1494,23 +1824,27 @@ ${(() => {
     const y = baseY - barH;
     const dayLabel = date.slice(5); // MM-DD
     const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
-    const change = i > 0 ? val.total - days[i-1][1].total : 0;
-    const changeCol = change >= 0 ? '#22c55e' : '#ef4444';
+    const rawChange = i > 0 ? val.total - days[i-1][1].total : 0;
+    const injected = dailyInjections.get(date) ?? 0;
+    const organicChange = rawChange - injected;
+    const changeCol = organicChange >= 0 ? '#22c55e' : '#ef4444';
+    const injLabel = injected > 0 ? `<text x="${x + barW/2}" y="${Math.max(10, y - 23)}" text-anchor="middle" fill="#a855f7" font-size="8">+$${fmt(injected, 0)} injected</text>` : '';
     return `
       <rect x="${x}" y="${y + walH}" width="${barW}" height="${posH}" fill="#58a6ff" rx="0"/>
       <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2"/>
       <text x="${x + barW/2}" y="${baseY + 12}" text-anchor="middle" fill="#8b949e" font-size="9">${dayLabel}</text>
       <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>
-      <text x="${x + barW/2}" y="${y - 3}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(val.total, 0)}</text>
-      ${i > 0 ? `<text x="${x + barW/2}" y="${y - 13}" text-anchor="middle" fill="${changeCol}" font-size="8">${change >= 0 ? '+' : ''}${fmt(change, 2)}</text>` : ''}`;
+      <text x="${x + barW/2}" y="${Math.max(topPad + 5, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(val.total, 0)}</text>
+      ${i > 0 ? `<text x="${x + barW/2}" y="${Math.max(topPad - 5, y - 13)}" text-anchor="middle" fill="${changeCol}" font-size="8">${organicChange >= 0 ? '+' : ''}${fmt(organicChange, 2)} organic</text>` : ''}
+      ${injLabel}`;
   }).join('');
 
   return `<div class="card" style="margin-bottom:16px">
-  <h2>Daily Portfolio Value (7 days) — <span style="color:#22c55e80">Wallet</span> + <span style="color:#58a6ff">Position</span></h2>
-  <svg width="100%" height="140" viewBox="0 0 600 140" preserveAspectRatio="xMidYMid meet">
-    <text x="5" y="12" fill="#8b949e" font-size="9">$${fmt(maxVal, 0)}</text>
+  <h2>Daily Portfolio Value (7 days) — <span style="color:#22c55e80">Wallet</span> + <span style="color:#58a6ff">Position</span>${dailyInjections.size > 0 ? ' + <span style="color:#a855f7">Injections</span>' : ''}</h2>
+  <svg width="100%" height="170" viewBox="0 0 600 170" preserveAspectRatio="xMidYMid meet">
+    <text x="5" y="${topPad + 5}" fill="#8b949e" font-size="9">$${fmt(maxVal, 0)}</text>
     <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$${fmt(minVal, 0)}</text>
-    <line x1="35" y1="5" x2="35" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
+    <line x1="35" y1="${topPad}" x2="35" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
     <line x1="35" y1="${baseY}" x2="590" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
     ${bars}
   </svg>
@@ -1538,7 +1872,7 @@ ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
       OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308',
       PULLBACK_REENTRY: '#22c55e', PULLBACK_TIMEOUT: '#a855f7',
       FEE_HARVEST: '#58a6ff', CIRCUIT_BREAKER: '#ef4444',
-      REGIME_CHANGE: '#a855f7',
+      REGIME_CHANGE: '#a855f7', LIQUIDITY_ADDED: '#22c55e',
     };
     const col = typeColors[e.eventType] || '#8b949e';
     return `<div class="card" style="margin-bottom:8px">
@@ -1582,12 +1916,14 @@ ${data.recentTxs.length > 0 ? `
 
 <div class="card" style="margin-bottom:16px">
   <h2>Download Logs</h2>
-  <p style="color:#8b949e;font-size:12px;margin-bottom:12px">Decision logs and regime evaluations are recorded every 60 seconds. Download for offline analysis.</p>
+  <p style="color:#8b949e;font-size:12px;margin-bottom:12px">Decision logs are recorded every 30 minutes (HOLD) and regime evaluations every 1 hour. Download for offline analysis.</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
     <a href="/api/export" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Full JSON Export</a>
     <a href="/api/decisions?limit=500" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Decision Log (500)</a>
     <a href="/api/snapshots?hours=168" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Snapshots (7 days)</a>
     <a href="/api/regime-history" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Regime History</a>
+    <a href="/api/rule2-perf" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Rule 2 Performance (JSON)</a>
+    <a href="/api/rule2-events.csv" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Events CSV (with Rule 2 flag)</a>
   </div>
 </div>
 
@@ -1649,7 +1985,7 @@ ${NAV_HTML}
 <div class="card" style="margin-bottom:16px">
   <h2>Overview</h2>
   <p style="color:#c9d1d9;font-size:13px;line-height:1.6">
-    The bot runs a <b>30-second decision loop</b> that reads live SOL/USD price data, detects the current market regime,
+    The bot runs a <b>1-minute decision loop</b> that reads live SOL/USD price data, detects the current market regime,
     and manages a concentrated liquidity position on the <b>Orca SOL/USDC Whirlpool</b>. It uses 6 rules that adapt
     their parameters based on market conditions. The goal: maximize fee yield while minimizing impermanent loss.
   </p>
@@ -1660,13 +1996,13 @@ ${NAV_HTML}
   <div class="flow">
     <div class="flow-step"><h3>1. Fetch Price</h3><div style="font-size:12px;color:#8b949e">Get SOL/USD from Pyth Hermes oracle. Validate confidence &lt; 0.5% and staleness &lt; 60s. Skip cycle if invalid.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>2. Detect Regime (every 60s)</h3><div style="font-size:12px;color:#8b949e">Analyze last 7 days of daily closes. Compute directional ratio + realised volatility. Classify market state.</div></div>
+    <div class="flow-step"><h3>2. Detect Regime (every 1 hour)</h3><div style="font-size:12px;color:#8b949e">Analyze last 2 days of daily closes. Compute directional ratio + realised volatility. Classify market state.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
     <div class="flow-step"><h3>3. Check Safety</h3><div style="font-size:12px;color:#8b949e">Circuit breakers: daily loss &gt; 5% or IL &gt; 8% or &gt; 10 rebalances/hour &#x2192; HALT.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
     <div class="flow-step"><h3>4. Position Decision</h3><div style="font-size:12px;color:#8b949e">No position &#x2192; open one. Has position &#x2192; check proximity to edges. Out of range &#x2192; rebalance or pullback watch.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>5. Fee Harvest</h3><div style="font-size:12px;color:#8b949e">If enough time since last harvest &#x2192; collect accrued trading fees from the on-chain position.</div></div>
+    <div class="flow-step"><h3>5. Fee Harvest (check every 1 hour)</h3><div style="font-size:12px;color:#8b949e">If enough time since last harvest &#x2192; collect accrued trading fees from the on-chain position.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
     <div class="flow-step"><h3>6. Record &amp; Report</h3><div style="font-size:12px;color:#8b949e">Log decision + reasoning to DB. Update dashboard. Record wallet snapshot. Telegram report hourly.</div></div>
   </div>
@@ -1786,7 +2122,7 @@ Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch</
     <div style="color:#c9d1d9">RANGING threshold = 65% &#x2192; 66% &#x2265; 65% &#x2192; <b style="color:#f97316">TRIGGER!</b></div>
     <div style="color:#8b949e;margin-top:4px">Bot closes the position now at 66% proximity instead of waiting for full OOR at 100%. This avoids the worst IL that happens in the last 35% of drift. It then reopens a new position centered at $84.84.</div>
   </div>
-  <div class="trigger">Triggers: Every 30s cycle when position is in range</div>
+  <div class="trigger">Triggers: Every 1-minute cycle when position is in range</div>
 </div>
 
 <div class="rule-card">
@@ -1885,7 +2221,53 @@ Slippage tolerance: 2%. Swap uses the same Orca SOL/USDC pool.
     <div style="color:#c9d1d9">Cumulative tracker updated. Timer resets for next harvest.</div>
     <div style="color:#8b949e;margin-top:4px">Why not harvest every cycle? Each harvest is an on-chain transaction. While Solana fees are tiny (~$0.001), harvesting too often adds complexity. In EXTREME regime, fees are harvested daily to lock gains before a crash erases them via IL. In RANGING, fees accumulate safely for a week.</div>
   </div>
-  <div class="trigger">Triggers: Every cycle, checked against last harvest time</div>
+  <div class="trigger">Triggers: Checked every 1 hour against last harvest time</div>
+</div>
+
+<div class="rule-card">
+  <h3><span class="rule-num">7</span> Auto Capital Deployment</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Automatically deploys idle wallet funds (SOL + USDC above reserves) into an <b>existing in-range position</b>. Does NOT open new positions &#x2014; that is handled by Rules 1&#x2013;3. Only runs when the position is actively earning fees and no other rule has triggered an exit.</p>
+  <div class="logic-box"><b>Prerequisite:</b>  Position must exist AND be in range
+<b>Priority:</b>     Runs AFTER Rules 1&#x2013;6. If any exit rule fires, auto deploy is skipped.
+
+<b>6 conditions must ALL pass:</b>
+  1. Feature enabled        (dashboard toggle)
+  2. Regime allows it       (blocked in BEARISH_TREND and EXTREME)
+  3. Idle funds exist       (SOL &gt; 0.05 or USDC &gt; $5, after reserves)
+  4. Cooldown elapsed       (max 1 deploy per hour)
+  5. Capital cap headroom   (position below regime deploy % cap)
+  6. Price near ideal       (within 2% of geometric mean of range)
+
+<b>Reserves kept:</b>  0.05 SOL (gas) + $1 USDC (always in wallet)
+<b>Check frequency:</b> Every 5 minutes (not every cycle)
+<b>Deploy cooldown:</b>  1 hour between deployments</div>
+  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
+    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: Manual add liquidity followed by auto deploy</div>
+    <div style="color:#c9d1d9">You manually add $150 USDC to the wallet. Position range is $83.65&#x2013;$84.97, current price $84.25.</div>
+    <div style="color:#c9d1d9">Bot detects $149 idle (after $1 USDC reserve). Price $84.25 is within 2% of ideal $84.31 (geometric mean). Regime is RANGING (100% cap).</div>
+    <div style="color:#c9d1d9">Bot swaps ~$75 USDC &#x2192; SOL to match the position ratio, then deposits both tokens into the existing position.</div>
+    <div style="color:#c9d1d9">Wallet after: ~0.065 SOL + ~$1.00 USDC (reserves). All excess capital is now earning fees.</div>
+    <div style="color:#c9d1d9">Next deploy possible: 1 hour later (cooldown).</div>
+  </div>
+  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
+    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: Auto deploy skipped &#x2014; price too far from ideal</div>
+    <div style="color:#c9d1d9">Position range $83.65&#x2013;$84.97. Geometric mean (ideal) = $84.31. Current price = $83.70.</div>
+    <div style="color:#c9d1d9">Deviation = 0.7% &#x2014; but price is near lower bound, so the SOL/USDC deposit ratio would be very skewed.</div>
+    <div style="color:#8b949e">If deviation exceeds 2% tolerance, deploy is skipped to avoid an imbalanced deposit that wastes swap fees.</div>
+  </div>
+  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
+    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: No position &#x2014; auto deploy does NOT run</div>
+    <div style="color:#c9d1d9">Bot is idle (no open position) after a Rule 2 exit or pullback watch. Wallet has $50 idle.</div>
+    <div style="color:#c9d1d9">Auto deploy does NOT open a new position. Rules 1&#x2013;3 handle position opening (new position, pullback re-entry, timeout re-entry).</div>
+    <div style="color:#8b949e">Once a new position is opened by Rules 1&#x2013;3, auto deploy will activate on the next 5-minute check if conditions are met.</div>
+  </div>
+  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
+    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Rule interaction: why no conflicts</div>
+    <div style="color:#c9d1d9">The decision loop evaluates rules in strict order: <b>OOR check &#x2192; Rule 2 proximity exit &#x2192; Fee harvest &#x2192; Auto deploy</b>.</div>
+    <div style="color:#c9d1d9">If any earlier rule triggers an action (close, reopen, pullback), the cycle returns immediately. Auto deploy only runs when the position is safely in range and holding.</div>
+    <div style="color:#8b949e">Additionally, BEARISH_TREND and EXTREME regimes block auto deploy at the rule level, matching the conservative capital allocation of Rules 1 and 5.</div>
+  </div>
+  <div class="trigger">Triggers: Checked every 5 minutes when position is in range</div>
 </div>
 
 <div style="font-size:14px;color:#ef4444;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Circuit Breakers</div>
