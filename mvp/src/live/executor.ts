@@ -510,12 +510,23 @@ export class LiveExecutor {
 
       const feeSol = Number(feeA) / 1e9;
       const feeUsdc = Number(feeB) / 1e6;
+      const feeTotalUsdc = feeSol * solPrice + feeUsdc;
 
-      return {
-        feeSolDecimal: feeSol,
-        feeUsdcDecimal: feeUsdc,
-        feeTotalUsdc: feeSol * solPrice + feeUsdc,
-      };
+      // Sanity check: if computed fees exceed position value, the fee growth
+      // math overflowed — fall back to stored feeOwed (updated after harvests)
+      const posComp = await this.getPositionComposition();
+      const posValue = posComp?.totalUsdc ?? 0;
+      if (posValue > 0 && feeTotalUsdc > posValue) {
+        const fallbackSol = Number(posData.feeOwedA.toString()) / 1e9;
+        const fallbackUsdc = Number(posData.feeOwedB.toString()) / 1e6;
+        return {
+          feeSolDecimal: fallbackSol,
+          feeUsdcDecimal: fallbackUsdc,
+          feeTotalUsdc: fallbackSol * solPrice + fallbackUsdc,
+        };
+      }
+
+      return { feeSolDecimal: feeSol, feeUsdcDecimal: feeUsdc, feeTotalUsdc };
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'getPendingFees failed', error: String(err), timestamp: Date.now() }));
       return null;
