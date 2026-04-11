@@ -2158,8 +2158,10 @@ function renderConfigHtml(): string {
   } as Record<string, any>;
 
   function rpRow(field: typeof rpFields[0]): string {
+    const safeDesc = field.desc.replace(/'/g, '&#39;');
+    const safeEx = field.ex.replace(/'/g, '&#39;');
     return `<tr style="border-bottom:1px solid #21262d">
-      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px" title="${field.desc}&#10;&#10;Example: ${field.ex}">${field.label} <span style="color:#30363d;cursor:help" title="${field.desc}&#10;&#10;Example: ${field.ex}">&#x2753;</span></td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px">${field.label}<span class="info-btn" onclick="showInfo('${field.label}','${safeDesc}','${safeEx}')">?</span></td>
       ${regimes.map(r => `<td style="padding:4px 6px;text-align:center"><span style="color:#30363d;font-size:10px">${defaults[r][field.key]}</span><br><input type="number" step="any" class="cfg-input" data-key="regime.${r}.${field.key}" value="${(rp[r] as any)[field.key]}" style="width:60px"></td>`).join('')}
     </tr>`;
   }
@@ -2201,6 +2203,14 @@ th{text-align:left;padding:6px 8px;color:#8b949e;font-size:11px;border-bottom:1p
 .btn-cancel{background:#21262d;color:#c9d1d9}
 .btn-confirm{background:#da3633;color:#fff}
 #save-status{font-size:13px}
+.info-btn{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;background:#21262d;color:#58a6ff;border-radius:50%;font-size:10px;cursor:pointer;border:1px solid #30363d;vertical-align:middle;margin-left:4px;-webkit-tap-highlight-color:transparent}
+.info-popup{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:200;align-items:center;justify-content:center}
+.info-popup.active{display:flex}
+.info-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;max-width:360px;width:90%;margin:20px}
+.info-card h4{color:#58a6ff;font-size:13px;margin:0 0 8px}
+.info-card p{color:#c9d1d9;font-size:12px;line-height:1.6;margin:0 0 8px}
+.info-card .ex{color:#8b949e;font-size:11px;line-height:1.5;padding:8px;background:#0d1117;border-radius:6px}
+.info-card .close-btn{display:block;text-align:center;color:#8b949e;font-size:12px;margin-top:12px;cursor:pointer;padding:6px;background:#21262d;border-radius:6px}
 </style></head><body>
 <div class="banner">
   <div class="mode" style="color:#f0883e">Configuration</div>
@@ -2324,7 +2334,27 @@ ${NAV_HTML}
   </div>
 </div>
 
+<!-- Info popup overlay -->
+<div class="info-popup" id="info-popup" onclick="hideInfo()">
+  <div class="info-card" onclick="event.stopPropagation()">
+    <h4 id="info-title"></h4>
+    <p id="info-desc"></p>
+    <div class="ex" id="info-ex"></div>
+    <div class="close-btn" onclick="hideInfo()">Close</div>
+  </div>
+</div>
+
 <script>
+function showInfo(title, desc, ex) {
+  document.getElementById('info-title').textContent = title;
+  document.getElementById('info-desc').textContent = desc;
+  document.getElementById('info-ex').textContent = 'Example: ' + ex;
+  document.getElementById('info-popup').classList.add('active');
+}
+function hideInfo() {
+  document.getElementById('info-popup').classList.remove('active');
+}
+
 var originalValues = {};
 document.querySelectorAll('.cfg-input').forEach(function(el) {
   originalValues[el.dataset.key || el.id] = el.value;
