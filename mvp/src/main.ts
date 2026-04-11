@@ -887,13 +887,23 @@ async function runLiveCycle(price: number): Promise<void> {
         liveCumFeesSol += fees.feeSol;
         liveCumFeesUsdc += fees.feeUsdc;
         liveLastHarvestTime = now;
+
+        // Convert harvested SOL to USDC based on regime's harvestSolConvertPct
+        let convertNote = '';
+        if (params.harvestSolConvertPct > 0 && fees.feeSol > 0.0001) {
+          const conversion = await liveExecutor.convertHarvestedSol(fees.feeSol, params.harvestSolConvertPct);
+          if (conversion) {
+            convertNote = ` Converted ${conversion.solSwapped.toFixed(6)} SOL → ${conversion.usdcReceived.toFixed(2)} USDC (${(params.harvestSolConvertPct * 100).toFixed(0)}% regime policy).`;
+          }
+        }
+
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
           prox_lower: null, prox_upper: null, in_range: null,
-          decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+          decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.${convertNote}`,
           params_json: null });
         insertRebalanceEventWithRule2(db, {
           timestamp: now, eventType: 'FEE_HARVEST', price, regime: liveRegime,
-          note: `Collected fees: ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative total: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+          note: `Collected fees: ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative total: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.${convertNote}`,
           solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
           feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
         });

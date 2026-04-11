@@ -126,15 +126,16 @@ export class LiveExecutor {
     // Total value per unit: 1 SOL * price + usdcPer1Sol USDC
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
 
-    // Calculate ideal split of total available capital
+    // Calculate ideal split of capital to deploy (capped at usdcToDeposit target)
     const totalAvailableUsdc = solAvailable * currentPrice + usdcAvailable;
-    const idealSolUnits = totalAvailableUsdc / valuePerSolUnit;
-    const idealSol = idealSolUnits; // how much SOL we'd need if deploying everything
+    const deployTargetUsdc = Math.min(totalAvailableUsdc, usdcToDeposit);
+    const idealSolUnits = deployTargetUsdc / valuePerSolUnit;
+    const idealSol = idealSolUnits;
     const idealUsdc = idealSol * usdcPer1Sol;
 
     console.log(JSON.stringify({
       level: 'info',
-      msg: `Ratio: 1 SOL needs ${usdcPer1Sol.toFixed(2)} USDC. Ideal split: ${idealSol.toFixed(4)} SOL + ${idealUsdc.toFixed(2)} USDC. Have: ${solAvailable.toFixed(4)} SOL + ${usdcAvailable.toFixed(2)} USDC`,
+      msg: `Ratio: 1 SOL needs ${usdcPer1Sol.toFixed(2)} USDC. Deploy target: $${deployTargetUsdc.toFixed(2)} of $${totalAvailableUsdc.toFixed(2)} available. Ideal split: ${idealSol.toFixed(4)} SOL + ${idealUsdc.toFixed(2)} USDC`,
       timestamp: Date.now(),
     }));
 
@@ -407,6 +408,42 @@ export class LiveExecutor {
     }));
 
     return result;
+  }
+
+  /**
+   * Convert a percentage of harvested SOL fees to USDC.
+   * Called after collectFees() based on regime's harvestSolConvertPct.
+   */
+  async convertHarvestedSol(solAmount: number, convertPct: number): Promise<{ solSwapped: number; usdcReceived: number } | null> {
+    if (convertPct <= 0 || solAmount <= 0.0001) return null;
+
+    const solToSwap = solAmount * convertPct;
+    if (solToSwap < 0.0005) return null; // dust threshold
+
+    try {
+      const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
+      const solMint = new PublicKey(MINTS.SOL);
+      const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
+      const swapQuote = await swapQuoteByInputToken(
+        whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
+        SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
+      );
+      const solBefore = await this.getSolBalance();
+      const usdcBefore = await this.getUsdcBalance();
+      const swapTx = await whirlpool.swap(swapQuote);
+      await this.execTx(swapTx);
+      await new Promise(r => setTimeout(r, 1500));
+      const solAfter = await this.getSolBalance();
+      const usdcAfter = await this.getUsdcBalance();
+      const solSwapped = solBefore - solAfter;
+      const usdcReceived = usdcAfter - usdcBefore;
+      console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion: ${solSwapped.toFixed(6)} SOL → ${usdcReceived.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of harvested)`, timestamp: Date.now() }));
+      if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSwapped, toAmount: usdcReceived, reason: `Harvest SOL→USDC conversion: ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.` });
+      return { solSwapped, usdcReceived };
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: `Harvest SOL conversion failed: ${String(err)}`, timestamp: Date.now() }));
+      return null;
+    }
   }
 
   async getPositionData(): Promise<{ liquidity: string; feeOwedA: string; feeOwedB: string; tickLower: number; tickUpper: number; priceLower: number; priceUpper: number } | null> {
