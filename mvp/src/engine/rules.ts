@@ -205,10 +205,10 @@ export function checkAutoDeploy(opts: {
     return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_LOW_IDLE: SOL=${idleSol.toFixed(4)} < ${minIdleSol}, USDC=${idleUsdcRaw.toFixed(2)} < ${minIdleUsdc}`, ...base };
   }
 
-  // BR-6: Cooldown — max one per hour
-  const hoursSinceLast = (now - lastDeployTime) / 3600_000;
-  if (hoursSinceLast < 1) {
-    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_COOLDOWN: ${(60 - hoursSinceLast * 60).toFixed(0)}min remaining`, ...base };
+  // BR-6: Cooldown — max one per 30 minutes
+  const minSinceLast = (now - lastDeployTime) / 60_000;
+  if (minSinceLast < 30) {
+    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_COOLDOWN: ${(30 - minSinceLast).toFixed(0)}min remaining`, ...base };
   }
 
   // BR-3: Check regime capital cap
