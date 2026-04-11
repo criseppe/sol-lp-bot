@@ -1192,9 +1192,8 @@ ${NAV_HTML}
     <div class="row"><span class="label">Est. Yield 24h</span><span class="value" style="color:#eab308">$${fmt(live.estDailyFeesUsdc, 4)}</span></div>
     <div class="row"><span class="label">Est. APR</span><span class="value" style="color:#eab308">${fmt(live.estAprPct, 1)}%</span></div>
     ${(() => {
-      const solReserve = 0.05; const usdcReserve = 1;
-      const idleSol = Math.max(0, live.solBalance - solReserve);
-      const idleUsdcRaw = Math.max(0, live.usdcBalance - usdcReserve);
+      const idleSol = Math.max(0, live.solBalance - runtime.solReserve);
+      const idleUsdcRaw = Math.max(0, live.usdcBalance - runtime.usdcReserve);
       const idleUsdc = idleSol * live.solPrice + idleUsdcRaw;
       const idealPrice = live.positionRange ? Math.sqrt(live.positionRange.lower * live.positionRange.upper).toFixed(2) : '--';
       const deviation = live.positionRange ? Math.abs(live.solPrice / Math.sqrt(live.positionRange.lower * live.positionRange.upper) - 1) * 100 : 0;
