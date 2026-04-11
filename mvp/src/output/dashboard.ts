@@ -2101,18 +2101,32 @@ Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch (
 
 <div class="rule-card">
   <h3><span class="rule-num">3</span> Pullback Re-entry</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After an upside exit or OOR above, waits for price to pull back before re-entering. Avoids opening at a local peak.</p>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After an upside exit or OOR above, waits for price to pull back before re-entering. Avoids opening at a local peak. Includes flash crash protection.</p>
   <div class="logic-box">After upside exit, track peak price.
 
 pullback &#x2265; 2.5% from peak   &#x2192; re-enter immediately
 waited &#x2265; 4 hours            &#x2192; re-enter (timeout)
-single-candle drop &#x2265; 5%     &#x2192; flash crash, wait 15 min first</div>
+
+<b>Flash crash guard:</b>
+If price drops &#x2265; 5% in last ~5 min (10 candles):
+  1. Block re-entry for 15 minutes
+  2. Reset peak to current price (forget old peak)
+  3. Reset 4h timeout from now (full new window)
+This prevents re-entering during a crash AND prevents
+the timeout from firing immediately after cooldown.</div>
   <div class="example-box">
-    <div class="example-title">Pullback re-entry after upside exit</div>
-    <div class="example-text">Rule 2 upside exit fires at $85.89. Bot enters pullback watch.</div>
-    <div class="example-text">Price rallies to $86.50 (peak tracked), then drops to $84.34.</div>
+    <div class="example-title">Normal pullback re-entry</div>
+    <div class="example-text">OOR above at $85.15. Peak tracks to $86.50, then drops to $84.34.</div>
     <div class="example-text">Pullback = ($86.50 - $84.34) / $86.50 = <b>2.5%</b> &#x2192; <b style="color:#22c55e">RE-ENTER</b></div>
-    <div class="example-note">Re-enters at $84.34 instead of $86.50. If no 2.5% pullback within 4 hours, re-enters anyway to avoid missing fees indefinitely.</div>
+    <div class="example-note">If no 2.5% pullback within 4 hours, re-enters anyway to avoid missing fees indefinitely.</div>
+  </div>
+  <div class="example-box">
+    <div class="example-title">Flash crash during pullback watch</div>
+    <div class="example-text">Peak is $86.50. At hour 3:50, SOL crashes from $85 to $80 in 5 min (6% drop).</div>
+    <div class="example-text">Flash crash detected &#x2192; 15-min cooldown. Peak reset to $80. Timeout reset to now + 4h.</div>
+    <div class="example-text">Hour 4:05: cooldown expires. Peak is $80. Timeout not until hour 7:50.</div>
+    <div class="example-text">Bot watches from $80: needs 2.5% pullback to $78 or waits until 7:50.</div>
+    <div class="example-note">Without this fix, the old 4h timeout would have already expired and the bot would jump in at $80 right after the 15-min pause &#x2014; right into a still-falling market.</div>
   </div>
   <div class="trigger">Runs: every 30s cycle while WAITING_PULLBACK</div>
 </div>

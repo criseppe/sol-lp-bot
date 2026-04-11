@@ -244,6 +244,8 @@ export class PaperTradingEngine {
         // Flash crash detection during pullback watch
         if (isFlashCrash(this.recentPrices)) {
           this.flashCrashCooldownUntil = now + REENTRY.FLASH_CRASH_WAIT_MINUTES * 60_000;
+          this.pullbackPeakPrice = price;   // Reset peak to crash level
+          this.pullbackWatchStart = now;    // Reset 4h timeout from now
           return 'CYCLE_SKIP';
         }
         // Step 6: Pullback watch

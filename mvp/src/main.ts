@@ -759,10 +759,13 @@ async function runLiveCycle(price: number): Promise<void> {
       }
       if (isFlashCrash(liveRecentPrices)) {
         liveFlashCrashCooldownUntil = now + REENTRY.FLASH_CRASH_WAIT_MINUTES * 60_000;
-        console.log(JSON.stringify({ level: 'warn', msg: `Flash crash detected (>=${REENTRY.FLASH_CRASH_PCT}% drop). Waiting ${REENTRY.FLASH_CRASH_WAIT_MINUTES}min before re-entry.`, timestamp: now }));
+        const oldPeak = livePullbackPeak;
+        livePullbackPeak = price;   // Reset peak to crash level
+        livePullbackStart = now;    // Reset 4h timeout from now
+        console.log(JSON.stringify({ level: 'warn', msg: `Flash crash detected (>=${REENTRY.FLASH_CRASH_PCT}% drop). Peak reset $${oldPeak.toFixed(2)} → $${price.toFixed(2)}. Timeout reset. Waiting ${REENTRY.FLASH_CRASH_WAIT_MINUTES}min.`, timestamp: now }));
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
           prox_lower: null, prox_upper: null, in_range: null,
-          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `Flash crash detected: price dropped >=${REENTRY.FLASH_CRASH_PCT}% in recent candles. Blocking re-entry for ${REENTRY.FLASH_CRASH_WAIT_MINUTES} minutes to avoid catching a falling knife.`,
+          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `Flash crash detected: price dropped >=${REENTRY.FLASH_CRASH_PCT}% in recent candles. Peak reset from $${oldPeak.toFixed(2)} to $${price.toFixed(2)}. 4h timeout reset. Blocking re-entry for ${REENTRY.FLASH_CRASH_WAIT_MINUTES} minutes to avoid catching a falling knife.`,
           params_json: null });
         return;
       }
