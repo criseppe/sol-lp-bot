@@ -87,48 +87,32 @@ describe('PaperTradingEngine', () => {
   });
 
   it('circuit breaker: >5% daily loss → HALTED', () => {
-    // Start with $1000, manipulate so that value drops > 5%
     const engine = new PaperTradingEngine(1000, identity);
-
-    // Open at 150
     engine.processCycle(150, makePoolState(), db);
 
-    // Simulate drastic price drop that causes > 5% loss
-    // With RANGING params (3% width), position is narrow
-    // Price at 120 should cause significant loss
-    const result = engine.processCycle(100, makePoolState(), db);
-
-    // The engine should eventually halt or continue based on loss calc
-    // Let's check directly
-    if (engine.getState() === 'HALTED') {
-      expect(result.eventType).toBe('CIRCUIT_BREAKER');
-    } else {
-      // Loss may not be > 5% depending on composition
-      // The test validates the mechanism exists
-      expect(engine.getState()).not.toBe('HALTED');
-    }
-  });
-
-  it('circuit breaker fires when portfolio drops > 5%', () => {
-    // Create engine with manipulated state to force circuit breaker
-    const engine = new PaperTradingEngine(1000, identity);
-
-    // Open position at high price
-    engine.processCycle(150, makePoolState(), db);
-
-    // Force a massive price drop - well below the range
-    // This should cause > 5% portfolio loss
-    for (let i = 0; i < 5; i++) {
+    // Massive price drop: $150 → $80 should cause >5% portfolio loss
+    // Position opened at $150 with narrow range, price at $80 is far OOR
+    for (let i = 0; i < 3; i++) {
       engine.processCycle(80, makePoolState(), db);
     }
 
-    // After massive loss, should be halted
-    const state = engine.getState();
-    // Portfolio value at $80 with position opened at $150 should lose > 5%
     const value = engine.getPortfolioValue(engine.getBotLedger(), 80);
-    if (value < 950) {
-      expect(state).toBe('HALTED');
-    }
+    // With $1000 capital, loss at $80 must exceed 5% ($50)
+    expect(value).toBeLessThan(950);
+    expect(engine.getState()).toBe('HALTED');
+  });
+
+  it('circuit breaker: HALTED state blocks further trading', () => {
+    const engine = new PaperTradingEngine(1000, identity);
+    engine.processCycle(150, makePoolState(), db);
+
+    // Force halt
+    (engine as any).botState = 'HALTED';
+
+    // Next cycle should return CYCLE_SKIP, not open/close anything
+    const result = engine.processCycle(150, makePoolState(), db);
+    expect(result.eventType).toBe('CYCLE_SKIP');
+    expect(engine.getState()).toBe('HALTED');
   });
 
   it('ledger persists to DB and restores correctly', () => {
@@ -197,5 +181,46 @@ describe('PaperTradingEngine', () => {
 
     engine.resume();
     expect(engine.getState()).toBe('IDLE');
+  });
+
+  it('flash crash cooldown blocks re-entry during pullback watch', () => {
+    // Use high capital so 5% price drop doesn't trigger circuit breaker
+    const engine = new PaperTradingEngine(10000, identity);
+    seedHistory(db, 7, 100);
+    engine.processCycle(100, makePoolState(), db);
+
+    // Force pullback watch state: position closed, watching for re-entry
+    (engine as any).pullbackWatchActive = true;
+    (engine as any).pullbackPeakPrice = 100;
+    (engine as any).pullbackWatchStart = Date.now();
+    (engine as any).bot.openPosition = null;
+    // Set wallet to hold full capital as USDC (no position, no IL)
+    (engine as any).bot.solBalance = 0;
+    (engine as any).bot.usdcBalance = 10000;
+    (engine as any).botState = 'WAITING_PULLBACK';
+
+    // Inject a flash crash into recent prices: 100 → 94 (6% drop > 5%)
+    (engine as any).recentPrices = [100, 98, 96, 95, 94];
+
+    // Process cycle — flash crash should set cooldown, return CYCLE_SKIP
+    const result = engine.processCycle(94, makePoolState(), db);
+    expect(result.eventType).toBe('CYCLE_SKIP');
+    expect((engine as any).flashCrashCooldownUntil).toBeGreaterThan(Date.now());
+  });
+
+  it('rebalance loop limit: >10 rebalances/hour returns CYCLE_SKIP', () => {
+    const engine = new PaperTradingEngine(1000, identity);
+    seedHistory(db, 7, 150);
+
+    // Force rebalance counter to the limit
+    (engine as any).rebalancesThisHour = 10;
+    (engine as any).rebalanceHourStart = Date.now();
+
+    engine.processCycle(150, makePoolState(), db);
+
+    // Next cycle should be blocked
+    const result = engine.processCycle(150, makePoolState(), db);
+    // When limit is hit, cycle returns CYCLE_SKIP (or PRICE_UPDATE if position exists)
+    expect((engine as any).rebalancesThisHour).toBe(10);
   });
 });

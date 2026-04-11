@@ -70,6 +70,24 @@ describe('Rule 2: calcProximity', () => {
     expect(shouldFireDownside(prox, 0.65, 0, 0)).toBe(true);
   });
 
+  it('shouldFireDownside: IL projection triggers even below proximity threshold', () => {
+    const pos = makePosition(140, 160);
+    // proxToLower = 0.3 (well below 0.65 threshold)
+    const prox = calcProximity(147, pos);
+    expect(prox.proxToLower).toBeCloseTo(0.3, 1);
+    // Proximity alone won't trigger
+    expect(shouldFireDownside(prox, 0.65, 0, 0)).toBe(false);
+    // But high dailyILRate with low gasCost does: projectedIL = |5| * 4 = 20 > 0.001
+    expect(shouldFireDownside(prox, 0.65, -5, 0.001)).toBe(true);
+  });
+
+  it('shouldFireDownside: IL projection does NOT trigger when gasCost exceeds projection', () => {
+    const pos = makePosition(140, 160);
+    const prox = calcProximity(147, pos);
+    // projectedIL = |0.001| * 4 = 0.004, gasCost = 1 → 0.004 < 1 → no trigger
+    expect(shouldFireDownside(prox, 0.65, -0.001, 1)).toBe(false);
+  });
+
   it('shouldFireUpside when proxToUpper exceeds threshold', () => {
     const pos = makePosition(140, 160);
     const prox = calcProximity(159, pos); // proxToUpper = 0.9
