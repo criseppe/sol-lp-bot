@@ -1976,11 +1976,10 @@ ${(() => {
 
   // Each bar = wallet + position + injections stacked
   const maxVal = Math.max(...days.map(([d, v]) => v.total + (dailyInjections.get(d) ?? 0)));
-  const barW = Math.min(70, Math.floor(440 / days.length) - 8);
-  const chartH = 120;
-  const topPad = 15;
+  const barW = Math.min(80, Math.floor(500 / days.length) - 8);
+  const chartH = 100;
+  const topPad = 20;
   const baseY = chartH + topPad;
-  const calloutX = days.length * (barW + 8) + 60; // callout column starts after bars
 
   const bars = days.map(([date, val], i) => {
     const x = i * (barW + 8) + 50;
@@ -1999,20 +1998,6 @@ ${(() => {
     const dayLabel = date.slice(5);
     const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
 
-    // Callout labels to the right of bars
-    const walMidY = y + walH / 2;
-    const posMidY = y + walH + posH / 2;
-    const injMidY = y + walH + posH + injH / 2;
-
-    // Only show callout labels on the last bar to avoid clutter
-    const isLast = i === days.length - 1;
-    const callouts = isLast ? `
-      <line x1="${x + barW}" y1="${walMidY}" x2="${calloutX - 4}" y2="${walMidY}" stroke="#22c55e50" stroke-width="1"/>
-      <text x="${calloutX}" y="${walMidY + 3}" fill="#22c55e" font-size="9">Wallet $${fmt(walletVal, 0)}</text>
-      <line x1="${x + barW}" y1="${posMidY}" x2="${calloutX - 4}" y2="${posMidY + 12}" stroke="#58a6ff50" stroke-width="1"/>
-      <text x="${calloutX}" y="${posMidY + 15}" fill="#58a6ff" font-size="9">Position $${fmt(positionVal, 0)}</text>
-      ${injH > 0 ? `<line x1="${x + barW}" y1="${injMidY}" x2="${calloutX - 4}" y2="${injMidY + 24}" stroke="#a855f750" stroke-width="1"/>
-      <text x="${calloutX}" y="${injMidY + 27}" fill="#a855f7" font-size="9">Injected $${fmt(injected, 0)}</text>` : ''}` : '';
 
     return `
       <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2"/>
@@ -2020,8 +2005,7 @@ ${(() => {
       ${injH > 0 ? `<rect x="${x}" y="${y + walH + posH}" width="${barW}" height="${injH}" fill="#a855f7" rx="0"/>` : ''}
       <text x="${x + barW/2}" y="${Math.max(topPad + 2, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(dayTotal, 0)}</text>
       <text x="${x + barW/2}" y="${baseY + 12}" text-anchor="middle" fill="#8b949e" font-size="9">${dayLabel}</text>
-      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>
-      ${callouts}`;
+      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>`;
   }).join('');
 
   // PnL line overlay
