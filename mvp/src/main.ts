@@ -1000,6 +1000,18 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
     const execution = `Deposited ${depositedSol.toFixed(4)} SOL ($${(depositedSol * price).toFixed(2)}) + ${depositedUsdc.toFixed(2)} USDC = $${depositedTotal.toFixed(2)} total. Wallet after: ${balancesAfter.sol.toFixed(4)} SOL + ${balancesAfter.usdc.toFixed(2)} USDC. Mint: ${pos.positionMint.toBase58().slice(0, 12)}...`;
 
+    // Auto-enable auto-deploy if position opened with less than 50% of target
+    if (!autoDeployEnabled && depositedTotal < deployUsdc * 0.5) {
+      autoDeployEnabled = true;
+      setRuleEnabled(db, 'autoDeploy', true);
+      dashboard.setAutoDeployEnabled(true);
+      console.log(JSON.stringify({ level: 'info', msg: `Auto-deploy auto-enabled: deployed $${depositedTotal.toFixed(2)} of $${deployUsdc.toFixed(2)} target (${(depositedTotal / deployUsdc * 100).toFixed(0)}%). Idle capital will be deployed within ${runtime.autoDeployCheckMinutes} min.`, timestamp: Date.now() }));
+      insertDecisionLog(db, { timestamp: Date.now(), price, regime: liveRegime, bot_state: liveBotState,
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: 'AUTODEPLOY_ENABLED', reasoning: `Auto-deploy auto-enabled after partial position open. Deployed $${depositedTotal.toFixed(2)} of $${deployUsdc.toFixed(2)} target (${(depositedTotal / deployUsdc * 100).toFixed(0)}%). Remaining idle capital will be deployed via Rule 7.`,
+        params_json: null });
+    }
+
     insertRebalanceEventWithRule2(db, {
       timestamp: Date.now(), eventType, price, regime: liveRegime,
       note: `WHY: ${logic}\nEXECUTED: ${execution}`,
