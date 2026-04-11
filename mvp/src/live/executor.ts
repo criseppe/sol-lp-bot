@@ -4,7 +4,7 @@ import {
   WhirlpoolContext, buildWhirlpoolClient, ORCA_WHIRLPOOL_PROGRAM_ID,
   PriceMath, PoolUtil, increaseLiquidityQuoteByInputToken,
   decreaseLiquidityQuoteByLiquidity, collectFeesQuote,
-  NO_TOKEN_EXTENSION_CONTEXT, IGNORE_CACHE,
+  TickArrayUtil, NO_TOKEN_EXTENSION_CONTEXT, IGNORE_CACHE,
   type Whirlpool, type Position,
 } from '@orca-so/whirlpools-sdk';
 import { Percentage } from '@orca-so/common-sdk';
@@ -463,45 +463,58 @@ export class LiveExecutor {
       const poolData = whirlpool.getData();
       const position = await this.client.getPosition(this.currentPosition.positionAddress, IGNORE_CACHE);
       const posData = position.getData();
-      const tickLower = position.getLowerTickData();
-      const tickUpper = position.getUpperTickData();
-
       const solPrice = PriceMath.sqrtPriceX64ToPrice(poolData.sqrtPrice, 9, 6).toNumber();
+      const tickSpacing = poolData.tickSpacing;
 
-      // Use collectFeesQuote to compute real pending fees from fee growth data
-      // This calculates off-chain without needing an updateFeesAndRewards tx
-      const quote = collectFeesQuote({
-        whirlpool: poolData,
-        position: posData,
-        tickLower,
-        tickUpper,
-        tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
-      });
+      // Fetch tick data directly from TickArrays (not from position cache which can be stale)
+      const fetcher = this.client.getFetcher();
+      const tickArrayLowerPDAs = TickArrayUtil.getTickArrayPDAs(
+        posData.tickLowerIndex, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false,
+      );
+      const tickArrayUpperPDAs = TickArrayUtil.getTickArrayPDAs(
+        posData.tickUpperIndex, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false,
+      );
+      const tickArrayLower = await fetcher.getTickArray(tickArrayLowerPDAs[0].publicKey, IGNORE_CACHE);
+      const tickArrayUpper = await fetcher.getTickArray(tickArrayUpperPDAs[0].publicKey, IGNORE_CACHE);
+      if (!tickArrayLower || !tickArrayUpper) return null;
 
-      const feeSol = Number(quote.feeOwedA.toString()) / 1e9;
-      const feeUsdc = Number(quote.feeOwedB.toString()) / 1e6;
+      const lowerTick = TickArrayUtil.getTickFromArray(tickArrayLower, posData.tickLowerIndex, tickSpacing);
+      const upperTick = TickArrayUtil.getTickFromArray(tickArrayUpper, posData.tickUpperIndex, tickSpacing);
 
-      // Sanity check: fees can't exceed position value — if they do,
-      // collectFeesQuote returned garbage (common with uninitialized fee growth checkpoints)
-      const posComp = await this.getPositionComposition();
-      const posValue = posComp?.totalUsdc ?? 0;
-      const feeTotalUsdc = feeSol * solPrice + feeUsdc;
-      if (posValue > 0 && feeTotalUsdc > posValue * 2) {
-        console.log(JSON.stringify({ level: 'warn', msg: 'collectFeesQuote returned invalid value, using feeOwed fallback', rawSol: feeSol, rawUsdc: feeUsdc, posValue, timestamp: Date.now() }));
-        // Fall back to position's stored feeOwed values (updated after updateFeesAndRewards)
-        const fallbackSol = Number(posData.feeOwedA.toString()) / 1e9;
-        const fallbackUsdc = Number(posData.feeOwedB.toString()) / 1e6;
-        return {
-          feeSolDecimal: fallbackSol,
-          feeUsdcDecimal: fallbackUsdc,
-          feeTotalUsdc: fallbackSol * solPrice + fallbackUsdc,
-        };
-      }
+      // u128 wrapping fee growth arithmetic (matches Solana on-chain program)
+      const U128 = (1n << 128n);
+      const wrap = (v: bigint) => ((v % U128) + U128) % U128;
+      const Q64 = 1n << 64n;
+
+      const currentTick = poolData.tickCurrentIndex;
+      const liquidity = BigInt(posData.liquidity.toString());
+      const fgGA = BigInt(poolData.feeGrowthGlobalA.toString());
+      const fgGB = BigInt(poolData.feeGrowthGlobalB.toString());
+      const loA = BigInt(lowerTick.feeGrowthOutsideA.toString());
+      const loB = BigInt(lowerTick.feeGrowthOutsideB.toString());
+      const upA = BigInt(upperTick.feeGrowthOutsideA.toString());
+      const upB = BigInt(upperTick.feeGrowthOutsideB.toString());
+
+      const belowA = currentTick >= posData.tickLowerIndex ? loA : wrap(fgGA - loA);
+      const belowB = currentTick >= posData.tickLowerIndex ? loB : wrap(fgGB - loB);
+      const aboveA = currentTick < posData.tickUpperIndex ? upA : wrap(fgGA - upA);
+      const aboveB = currentTick < posData.tickUpperIndex ? upB : wrap(fgGB - upB);
+
+      const insideA = wrap(fgGA - belowA - aboveA);
+      const insideB = wrap(fgGB - belowB - aboveB);
+      const ckA = BigInt(posData.feeGrowthCheckpointA.toString());
+      const ckB = BigInt(posData.feeGrowthCheckpointB.toString());
+
+      const feeA = wrap(insideA - ckA) * liquidity / Q64 + BigInt(posData.feeOwedA.toString());
+      const feeB = wrap(insideB - ckB) * liquidity / Q64 + BigInt(posData.feeOwedB.toString());
+
+      const feeSol = Number(feeA) / 1e9;
+      const feeUsdc = Number(feeB) / 1e6;
 
       return {
         feeSolDecimal: feeSol,
         feeUsdcDecimal: feeUsdc,
-        feeTotalUsdc,
+        feeTotalUsdc: feeSol * solPrice + feeUsdc,
       };
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'getPendingFees failed', error: String(err), timestamp: Date.now() }));
