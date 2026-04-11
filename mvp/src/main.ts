@@ -127,9 +127,10 @@ dashboard.setRule2Enabled(rule2Enabled);
 autoDeployEnabled = getRuleEnabled(db, 'autoDeploy');
 dashboard.setAutoDeployEnabled(autoDeployEnabled);
 
-// Wrapper to auto-tag rebalance events with rule2 state
+// Wrapper to auto-tag rebalance events with rule2 state and position ID
 function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1]) {
-  insertRebalanceEvent(db_, { ...event, rule2Active: rule2Enabled ? 1 : 0 });
+  const posId = liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
+  insertRebalanceEvent(db_, { ...event, rule2Active: rule2Enabled ? 1 : 0, positionId: posId ?? undefined });
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────
@@ -577,6 +578,7 @@ async function main() {
       const currentPrice = currentLiveData?.solPrice ?? 0;
       console.log(JSON.stringify({ level: 'info', msg: 'ADD LIQUIDITY triggered from dashboard', timestamp: Date.now() }));
       const result = await executor.increaseLiquidity(currentPrice);
+      if (!result) throw new Error('No valid liquidity quote — insufficient funds or position out of range');
       insertRebalanceEventWithRule2(db, {
         timestamp: Date.now(), eventType: 'LIQUIDITY_ADDED', price: currentPrice, regime: liveRegime,
         note: `Manual add liquidity from dashboard. Deposited ${result.solDeposited.toFixed(6)} SOL + ${result.usdcDeposited.toFixed(2)} USDC = $${result.totalUsdc.toFixed(2)}. Liquidity added: ${result.liquidityAdded}.`,
@@ -953,6 +955,9 @@ async function runLiveCycle(price: number): Promise<void> {
       if (deployCheck.shouldDeploy) {
         console.log(JSON.stringify({ level: 'info', msg: `AUTO_DEPLOY: deploying $${deployCheck.deployableUsdc.toFixed(2)} idle capital`, timestamp: now }));
         const result = await liveExecutor.increaseLiquidity(price);
+        if (!result) {
+          console.log(JSON.stringify({ level: 'warn', msg: 'AUTO_DEPLOY: increaseLiquidity returned null, skipping', timestamp: now }));
+        } else {
         liveLastAutoDeployTime = now;
 
         insertRebalanceEventWithRule2(db, {
@@ -966,6 +971,7 @@ async function runLiveCycle(price: number): Promise<void> {
           prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
           decision: 'AUTO_DEPLOY', reasoning: `${deployCheck.reason}\nDeposited ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}). Position range: $${currentPos.priceLower.toFixed(2)}-$${currentPos.priceUpper.toFixed(2)}.`,
           params_json: JSON.stringify({ idleUsdc: deployCheck.idleUsdc, idealPrice: deployCheck.idealPrice, deployPct: deployCheck.currentDeployPct, deployableUsdc: deployCheck.deployableUsdc }) });
+        }
       } else {
         // Log skip reason periodically (every 30 min, same cadence as HOLD log)
         if (now - lastHoldLogTime >= 1_800_000 && deployCheck.reason !== 'DEPLOY_SKIPPED_DISABLED') {

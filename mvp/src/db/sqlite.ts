@@ -167,6 +167,11 @@ export function initDb(dbPath: string): Database.Database {
     db.exec(`ALTER TABLE rebalance_events ADD COLUMN rule2_active INTEGER DEFAULT 1`);
   } catch (_) { /* column already exists */ }
 
+  // Migration: add position_id column for per-position P&L tracking
+  try {
+    db.exec(`ALTER TABLE rebalance_events ADD COLUMN position_id TEXT`);
+  } catch (_) { /* column already exists */ }
+
   return db;
 }
 
@@ -211,12 +216,12 @@ export function getHistoryDayCount(db: Database.Database): number {
   return row.count;
 }
 
-export function insertRebalanceEvent(db: Database.Database, event: RebalanceEvent & { rule2Active?: number }): void {
+export function insertRebalanceEvent(db: Database.Database, event: RebalanceEvent & { rule2Active?: number; positionId?: string }): void {
   const stmt = db.prepare(`
-    INSERT INTO rebalance_events (timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close, rule2_active)
-    VALUES (@timestamp, @eventType, @price, @regime, @note, @solBefore, @usdcBefore, @solAfter, @usdcAfter, @feeSol, @feeUsdc, @ilAtClose, @rule2Active)
+    INSERT INTO rebalance_events (timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close, rule2_active, position_id)
+    VALUES (@timestamp, @eventType, @price, @regime, @note, @solBefore, @usdcBefore, @solAfter, @usdcAfter, @feeSol, @feeUsdc, @ilAtClose, @rule2Active, @positionId)
   `);
-  stmt.run({ ...event, rule2Active: event.rule2Active ?? 1 });
+  stmt.run({ ...event, rule2Active: event.rule2Active ?? 1, positionId: event.positionId ?? null });
 }
 
 export function getRebalanceEvents(db: Database.Database, limit: number): RebalanceEvent[] {

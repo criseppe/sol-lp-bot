@@ -14,22 +14,18 @@ export async function getWalletBalances(
   connection: Connection,
   owner: PublicKey,
 ): Promise<{ sol: number; usdc: number; totalUsdc: number; solPrice: number }> {
-  // SOL balance
-  const lamports = await connection.getBalance(owner);
-  const sol = lamports / LAMPORTS_PER_SOL;
+  const usdcMint = new PublicKey(MINTS.USDC);
+  const ata = await getAssociatedTokenAddress(usdcMint, owner);
 
-  // USDC balance
-  let usdc = 0;
-  try {
-    const usdcMint = new PublicKey(MINTS.USDC);
-    const ata = await getAssociatedTokenAddress(usdcMint, owner);
-    const account = await getAccount(connection, ata);
-    usdc = Number(account.amount) / 1_000_000; // USDC has 6 decimals
-  } catch {
-    // ATA doesn't exist = 0 USDC
-  }
+  // Fetch SOL and USDC balances in parallel
+  const [lamports, usdc] = await Promise.all([
+    connection.getBalance(owner),
+    getAccount(connection, ata)
+      .then(account => Number(account.amount) / 1_000_000)
+      .catch(() => 0), // ATA doesn't exist = 0 USDC
+  ]);
 
-  return { sol, usdc, totalUsdc: 0, solPrice: 0 }; // totalUsdc filled by caller
+  return { sol: lamports / LAMPORTS_PER_SOL, usdc, totalUsdc: 0, solPrice: 0 };
 }
 
 export function validateWalletForLive(sol: number, usdc: number, maxCapitalUsdc: number, solPrice = 150): void {

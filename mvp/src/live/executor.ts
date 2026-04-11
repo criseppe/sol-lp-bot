@@ -680,8 +680,8 @@ export class LiveExecutor {
 
   async increaseLiquidity(currentPrice: number): Promise<{
     solDeposited: number; usdcDeposited: number; totalUsdc: number; liquidityAdded: string;
-  }> {
-    if (!this.currentPosition) throw new Error('No open position');
+  } | null> {
+    if (!this.currentPosition) return null;
 
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
     const solMint = new PublicKey(MINTS.SOL);
@@ -771,7 +771,8 @@ export class LiveExecutor {
     }
 
     if (!quote || quote.liquidityAmount.isZero()) {
-      throw new Error(`Cannot add liquidity: SOL=${solAvailable.toFixed(4)}, USDC=${usdcAvailable.toFixed(2)}. No valid quote.`);
+      console.log(JSON.stringify({ level: 'warn', msg: `Cannot add liquidity: SOL=${solAvailable.toFixed(4)}, USDC=${usdcAvailable.toFixed(2)}. No valid quote.`, timestamp: Date.now() }));
+      return null;
     }
 
     const estSol = Number(quote.tokenEstA.toString()) / 1e9;
