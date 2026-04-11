@@ -1977,14 +1977,22 @@ function renderConfigHtml(): string {
     { key: 'harvestSolConvertPct', label: 'SOL→USDC harvest %', desc: 'After harvest, convert this % of SOL fees to USDC (0-1).', ex: '0→0.50: convert half of harvested SOL to USDC. De-risks gains.' },
   ];
 
+  // Original defaults from constants (for "Default" column)
+  const defaults = {
+    RANGING: { ...REGIME_PARAMS.RANGING },
+    BULLISH_TREND: { ...REGIME_PARAMS.BULLISH_TREND },
+    BEARISH_TREND: { ...REGIME_PARAMS.BEARISH_TREND },
+    EXTREME: { ...REGIME_PARAMS.EXTREME },
+  } as Record<string, any>;
+
   function rpRow(field: typeof rpFields[0]): string {
     return `<tr style="border-bottom:1px solid #21262d">
       <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px" title="${field.desc}&#10;&#10;Example: ${field.ex}">${field.label} <span style="color:#30363d;cursor:help" title="${field.desc}&#10;&#10;Example: ${field.ex}">&#x2753;</span></td>
-      ${regimes.map(r => `<td style="padding:4px 6px"><input type="number" step="any" class="cfg-input" data-key="regime.${r}.${field.key}" value="${(rp[r] as any)[field.key]}" style="width:60px"></td>`).join('')}
+      ${regimes.map(r => `<td style="padding:4px 6px;text-align:center"><span style="color:#30363d;font-size:10px">${defaults[r][field.key]}</span><br><input type="number" step="any" class="cfg-input" data-key="regime.${r}.${field.key}" value="${(rp[r] as any)[field.key]}" style="width:60px"></td>`).join('')}
     </tr>`;
   }
 
-  function field(key: string, value: string | number, label: string, desc: string, ex: string, inputType = 'number'): string {
+  function field(key: string, value: string | number, defaultVal: string | number, label: string, desc: string, ex: string, inputType = 'number'): string {
     const inputStyle = 'background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:80px';
     const isToggle = inputType === 'toggle';
     const inputHtml = isToggle
@@ -1992,9 +2000,10 @@ function renderConfigHtml(): string {
       : `<input type="${inputType}" step="any" class="cfg-input" data-key="${key}" value="${value}" style="${inputStyle}">`;
     return `<tr style="border-bottom:1px solid #21262d">
       <td style="padding:8px;color:#c9d1d9;font-size:12px">${label}</td>
+      <td style="padding:8px;color:#30363d;font-size:11px">${defaultVal}</td>
       <td style="padding:8px">${inputHtml}</td>
-      <td style="padding:8px;color:#8b949e;font-size:11px;max-width:250px">${desc}</td>
-      <td style="padding:8px;color:#58a6ff;font-size:11px;max-width:250px">${ex}</td>
+      <td style="padding:8px;color:#8b949e;font-size:11px;max-width:220px">${desc}</td>
+      <td style="padding:8px;color:#58a6ff;font-size:11px;max-width:220px">${ex}</td>
     </tr>`;
   }
 
@@ -2033,10 +2042,10 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>1. Decision Loop</h3>
   <table>
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('decisionIntervalSeconds', c.decisionIntervalSeconds, 'Cycle interval (sec)', 'How often the bot reads price and makes decisions.', 'At 30s: faster OOR detection but 2x RPC calls. At 120s: saves RPC but slower reaction.')}
-    ${field('regimeWindowDays', c.regimeWindowDays, 'Regime window (days)', 'Days of daily closes for regime detection.', 'At 14 days: smoother regime, slower to react. At 3 days: reactive but may flap.')}
-    ${field('trendThreshold', c.trendThreshold, 'Trend threshold', 'dirRatio above this = trending. Higher = stays RANGING longer.', 'At 0.50: only strong trends flip regime. At 0.20: even mild trends trigger.')}
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('decisionIntervalSeconds', c.decisionIntervalSeconds, 60, 'Cycle interval (sec)', 'How often the bot reads price and makes decisions.', 'At 30s: faster OOR detection but 2x RPC calls. At 120s: saves RPC but slower reaction.')}
+    ${field('regimeWindowDays', c.regimeWindowDays, 7, 'Regime window (days)', 'Days of daily closes for regime detection.', 'At 14 days: smoother regime, slower to react. At 3 days: reactive but may flap.')}
+    ${field('trendThreshold', c.trendThreshold, 0.35, 'Trend threshold', 'dirRatio above this = trending. Higher = stays RANGING longer.', 'At 0.50: only strong trends flip regime. At 0.20: even mild trends trigger.')}
   </table>
 </div>
 
@@ -2044,7 +2053,7 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>2. Position Rules</h3>
   <table style="margin-bottom:16px">
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:8px;color:#c9d1d9;font-size:12px">Range width override</td>
       <td style="padding:8px">
@@ -2077,11 +2086,11 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>3. Capital &amp; Reserves</h3>
   <table>
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $10k: allows large wallet. At $500: stops on accidental deposits.')}
-    ${field('solReserve', c.solReserve, 'SOL reserve', 'Always kept for gas + rent. Never deposited.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
-    ${field('usdcReserve', c.usdcReserve, 'USDC reserve ($)', 'Minimum USDC always in wallet.', 'At $5: more buffer. At $0: risk token account errors.')}
-    ${field('minPositionSizeUsdc', c.minPositionSizeUsdc, 'Min position size ($)', 'Won&#39;t open below this. Prevents dust positions.', 'At $500: only meaningful positions. At $50: allows small deploys.')}
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 5000, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $10k: allows large wallet. At $500: stops on accidental deposits.')}
+    ${field('solReserve', c.solReserve, 0.1, 'SOL reserve', 'Always kept for gas + rent. Never deposited.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
+    ${field('usdcReserve', c.usdcReserve, 1, 'USDC reserve ($)', 'Minimum USDC always in wallet.', 'At $5: more buffer. At $0: risk token account errors.')}
+    ${field('minPositionSizeUsdc', c.minPositionSizeUsdc, 100, 'Min position size ($)', 'Won&#39;t open below this. Prevents dust positions.', 'At $500: only meaningful positions. At $50: allows small deploys.')}
   </table>
 </div>
 
@@ -2089,13 +2098,13 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>4. Auto Deploy (Rule 7)</h3>
   <table>
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('autoDeployCheckMinutes', c.autoDeployCheckMinutes, 'Check frequency (min)', 'How often to check for idle funds. Each check = 2 RPC calls.', 'At 10 min: half RPC cost. At 1 min: very responsive but noisy.')}
-    ${field('autoDeployCooldownMinutes', c.autoDeployCooldownMinutes, 'Cooldown (min)', 'Minimum time between deployments.', 'At 15 min: faster cleanup of swap leftovers. At 60: less activity.')}
-    ${field('minIdleUsdc', c.minIdleUsdc, 'Min idle USDC ($)', 'Min idle USDC after reserve to trigger deploy.', 'At $20: ignores small amounts. At $1: deploys tiny leftovers.')}
-    ${field('minIdleSol', c.minIdleSol, 'Min idle SOL', 'Min idle SOL after reserve to trigger deploy.', 'At 0.5 SOL (~$42): only meaningful amounts. At 0.01: deploys dust.')}
-    ${field('minDeployUsdc', c.minDeployUsdc, 'Min deploy ($)', 'Min total deployable value to trigger.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
-    ${field('deployRatioTolerance', c.deployRatioTolerance, 'Price ratio tolerance', 'Max deviation from geometric mean (0-1). Wider = more deploy opportunities.', 'At 0.05: deploys even near range edges. At 0.01: only near center.')}
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('autoDeployCheckMinutes', c.autoDeployCheckMinutes, 5, 'Check frequency (min)', 'How often to check for idle funds. Each check = 2 RPC calls.', 'At 10 min: half RPC cost. At 1 min: very responsive but noisy.')}
+    ${field('autoDeployCooldownMinutes', c.autoDeployCooldownMinutes, 30, 'Cooldown (min)', 'Minimum time between deployments.', 'At 15 min: faster cleanup of swap leftovers. At 60: less activity.')}
+    ${field('minIdleUsdc', c.minIdleUsdc, 5, 'Min idle USDC ($)', 'Min idle USDC after reserve to trigger deploy.', 'At $20: ignores small amounts. At $1: deploys tiny leftovers.')}
+    ${field('minIdleSol', c.minIdleSol, 0.05, 'Min idle SOL', 'Min idle SOL after reserve to trigger deploy.', 'At 0.5 SOL (~$42): only meaningful amounts. At 0.01: deploys dust.')}
+    ${field('minDeployUsdc', c.minDeployUsdc, 10, 'Min deploy ($)', 'Min total deployable value to trigger.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
+    ${field('deployRatioTolerance', c.deployRatioTolerance, 0.02, 'Price ratio tolerance', 'Max deviation from geometric mean (0-1). Wider = more deploy opportunities.', 'At 0.05: deploys even near range edges. At 0.01: only near center.')}
   </table>
 </div>
 
@@ -2103,11 +2112,11 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>5. Re-entry (Rule 3)</h3>
   <table>
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('pullbackThresholdPct', c.pullbackThresholdPct, 'Pullback threshold (%)', 'Price must drop this % from peak to re-enter.', 'At 5%: bigger pullback, better entry but longer wait. At 1%: quick re-entry.')}
-    ${field('timeoutHours', c.timeoutHours, 'Timeout (hours)', 'Re-enter after this long even without pullback.', 'At 8h: more patience. At 1h: re-enters quickly, prioritizes fee earning.')}
-    ${field('flashCrashPct', c.flashCrashPct, 'Flash crash threshold (%)', 'Drop this % in ~5 min = flash crash. Triggers cooldown.', 'At 10%: only extreme crashes trigger. At 3%: even moderate drops pause.')}
-    ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash. Also resets peak + timeout.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('pullbackThresholdPct', c.pullbackThresholdPct, 2.5, 'Pullback threshold (%)', 'Price must drop this % from peak to re-enter.', 'At 5%: bigger pullback, better entry but longer wait. At 1%: quick re-entry.')}
+    ${field('timeoutHours', c.timeoutHours, 4, 'Timeout (hours)', 'Re-enter after this long even without pullback.', 'At 8h: more patience. At 1h: re-enters quickly, prioritizes fee earning.')}
+    ${field('flashCrashPct', c.flashCrashPct, 5, 'Flash crash threshold (%)', 'Drop this % in ~5 min = flash crash. Triggers cooldown.', 'At 10%: only extreme crashes trigger. At 3%: even moderate drops pause.')}
+    ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 15, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash. Also resets peak + timeout.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
   </table>
 </div>
 
@@ -2115,11 +2124,11 @@ ${NAV_HTML}
 <div class="cfg-section">
   <h3>6. Circuit Breakers</h3>
   <table>
-    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('dailyLossLimitPct', c.dailyLossLimitPct, 'Daily loss limit (%)', 'HALT if portfolio drops more than this in a day.', 'At 10%: more tolerance for volatile days. At 3%: very conservative.')}
-    ${field('weeklyDrawdownLimitPct', c.weeklyDrawdownLimitPct, 'Weekly drawdown (%)', 'HALT if portfolio drops this from weekly peak.', 'At 25%: allows larger drawdown. At 10%: halts early in downtrends.')}
-    ${field('maxIlPct', c.maxIlPct, 'Max IL (%)', 'Force rebalance if IL exceeds this on any position.', 'At 15%: allows more IL (wider ranges). At 5%: very tight IL control.')}
-    ${field('rebalanceLoopLimit', c.rebalanceLoopLimit, 'Rebalance limit (/hour)', 'Max close+reopen cycles per hour.', 'At 20: more activity in volatile markets. At 5: stricter limit.')}
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('dailyLossLimitPct', c.dailyLossLimitPct, 5, 'Daily loss limit (%)', 'HALT if portfolio drops more than this in a day.', 'At 10%: more tolerance for volatile days. At 3%: very conservative.')}
+    ${field('weeklyDrawdownLimitPct', c.weeklyDrawdownLimitPct, 15, 'Weekly drawdown (%)', 'HALT if portfolio drops this from weekly peak.', 'At 25%: allows larger drawdown. At 10%: halts early in downtrends.')}
+    ${field('maxIlPct', c.maxIlPct, 8, 'Max IL (%)', 'Force rebalance if IL exceeds this on any position.', 'At 15%: allows more IL (wider ranges). At 5%: very tight IL control.')}
+    ${field('rebalanceLoopLimit', c.rebalanceLoopLimit, 10, 'Rebalance limit (/hour)', 'Max close+reopen cycles per hour.', 'At 20: more activity in volatile markets. At 5: stricter limit.')}
   </table>
 </div>
 
