@@ -66,7 +66,7 @@ let liveBotState: BotState = 'IDLE';
 let livePullbackActive = false;
 let livePullbackPeak = 0;
 let livePullbackStart = 0;
-let liveLastHarvestTime = Date.now();
+let liveLastHarvestTime = 0; // 0 = harvest on first check if due
 let liveLastRegimeCheck = 0;
 let liveLastRegimeEvalLog = 0;
 let liveRebalancesThisHour = 0;
@@ -852,6 +852,10 @@ async function runLiveCycle(price: number): Promise<void> {
         livePullbackPeak = price;
         livePullbackStart = now;
         liveBotState = 'WAITING_PULLBACK';
+        // Save immediately — crash before next cycle would lose pullback state
+        upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: 'null', updated_at: Date.now(),
+          cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+          tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields() });
         return;
       }
     }
@@ -877,6 +881,10 @@ async function runLiveCycle(price: number): Promise<void> {
       livePullbackPeak = price;
       livePullbackStart = now;
       liveBotState = 'WAITING_PULLBACK';
+      // Save immediately — crash before next cycle would lose pullback state
+      upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: 'null', updated_at: Date.now(),
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+        tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields() });
       return;
     }
   }
@@ -1018,6 +1026,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
     const pos = await liveExecutor.openPosition(range, price, liveRegime, deployUsdc);
     if (!pos) return;
     liveRebalancesThisHour++;
+    dailyRebalanceCount++;
     liveBotState = 'ACTIVE';
 
     const comp = await liveExecutor.getPositionComposition();
@@ -1069,6 +1078,7 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     liveCumFeesUsdc += result.feeUsdcCollected;
     liveRealizedIl += result.ilAtClose;
     liveRebalancesThisHour++;
+    dailyRebalanceCount++;
 
     const why = triggerReason ?? `Position closed (${eventType}).`;
     const posInfo = ` Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}, close at $${result.closePrice.toFixed(2)}.`;
@@ -1115,6 +1125,7 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
 let lastPnlDate = '';
 let dailySummaryInitialValue = 0;
 let dailySummaryCumInjected = 0;
+let dailyRebalanceCount = 0;
 
 function checkAndWriteDailyPnl(currentPrice: number) {
   const today = new Date().toISOString().slice(0, 10);
@@ -1136,6 +1147,7 @@ function checkAndWriteDailyPnl(currentPrice: number) {
       }
     }
     dailySummaryInitialValue = totalValue;
+    dailyRebalanceCount = 0;
     lastPnlDate = today;
 
     upsertDailyPnl(db, {
@@ -1145,7 +1157,7 @@ function checkAndWriteDailyPnl(currentPrice: number) {
       fees_sol: liveCumFeesSol, fees_usdc: liveCumFeesUsdc,
       il_cost: liveRealizedIl,
       net_pnl: totalFeesUsdc + liveRealizedIl, net_pnl_pct: totalValue > 0 ? ((totalFeesUsdc + liveRealizedIl) / totalValue) * 100 : 0,
-      rebalances: 0,
+      rebalances: dailyRebalanceCount,
       in_range_pct: null, regime: liveRegime,
     });
   }
@@ -1163,7 +1175,7 @@ function checkAndWriteDailyPnl(currentPrice: number) {
     wallet_usdc: walletValue,
     position_usdc: positionValue,
     total_usdc: totalValue,
-    injected_usdc: 0, // intra-day injections tracked separately
+    injected_usdc: dailySummaryCumInjected,
     fees_earned_usdc: dailyFeesEarned,
     cum_fees_usdc: totalFeesUsdc,
     portfolio_change: portfolioChange,
