@@ -70,6 +70,7 @@ export class PaperTradingEngine {
   private lastHarvestTime: number;
   private lastRegimeCheck = 0;
   private flashCrashCooldownUntil = 0;
+  private recentPrices: number[] = [];
   private rebalancesThisHour = 0;
   private rebalanceHourStart: number;
   private capitalUsdc: number;
@@ -202,6 +203,10 @@ export class PaperTradingEngine {
   private runBotCycle(price: number, db: Database.Database, feeRate = 3000): EventType {
     const now = Date.now();
 
+    // Track recent prices for flash crash detection
+    this.recentPrices.push(price);
+    if (this.recentPrices.length > 10) this.recentPrices.shift();
+
     // Step 1: If HALTED, return early
     if (this.botState === 'HALTED') return 'CYCLE_SKIP';
 
@@ -236,6 +241,11 @@ export class PaperTradingEngine {
     // Step 3: No open position → open one
     if (!this.bot.openPosition) {
       if (this.pullbackWatchActive) {
+        // Flash crash detection during pullback watch
+        if (isFlashCrash(this.recentPrices)) {
+          this.flashCrashCooldownUntil = now + REENTRY.FLASH_CRASH_WAIT_MINUTES * 60_000;
+          return 'CYCLE_SKIP';
+        }
         // Step 6: Pullback watch
         const decision = shouldReenterAfterUpside(
           price, this.pullbackPeakPrice, this.pullbackWatchStart, now,
