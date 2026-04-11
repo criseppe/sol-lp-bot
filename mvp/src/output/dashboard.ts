@@ -1862,14 +1862,6 @@ function renderInsightsHtml(data: InsightsData): string {
 ${NAV_HTML}
 <script>document.getElementById('nav-insights').classList.add('active')</script>
 
-<div class="card" style="margin-bottom:16px">
-  <h2>Total Portfolio Value (24h) — Wallet + Liquidity Position</h2>
-  ${detectedInjections.length > 0 ? `<div style="font-size:11px;color:#a855f7;margin-bottom:6px">Capital injected: $${fmt(totalInjected, 2)} (${detectedInjections.length} event${detectedInjections.length > 1 ? 's' : ''}) — marked with <span style="border-left:2px dashed #a855f7;padding-left:4px">dashed lines</span></div>` : ''}
-  <svg width="100%" height="105" viewBox="0 0 600 105" preserveAspectRatio="xMidYMid meet">
-    ${chartSvg}
-  </svg>
-</div>
-
 ${(() => {
   // Group 7d snapshots by date, take last snapshot of each day
   const dailyMap = new Map<string, { total: number; wallet: number; position: number }>();
@@ -1898,45 +1890,54 @@ ${(() => {
 
   if (days.length === 0) return '<div class="card" style="margin-bottom:16px"><h2>Daily Portfolio Value (7 days)</h2><div style="color:#8b949e;text-align:center;padding:20px">Collecting data...</div></div>';
 
-  const maxVal = Math.max(...days.map(d => d[1].total));
-  const minVal = Math.min(...days.map(d => d[1].total));
-  const barW = Math.floor(500 / days.length) - 8;
+  // Each bar = wallet + position + injections stacked
+  const maxVal = Math.max(...days.map(([d, v]) => v.total + (dailyInjections.get(d) ?? 0)));
+  const barW = Math.min(80, Math.floor(500 / days.length) - 8);
   const chartH = 100;
-  const topPad = 35; // space for labels above bars
+  const topPad = 35;
   const baseY = chartH + topPad;
-  // Scale bars relative to min-max range, but start bars from bottom
-  const scaleRange = maxVal - minVal || 1;
 
   const bars = days.map(([date, val], i) => {
-    const x = i * (barW + 8) + 40;
-    const barH = Math.max(4, ((val.total - minVal) / scaleRange) * chartH * 0.8 + chartH * 0.2);
-    const posH = val.position > 0 ? (val.position / val.total) * barH : 0;
-    const walH = barH - posH;
-    const y = baseY - barH;
-    const dayLabel = date.slice(5); // MM-DD
-    const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
-    const rawChange = i > 0 ? val.total - days[i-1][1].total : 0;
+    const x = i * (barW + 8) + 50;
     const injected = dailyInjections.get(date) ?? 0;
-    const organicChange = rawChange - injected;
-    const changeCol = organicChange >= 0 ? '#22c55e' : '#ef4444';
-    const injLabel = injected > 0 ? `<text x="${x + barW/2}" y="${Math.max(10, y - 23)}" text-anchor="middle" fill="#a855f7" font-size="8">+$${fmt(injected, 0)} injected</text>` : '';
+    const dayTotal = val.total;
+    const walletVal = val.wallet;
+    const positionVal = val.position;
+
+    // Scale: bar height proportional to total value
+    const fullH = Math.max(4, (dayTotal / maxVal) * chartH * 0.85 + chartH * 0.15);
+    const y = baseY - fullH;
+
+    // Stack proportions within the bar
+    const injH = injected > 0 ? Math.max(2, (injected / dayTotal) * fullH) : 0;
+    const posH = positionVal > 0 ? Math.max(2, (positionVal / dayTotal) * (fullH - injH)) : 0;
+    const walH = fullH - posH - injH;
+
+    const dayLabel = date.slice(5);
+    const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+
     return `
-      <rect x="${x}" y="${y + walH}" width="${barW}" height="${posH}" fill="#58a6ff" rx="0"/>
-      <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2"/>
+      <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2" title="Wallet: $${fmt(walletVal, 0)}"/>
+      <rect x="${x}" y="${y + walH}" width="${barW}" height="${posH}" fill="#58a6ff" rx="0" title="Position: $${fmt(positionVal, 0)}"/>
+      ${injH > 0 ? `<rect x="${x}" y="${y + walH + posH}" width="${barW}" height="${injH}" fill="#a855f7" rx="0" title="Injected: $${fmt(injected, 0)}"/>` : ''}
+      <text x="${x + barW/2}" y="${Math.max(topPad + 5, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(dayTotal, 0)}</text>
       <text x="${x + barW/2}" y="${baseY + 12}" text-anchor="middle" fill="#8b949e" font-size="9">${dayLabel}</text>
-      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>
-      <text x="${x + barW/2}" y="${Math.max(topPad + 5, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(val.total, 0)}</text>
-      ${i > 0 ? `<text x="${x + barW/2}" y="${Math.max(topPad - 5, y - 13)}" text-anchor="middle" fill="${changeCol}" font-size="8">${organicChange >= 0 ? '+' : ''}${fmt(organicChange, 2)} organic</text>` : ''}
-      ${injLabel}`;
+      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>`;
   }).join('');
 
+  const hasInjections = dailyInjections.size > 0;
   return `<div class="card" style="margin-bottom:16px">
-  <h2>Daily Portfolio Value (7 days) — <span style="color:#22c55e80">Wallet</span> + <span style="color:#58a6ff">Position</span>${dailyInjections.size > 0 ? ' + <span style="color:#a855f7">Injections</span>' : ''}</h2>
+  <h2>Daily Portfolio Value (7 days)</h2>
+  <div style="font-size:11px;color:#8b949e;margin-bottom:6px;display:flex;gap:16px">
+    <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e80;border-radius:2px;vertical-align:middle"></span> Wallet</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#58a6ff;border-radius:2px;vertical-align:middle"></span> Position</span>
+    ${hasInjections ? '<span><span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:2px;vertical-align:middle"></span> Injections</span>' : ''}
+  </div>
   <svg width="100%" height="170" viewBox="0 0 600 170" preserveAspectRatio="xMidYMid meet">
+    <line x1="45" y1="${topPad}" x2="45" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
+    <line x1="45" y1="${baseY}" x2="590" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
     <text x="5" y="${topPad + 5}" fill="#8b949e" font-size="9">$${fmt(maxVal, 0)}</text>
-    <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$${fmt(minVal, 0)}</text>
-    <line x1="35" y1="${topPad}" x2="35" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
-    <line x1="35" y1="${baseY}" x2="590" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
+    <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$0</text>
     ${bars}
   </svg>
 </div>`;
