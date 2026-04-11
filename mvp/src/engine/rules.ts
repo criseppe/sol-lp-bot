@@ -1,7 +1,6 @@
 import type { Regime, RegimeParams, PaperPosition, ProximityState, RangeBounds } from '../types.js';
 import { REGIME_PARAMS, REENTRY } from '../constants.js';
-
-// No imports from data/ or db/ — all functions are pure
+import { runtime } from '../config.js';
 
 export interface ReentryDecision {
   should: boolean;
@@ -178,8 +177,8 @@ export function checkAutoDeploy(opts: {
     minIdleUsdc, minIdleSol, minDeployUsdc, deployRatioTolerance,
   } = opts;
 
-  const solReserve = 0.1;
-  const usdcReserve = 1;
+  const solReserve = runtime.solReserve;
+  const usdcReserve = runtime.usdcReserve;
   const idleSol = Math.max(0, walletSol - solReserve);
   const idleUsdcRaw = Math.max(0, walletUsdc - usdcReserve);
   const idleUsdc = idleSol * currentPrice + idleUsdcRaw;

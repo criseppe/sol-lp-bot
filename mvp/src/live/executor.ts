@@ -18,9 +18,12 @@ import type { RangeBounds, Regime } from '../types.js';
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
 const SLIPPAGE = Percentage.fromFraction(50, 10000); // 0.5% slippage
-const SOL_RESERVE = 0.1;    // Always keep in wallet for gas + position rent
-const USDC_RESERVE = 1;     // Always keep in wallet
 const SWAP_BUFFER = 1.03;   // 3% buffer on swap amounts for slippage
+
+// Dynamic reserves — read from runtime config (updated via /config page)
+import { runtime } from '../config.js';
+function getSolReserve(): number { return runtime.solReserve; }
+function getUsdcReserve(): number { return runtime.usdcReserve; }
 
 export interface LivePosition {
   positionMint: PublicKey;
@@ -123,8 +126,8 @@ export class LiveExecutor {
     // Get actual balances — no swap here; auto-deploy (Rule 7) will top up later
     const solBal = await this.getSolBalance();
     const usdcBal = await this.getUsdcBalance();
-    const solAvailable = Math.max(0, solBal - SOL_RESERVE);
-    const usdcAvailable = Math.max(0, usdcBal - USDC_RESERVE);
+    const solAvailable = Math.max(0, solBal - getSolReserve());
+    const usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
 
     const usdcMint = new PublicKey(MINTS.USDC);
     const solMint = new PublicKey(MINTS.SOL);
@@ -562,8 +565,8 @@ export class LiveExecutor {
     if (!this.currentPosition) return null;
     const solBal = await this.getSolBalance();
     const usdcBal = await this.getUsdcBalance();
-    const solReserve = SOL_RESERVE;
-    const usdcReserve = USDC_RESERVE;
+    const solReserve = getSolReserve();
+    const usdcReserve = getUsdcReserve();
     const solAvailable = Math.max(0, solBal - solReserve);
     const usdcAvailable = Math.max(0, usdcBal - usdcReserve);
     if (solAvailable < 0.001 && usdcAvailable < 0.5) return null;
@@ -604,8 +607,8 @@ export class LiveExecutor {
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
     const solMint = new PublicKey(MINTS.SOL);
     const usdcMint = new PublicKey(MINTS.USDC);
-    const solReserve = SOL_RESERVE;
-    const usdcReserve = USDC_RESERVE;
+    const solReserve = getSolReserve();
+    const usdcReserve = getUsdcReserve();
     const { tickLower, tickUpper } = this.currentPosition;
 
     let solBal = await this.getSolBalance();
