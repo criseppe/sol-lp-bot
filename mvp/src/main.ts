@@ -540,6 +540,8 @@ async function main() {
         prox_lower: null, prox_upper: null, in_range: null,
         decision: `AUTODEPLOY_${action}`, reasoning: `Auto capital deployment ${action.toLowerCase()} from dashboard. ${enabled ? 'Idle wallet funds will be automatically deployed into the position when conditions are met.' : 'Auto deployment disabled. Use manual Add Liquidity to deploy capital.'}`,
         params_json: null });
+      // Trigger immediate check when enabled (skip the 5-min wait)
+      if (enabled) liveLastAutoDeployCheck = 0;
     });
 
     dashboard.onAddLiquidityPreview(async () => {
