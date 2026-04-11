@@ -72,6 +72,10 @@ if (liveCumFeesSol || liveCumFeesUsdc || liveRealizedIl) {
 }
 let lastHoldLogTime = 0;
 let currentLiveData: LiveData | null = null;
+let lastPendingFeesCheck = 0;
+let cachedPendingFeesSol = 0;
+let cachedPendingFeesUsdc = 0;
+let cachedPendingFeesTotal = 0;
 let liveLastAutoDeployTime = 0;
 let liveLastAutoDeployCheck = 0;
 let liveLastHarvestCheck = 0;
@@ -356,11 +360,20 @@ async function main() {
           const posData = await exec.getPositionData();
           const posComp = await exec.getPositionComposition();
 
-          // Real pending fees from on-chain fee growth data (collectFeesQuote)
-          const pendingFees = await exec.getPendingFees();
-          const pendingFeesSol = pendingFees?.feeSolDecimal ?? 0;
-          const pendingFeesUsdc = pendingFees?.feeUsdcDecimal ?? 0;
-          const pendingFeesTotal = pendingFees?.feeTotalUsdc ?? 0;
+          // Real pending fees from on-chain fee growth data (every 2 min, expensive: 4 RPC calls)
+          const nowMs = Date.now();
+          if (nowMs - lastPendingFeesCheck >= 120_000) {
+            lastPendingFeesCheck = nowMs;
+            const freshFees = await exec.getPendingFees();
+            if (freshFees) {
+              cachedPendingFeesSol = freshFees.feeSolDecimal;
+              cachedPendingFeesUsdc = freshFees.feeUsdcDecimal;
+              cachedPendingFeesTotal = freshFees.feeTotalUsdc;
+            }
+          }
+          const pendingFeesSol = cachedPendingFeesSol;
+          const pendingFeesUsdc = cachedPendingFeesUsdc;
+          const pendingFeesTotal = cachedPendingFeesTotal;
           const totalFeesUsdc = pendingFeesTotal + liveCumFeesSol * price.price + liveCumFeesUsdc;
 
           // Position composition
