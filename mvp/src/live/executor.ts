@@ -356,6 +356,9 @@ export class LiveExecutor {
       await this.execTx(txBuilder);
     }
 
+    // Only clear position state AFTER all TXs succeeded
+    this.currentPosition = null;
+
     const solAfter = await this.getSolBalance();
     const usdcAfter = await this.getUsdcBalance();
 
@@ -371,7 +374,6 @@ export class LiveExecutor {
       timestamp: Date.now(),
     }));
 
-    this.currentPosition = null;
     return {
       solReceived: solAfter - solBefore,
       usdcReceived: usdcAfter - usdcBefore,

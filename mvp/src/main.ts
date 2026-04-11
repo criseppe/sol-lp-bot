@@ -12,7 +12,7 @@ import { startTelegramReporter } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine/regime.js';
-import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
+import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
 import { REENTRY, RISK, MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 
@@ -110,6 +110,8 @@ let liveLastAutoDeployTime = 0;
 let liveLastAutoDeployCheck = 0;
 let liveLastHarvestCheck = 0;
 let autoDeployEnabled = true; // will be loaded from DB
+let liveFlashCrashCooldownUntil = 0; // timestamp: block re-entry until this time
+let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detection
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
@@ -177,22 +179,10 @@ async function main() {
     validateWalletForLive(balances.sol, balances.usdc, MAX_LIVE_CAPITAL_USDC, solPrice);
     liveExecutor = new LiveExecutor(conn, wallet, WHIRLPOOL_ADDRESS);
 
-    // Read actual gas from blockchain on startup (always accurate)
-    try {
-      const sigs = await conn.getSignaturesForAddress(wallet.publicKey, { limit: 100 });
-      let totalGas = 0;
-      for (const sig of sigs) {
-        const tx = await conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 });
-        if (tx?.meta?.fee) totalGas += tx.meta.fee;
-      }
-      liveExecutor.cumGasLamports = totalGas;
-      liveExecutor.txCount = sigs.length;
-      console.log(JSON.stringify({ level: 'info', msg: `gas from chain: ${totalGas} lamports (${(totalGas/1e9).toFixed(6)} SOL), ${sigs.length} txs`, timestamp: Date.now() }));
-    } catch (err) {
-      console.log(JSON.stringify({ level: 'warn', msg: `gas read failed, using DB: ${String(err)}`, timestamp: Date.now() }));
-      liveExecutor.cumGasLamports = (savedState as any)?.cum_gas_lamports ?? 0;
-      liveExecutor.txCount = (savedState as any)?.tx_count ?? 0;
-    }
+    // Restore gas stats from DB (persisted on every state save and shutdown)
+    liveExecutor.cumGasLamports = (savedState as any)?.cum_gas_lamports ?? 0;
+    liveExecutor.txCount = (savedState as any)?.tx_count ?? 0;
+    console.log(JSON.stringify({ level: 'info', msg: `gas from DB: ${liveExecutor.cumGasLamports} lamports (${(liveExecutor.cumGasLamports/1e9).toFixed(6)} SOL), ${liveExecutor.txCount} txs`, timestamp: Date.now() }));
 
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
@@ -748,6 +738,10 @@ async function runLiveCycle(price: number): Promise<void> {
 
   if (liveBotState === 'HALTED') return;
 
+  // Track recent prices for flash crash detection (keep last 10)
+  liveRecentPrices.push(price);
+  if (liveRecentPrices.length > 10) liveRecentPrices.shift();
+
   // Regime update (every 1 hour)
   if (now - liveLastRegimeCheck > 3_600_000) {
     const closes = getDailyCloses(db, REGIME_WINDOW_DAYS);
@@ -804,9 +798,24 @@ async function runLiveCycle(price: number): Promise<void> {
   // No position → open one
   if (!currentPos) {
     if (livePullbackActive) {
+      // Flash crash detection: if price dropped >= 5% in recent candles, enforce cooldown
+      if (now < liveFlashCrashCooldownUntil) {
+        return; // still in flash crash cooldown, skip re-entry
+      }
+      if (isFlashCrash(liveRecentPrices)) {
+        liveFlashCrashCooldownUntil = now + REENTRY.FLASH_CRASH_WAIT_MINUTES * 60_000;
+        console.log(JSON.stringify({ level: 'warn', msg: `Flash crash detected (>=${REENTRY.FLASH_CRASH_PCT}% drop). Waiting ${REENTRY.FLASH_CRASH_WAIT_MINUTES}min before re-entry.`, timestamp: now }));
+        insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+          prox_lower: null, prox_upper: null, in_range: null,
+          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `Flash crash detected: price dropped >=${REENTRY.FLASH_CRASH_PCT}% in recent candles. Blocking re-entry for ${REENTRY.FLASH_CRASH_WAIT_MINUTES} minutes to avoid catching a falling knife.`,
+          params_json: null });
+        return;
+      }
+
       const decision = shouldReenterAfterUpside(price, livePullbackPeak, livePullbackStart, now);
       if (decision.should) {
         livePullbackActive = false;
+        liveFlashCrashCooldownUntil = 0;
         const waitH = ((now - livePullbackStart) / 3600_000).toFixed(1);
         const pullPct = ((livePullbackPeak - price) / livePullbackPeak * 100).toFixed(1);
         const reason = decision.reason === 'PULLBACK'
