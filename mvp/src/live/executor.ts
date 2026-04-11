@@ -18,7 +18,7 @@ import type { RangeBounds, Regime } from '../types.js';
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
 const SLIPPAGE = Percentage.fromFraction(50, 10000); // 0.5% slippage
-const SOL_RESERVE = 0.05;   // Always keep in wallet for gas
+const SOL_RESERVE = 0.1;    // Always keep in wallet for gas + position rent
 const USDC_RESERVE = 1;     // Always keep in wallet
 const SWAP_BUFFER = 1.03;   // 3% buffer on swap amounts for slippage
 
@@ -235,24 +235,26 @@ export class LiveExecutor {
     // Refresh pool data after potential swap
     await whirlpool.refreshData();
 
-    // Quote with updated balances — try SOL first (usually the limiting token)
-    let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(solAvailable),
+    // Quote with updated balances — cap at ideal split to respect deploy target
+    const quoteSol = Math.min(solAvailable, idealSol);
+    const quoteUsdc = Math.min(usdcAvailable, idealUsdc);
+    let quote = quoteSol > 0.01 ? increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(quoteSol),
       range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
     let quotedBy = 'SOL';
 
     if (quote) {
       const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
-      if (usdcNeeded > usdcAvailable) {
+      if (usdcNeeded > quoteUsdc) {
         // Try USDC quote instead
         quote = increaseLiquidityQuoteByInputToken(
-          usdcMint, new Decimal(usdcAvailable),
+          usdcMint, new Decimal(quoteUsdc),
           range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
         );
         quotedBy = 'USDC';
         const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
-        if (solNeeded > solAvailable) quote = null;
+        if (solNeeded > quoteSol) quote = null;
       }
     }
 

@@ -178,7 +178,7 @@ export function checkAutoDeploy(opts: {
     minIdleUsdc, minIdleSol, minDeployUsdc, deployRatioTolerance,
   } = opts;
 
-  const solReserve = 0.05;
+  const solReserve = 0.1;
   const usdcReserve = 1;
   const idleSol = Math.max(0, walletSol - solReserve);
   const idleUsdcRaw = Math.max(0, walletUsdc - usdcReserve);
