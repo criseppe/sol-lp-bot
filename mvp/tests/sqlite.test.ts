@@ -248,3 +248,46 @@ describe('pruneOldPriceTicks', () => {
     expect(rows.some((r: any) => r.source === 'live' && r.price === 150)).toBe(true);
   });
 });
+
+describe('position_id tracking', () => {
+  it('stores and retrieves position_id', () => {
+    const posId = 'TestMint123abc';
+    insertRebalanceEvent(db, {
+      timestamp: Date.now(), eventType: 'POSITION_OPENED', price: 84, regime: 'RANGING',
+      note: 'test', solBefore: 1, usdcBefore: 50, solAfter: 0.5, usdcAfter: 25,
+      feeSol: 0, feeUsdc: 0, ilAtClose: 0, positionId: posId,
+    });
+    const events = getRebalanceEvents(db, 1);
+    expect(events).toHaveLength(1);
+    expect((events[0] as any).positionId).toBe(posId);
+  });
+
+  it('position_id is null when not provided', () => {
+    insertRebalanceEvent(db, {
+      timestamp: Date.now(), eventType: 'FEE_HARVEST', price: 84, regime: 'RANGING',
+      note: 'harvest', solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
+      feeSol: 0.001, feeUsdc: 0.05, ilAtClose: 0,
+    });
+    const events = getRebalanceEvents(db, 1);
+    expect((events[0] as any).positionId).toBeNull();
+  });
+
+  it('links open and close events to same position', () => {
+    const posId = 'LifecycleTestMint';
+    insertRebalanceEvent(db, {
+      timestamp: 1000, eventType: 'POSITION_OPENED', price: 84, regime: 'RANGING',
+      note: 'open', solBefore: 1, usdcBefore: 50, solAfter: 0.5, usdcAfter: 25,
+      feeSol: 0, feeUsdc: 0, ilAtClose: 0, positionId: posId,
+    });
+    insertRebalanceEvent(db, {
+      timestamp: 2000, eventType: 'POSITION_CLOSED', price: 85, regime: 'RANGING',
+      note: 'close', solBefore: 0.5, usdcBefore: 25, solAfter: 1, usdcAfter: 50,
+      feeSol: 0.001, feeUsdc: 0.05, ilAtClose: -0.01, positionId: posId,
+    });
+    const events = getRebalanceEvents(db, 10);
+    const posEvents = events.filter((e: any) => e.positionId === posId);
+    expect(posEvents).toHaveLength(2);
+    expect(posEvents.map((e: any) => e.eventType)).toContain('POSITION_OPENED');
+    expect(posEvents.map((e: any) => e.eventType)).toContain('POSITION_CLOSED');
+  });
+});

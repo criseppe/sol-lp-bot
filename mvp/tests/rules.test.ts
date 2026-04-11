@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   calcRange, calcProximity, shouldFireDownside, shouldFireUpside,
   shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit,
-  getDeployAmount, isHarvestDue, calcHarvestFees, calcIL,
+  getDeployAmount, isHarvestDue, calcHarvestFees, calcIL, checkAutoDeploy,
 } from '../src/engine/rules.js';
 import { REGIME_PARAMS } from '../src/constants.js';
 import type { PaperPosition } from '../src/types.js';
@@ -181,5 +181,206 @@ describe('IL Calculator', () => {
   it('entry=$150, current=$200 → negative value', () => {
     const il = calcIL(150, 200, 1, 150);
     expect(il).toBeLessThan(0);
+  });
+});
+
+// ─── Rule 7: checkAutoDeploy ─────────────────────────────────────────────
+
+describe('Rule 7: checkAutoDeploy', () => {
+  const baseOpts = {
+    currentPrice: 84.25,
+    priceLower: 83.65,
+    priceUpper: 84.97,
+    walletSol: 0.5,
+    walletUsdc: 50,
+    positionValueUsdc: 40,
+    regime: 'RANGING' as const,
+    params: REGIME_PARAMS.RANGING,
+    lastDeployTime: 0,
+    now: Date.now(),
+    enabled: true,
+    minIdleUsdc: 5,
+    minIdleSol: 0.05,
+    minDeployUsdc: 10,
+    deployRatioTolerance: 0.02,
+  };
+
+  it('deploys when all conditions pass', () => {
+    const result = checkAutoDeploy(baseOpts);
+    expect(result.shouldDeploy).toBe(true);
+    expect(result.reason).toContain('AUTO_DEPLOY');
+    expect(result.deployableUsdc).toBeGreaterThan(10);
+  });
+
+  it('skips when disabled', () => {
+    const result = checkAutoDeploy({ ...baseOpts, enabled: false });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toBe('DEPLOY_SKIPPED_DISABLED');
+  });
+
+  it('blocks in BEARISH_TREND regime', () => {
+    const result = checkAutoDeploy({ ...baseOpts, regime: 'BEARISH_TREND', params: REGIME_PARAMS.BEARISH_TREND });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_REGIME');
+  });
+
+  it('blocks in EXTREME regime', () => {
+    const result = checkAutoDeploy({ ...baseOpts, regime: 'EXTREME', params: REGIME_PARAMS.EXTREME });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_REGIME');
+  });
+
+  it('allows in BULLISH_TREND regime', () => {
+    const result = checkAutoDeploy({ ...baseOpts, regime: 'BULLISH_TREND', params: REGIME_PARAMS.BULLISH_TREND });
+    expect(result.shouldDeploy).toBe(true);
+  });
+
+  it('skips when idle funds below threshold', () => {
+    const result = checkAutoDeploy({ ...baseOpts, walletSol: 0.05, walletUsdc: 1 });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_LOW_IDLE');
+  });
+
+  it('deploys when only SOL idle exceeds threshold', () => {
+    const result = checkAutoDeploy({ ...baseOpts, walletSol: 0.5, walletUsdc: 1 });
+    expect(result.shouldDeploy).toBe(true);
+  });
+
+  it('deploys when only USDC idle exceeds threshold', () => {
+    const result = checkAutoDeploy({ ...baseOpts, walletSol: 0.05, walletUsdc: 50 });
+    expect(result.shouldDeploy).toBe(true);
+  });
+
+  it('enforces 1-hour cooldown', () => {
+    const result = checkAutoDeploy({ ...baseOpts, lastDeployTime: Date.now() - 30 * 60_000 }); // 30 min ago
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_COOLDOWN');
+  });
+
+  it('allows after cooldown expires', () => {
+    const result = checkAutoDeploy({ ...baseOpts, lastDeployTime: Date.now() - 61 * 60_000 }); // 61 min ago
+    expect(result.shouldDeploy).toBe(true);
+  });
+
+  it('skips when position at regime cap (BULLISH 85%)', () => {
+    // BULLISH = 85% deploy. walletSol=0.5 ($42 idle), walletUsdc=10 ($9 idle) → idleUsdc ~$51.
+    // Position=$200. Total = 51 + 200 = 251. Max = 251 * 0.85 = 213.35. Headroom = 213.35 - 200 = 13.35.
+    // But deployableUsdc = min(51, 13.35) = 13.35 > 10, so NOT this check.
+    // Use position=$500 → max = 551*0.85 = 468.35, headroom = 468.35-500 = -31.65 < 10
+    const result = checkAutoDeploy({ ...baseOpts, positionValueUsdc: 500, walletSol: 0.5, walletUsdc: 10,
+      regime: 'BULLISH_TREND', params: REGIME_PARAMS.BULLISH_TREND });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_CAP');
+  });
+
+  it('skips when deployable below minimum', () => {
+    const result = checkAutoDeploy({ ...baseOpts, walletSol: 0.06, walletUsdc: 5 });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED');
+  });
+
+  it('skips when price too far from ideal (ratio)', () => {
+    // Ideal = sqrt(83.65 * 84.97) ≈ 84.31, price at 82.0 → deviation ~2.7% > 2%
+    const result = checkAutoDeploy({ ...baseOpts, currentPrice: 82.0 });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_RATIO');
+  });
+
+  it('deploys when price within ratio tolerance', () => {
+    // Ideal ≈ 84.31, price at 84.25 → deviation < 0.1%
+    const result = checkAutoDeploy({ ...baseOpts, currentPrice: 84.25 });
+    expect(result.shouldDeploy).toBe(true);
+  });
+
+  it('reports correct idealPrice (geometric mean)', () => {
+    const result = checkAutoDeploy(baseOpts);
+    const expected = Math.sqrt(83.65 * 84.97);
+    expect(result.idealPrice).toBeCloseTo(expected, 1);
+  });
+});
+
+// ─── isFlashCrash: boundary & edge cases ─────────────────────────────────
+
+describe('isFlashCrash boundary', () => {
+  it('exactly 5% drop triggers', () => {
+    // 100 → 95 = exactly 5%
+    expect(isFlashCrash([100, 95])).toBe(true);
+  });
+
+  it('4.9% drop does not trigger', () => {
+    expect(isFlashCrash([100, 95.1])).toBe(false);
+  });
+
+  it('large drop (10%) triggers', () => {
+    expect(isFlashCrash([100, 90])).toBe(true);
+  });
+
+  it('price going up does not trigger', () => {
+    expect(isFlashCrash([100, 110])).toBe(false);
+  });
+
+  it('multiple prices: uses first and last', () => {
+    // 100 → 98 → 96 → 94: drop = (100-94)/100 = 6%
+    expect(isFlashCrash([100, 98, 96, 94])).toBe(true);
+  });
+
+  it('handles zero first price', () => {
+    expect(isFlashCrash([0, 50])).toBe(false);
+  });
+
+  it('handles negative first price', () => {
+    expect(isFlashCrash([-10, 50])).toBe(false);
+  });
+});
+
+// ─── calcHarvestFees: edge cases ─────────────────────────────────────────
+
+describe('calcHarvestFees edge cases', () => {
+  const pos = makePosition(140, 160);
+
+  it('daysHeld = 0 → zero fees', () => {
+    const result = calcHarvestFees(pos, 150, 0);
+    expect(result.totalUsdcValue).toBe(0);
+  });
+
+  it('poolTvl = 0 → zero fees (no division by zero)', () => {
+    const result = calcHarvestFees(pos, 150, 7, 500_000_000, 0);
+    expect(result.totalUsdcValue).toBe(0);
+  });
+
+  it('higher volume → proportionally higher fees', () => {
+    const low = calcHarvestFees(pos, 150, 7, 100_000_000, 250_000_000);
+    const high = calcHarvestFees(pos, 150, 7, 500_000_000, 250_000_000);
+    expect(high.totalUsdcValue).toBeCloseTo(low.totalUsdcValue * 5, 5);
+  });
+
+  it('fees scale with daysHeld', () => {
+    const d1 = calcHarvestFees(pos, 150, 1);
+    const d7 = calcHarvestFees(pos, 150, 7);
+    expect(d7.totalUsdcValue).toBeCloseTo(d1.totalUsdcValue * 7, 5);
+  });
+
+  it('sol and usdc fees are equal (50/50 split)', () => {
+    const result = calcHarvestFees(pos, 150, 7);
+    expect(result.solFees).toBeCloseTo(result.usdcFees, 10);
+  });
+});
+
+// ─── isHarvestDue: edge cases ────────────────────────────────────────────
+
+describe('isHarvestDue', () => {
+  it('returns true when interval elapsed', () => {
+    const now = Date.now();
+    expect(isHarvestDue(now - 8 * 86400_000, REGIME_PARAMS.RANGING, now)).toBe(true); // 8 days > 7
+  });
+
+  it('returns false when interval not elapsed', () => {
+    const now = Date.now();
+    expect(isHarvestDue(now - 3 * 86400_000, REGIME_PARAMS.RANGING, now)).toBe(false); // 3 days < 7
+  });
+
+  it('returns true at exactly the boundary', () => {
+    const now = Date.now();
+    expect(isHarvestDue(now - 7 * 86400_000, REGIME_PARAMS.RANGING, now)).toBe(true); // exactly 7 days
   });
 });
