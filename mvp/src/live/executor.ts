@@ -18,6 +18,9 @@ import type { RangeBounds, Regime } from '../types.js';
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
 const SLIPPAGE = Percentage.fromFraction(50, 10000); // 0.5% slippage
+const SOL_RESERVE = 0.05;   // Always keep in wallet for gas
+const USDC_RESERVE = 1;     // Always keep in wallet
+const SWAP_BUFFER = 1.03;   // 3% buffer on swap amounts for slippage
 
 export interface LivePosition {
   positionMint: PublicKey;
@@ -120,8 +123,8 @@ export class LiveExecutor {
     // Get actual balances
     let solBal = await this.getSolBalance();
     let usdcBal = await this.getUsdcBalance();
-    const solReserve = 0.05;
-    const usdcReserve = 1;
+    const solReserve = SOL_RESERVE;
+    const usdcReserve = USDC_RESERVE;
 
     const usdcMint = new PublicKey(MINTS.USDC);
     const solMint = new PublicKey(MINTS.SOL);
@@ -165,7 +168,7 @@ export class LiveExecutor {
 
     if (solDeficit > 0.01) {
       // Need more SOL — swap USDC → SOL
-      const usdcToSwap = Math.min(solDeficit * currentPrice * 1.03, usdcAvailable - 2); // keep $2 buffer
+      const usdcToSwap = Math.min(solDeficit * currentPrice * SWAP_BUFFER, usdcAvailable - 2); // keep $2 buffer
       if (usdcToSwap > 1) {
         console.log(JSON.stringify({
           level: 'info',
@@ -197,7 +200,7 @@ export class LiveExecutor {
       }
     } else if (usdcDeficit > 1) {
       // Need more USDC — swap SOL → USDC
-      const solToSwap = Math.min(usdcDeficit / currentPrice * 1.03, solAvailable - 0.02);
+      const solToSwap = Math.min(usdcDeficit / currentPrice * SWAP_BUFFER, solAvailable - 0.02);
       if (solToSwap > 0.005) {
         console.log(JSON.stringify({
           level: 'info',
@@ -644,8 +647,8 @@ export class LiveExecutor {
     if (!this.currentPosition) return null;
     const solBal = await this.getSolBalance();
     const usdcBal = await this.getUsdcBalance();
-    const solReserve = 0.05;
-    const usdcReserve = 1;
+    const solReserve = SOL_RESERVE;
+    const usdcReserve = USDC_RESERVE;
     const solAvailable = Math.max(0, solBal - solReserve);
     const usdcAvailable = Math.max(0, usdcBal - usdcReserve);
     if (solAvailable < 0.001 && usdcAvailable < 0.5) return null;
@@ -686,8 +689,8 @@ export class LiveExecutor {
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
     const solMint = new PublicKey(MINTS.SOL);
     const usdcMint = new PublicKey(MINTS.USDC);
-    const solReserve = 0.05;
-    const usdcReserve = 1;
+    const solReserve = SOL_RESERVE;
+    const usdcReserve = USDC_RESERVE;
     const { tickLower, tickUpper } = this.currentPosition;
 
     let solBal = await this.getSolBalance();
@@ -712,7 +715,7 @@ export class LiveExecutor {
 
     // Swap to match ideal ratio
     if (solDeficit > 0.01) {
-      const usdcToSwap = Math.min(solDeficit * currentPrice * 1.03, usdcAvailable - 2);
+      const usdcToSwap = Math.min(solDeficit * currentPrice * SWAP_BUFFER, usdcAvailable - 2);
       if (usdcToSwap > 1) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${usdcToSwap.toFixed(2)} USDC -> SOL`, timestamp: Date.now() }));
         const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
@@ -734,7 +737,7 @@ export class LiveExecutor {
         if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Add liquidity: swapped ${usdcSpent.toFixed(2)} USDC -> ${solReceived.toFixed(4)} SOL to match position ratio` });
       }
     } else if (usdcDeficit > 1) {
-      const solToSwap = Math.min(usdcDeficit / currentPrice * 1.03, solAvailable - 0.02);
+      const solToSwap = Math.min(usdcDeficit / currentPrice * SWAP_BUFFER, solAvailable - 0.02);
       if (solToSwap > 0.005) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${solToSwap.toFixed(4)} SOL -> USDC`, timestamp: Date.now() }));
         const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');

@@ -226,14 +226,14 @@ export function insertRebalanceEvent(db: Database.Database, event: RebalanceEven
 
 export function getRebalanceEvents(db: Database.Database, limit: number): RebalanceEvent[] {
   const rows = db.prepare(`
-    SELECT timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close
+    SELECT timestamp, event_type, price, regime, note, sol_before, usdc_before, sol_after, usdc_after, fee_sol, fee_usdc, il_at_close, position_id
     FROM rebalance_events
     ORDER BY timestamp DESC
     LIMIT ?
   `).all(limit) as Array<{
     timestamp: number; event_type: string; price: number; regime: string; note: string;
     sol_before: number; usdc_before: number; sol_after: number; usdc_after: number;
-    fee_sol: number; fee_usdc: number; il_at_close: number;
+    fee_sol: number; fee_usdc: number; il_at_close: number; position_id: string | null;
   }>;
   return rows.map(r => ({
     timestamp: r.timestamp,
@@ -248,6 +248,7 @@ export function getRebalanceEvents(db: Database.Database, limit: number): Rebala
     feeSol: r.fee_sol,
     feeUsdc: r.fee_usdc,
     ilAtClose: r.il_at_close,
+    positionId: r.position_id,
   }));
 }
 
