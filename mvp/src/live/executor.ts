@@ -59,17 +59,37 @@ export class LiveExecutor {
   }
 
   private async execTx(txBuilder: { buildAndExecute: () => Promise<string> }): Promise<string> {
-    const sig = await txBuilder.buildAndExecute();
-    this.txCount++;
+    let sig: string;
     try {
-      await new Promise(r => setTimeout(r, 1500));
-      const txData = await this.connection.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
-      if (txData?.meta?.fee) {
-        this.cumGasLamports += txData.meta.fee;
-        console.log(JSON.stringify({ level: 'info', msg: `tx fee: ${txData.meta.fee} lamports (${(txData.meta.fee/1e9).toFixed(6)} SOL)`, sig: sig.slice(0,12), cumGas: this.cumGasLamports, timestamp: Date.now() }));
+      sig = await txBuilder.buildAndExecute();
+    } catch (err: any) {
+      const msg = String(err);
+      // Retry once on transient errors (blockhash expired, timeout, 429)
+      if (msg.includes('Blockhash not found') || msg.includes('timeout') || msg.includes('429')) {
+        console.log(JSON.stringify({ level: 'warn', msg: `TX failed (${msg.slice(0, 80)}), retrying in 3s...`, timestamp: Date.now() }));
+        await new Promise(r => setTimeout(r, 3000));
+        sig = await txBuilder.buildAndExecute();
+      } else {
+        throw err;
       }
-    } catch {
-      this.cumGasLamports += 5000;
+    }
+    this.txCount++;
+    // Try to get actual fee with confirmation, retry once after delay
+    let feeRecorded = false;
+    for (let attempt = 0; attempt < 2 && !feeRecorded; attempt++) {
+      try {
+        if (attempt === 0) await new Promise(r => setTimeout(r, 1500));
+        else await new Promise(r => setTimeout(r, 3000));
+        const txData = await this.connection.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+        if (txData?.meta?.fee) {
+          this.cumGasLamports += txData.meta.fee;
+          console.log(JSON.stringify({ level: 'info', msg: `tx fee: ${txData.meta.fee} lamports (${(txData.meta.fee/1e9).toFixed(6)} SOL)`, sig: sig.slice(0,12), cumGas: this.cumGasLamports, timestamp: Date.now() }));
+          feeRecorded = true;
+        }
+      } catch { /* retry */ }
+    }
+    if (!feeRecorded) {
+      this.cumGasLamports += 10000; // conservative estimate if both attempts fail
     }
     return sig;
   }

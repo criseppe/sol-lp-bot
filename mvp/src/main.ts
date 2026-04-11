@@ -745,6 +745,7 @@ async function runLiveCycle(price: number): Promise<void> {
   // Regime update (every 1 hour)
   if (now - liveLastRegimeCheck > 3_600_000) {
     const closes = getDailyCloses(db, REGIME_WINDOW_DAYS);
+    const MIN_CLOSES_FOR_REGIME_CHANGE = 5;
     const result = closes.length >= 3
       ? detectRegimeWithMetrics(closes, TREND_THRESHOLD)
       : { regime: 'RANGING' as const, dirRatio: 0, realisedVol: 0, priceCount: closes.length };
@@ -753,7 +754,8 @@ async function runLiveCycle(price: number): Promise<void> {
     const volStatus = result.realisedVol > 0.08 ? 'ABOVE 0.08 threshold → EXTREME' : `${result.realisedVol.toFixed(4)} (below 0.08 threshold)`;
     const dirStatus = result.dirRatio > TREND_THRESHOLD ? `ABOVE ${TREND_THRESHOLD} threshold → trending` : `${result.dirRatio.toFixed(3)} (below ${TREND_THRESHOLD} threshold → ranging)`;
     const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
-    const changed = result.regime !== liveRegime;
+    // Suppress regime changes on thin data to prevent flapping
+    const changed = result.regime !== liveRegime && closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE;
 
     // Log regime changes immediately; unchanged evals only every 1 hour
     if (changed || now - liveLastRegimeEvalLog >= 3_600_000) {
