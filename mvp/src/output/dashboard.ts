@@ -3,7 +3,6 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import type { ComparisonSnapshot } from '../paper/ledger.js';
 import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
@@ -99,7 +98,6 @@ export interface LiveData {
 
 export interface DashboardServer {
   updateData(
-    comparison: ComparisonSnapshot,
     events: RebalanceEvent[],
     botState: BotState,
     dailyPnl?: DailyPnlRow[],
@@ -151,7 +149,6 @@ export function startDashboard(port: number): DashboardServer {
     console.log(JSON.stringify({ level: 'info', msg: 'dashboard auth enabled', timestamp: Date.now() }));
   }
 
-  let currentComparison: ComparisonSnapshot | null = null;
   let currentEvents: RebalanceEvent[] = [];
   let currentBotState: BotState = 'IDLE';
   let currentDailyPnl: DailyPnlRow[] = [];
@@ -203,7 +200,6 @@ export function startDashboard(port: number): DashboardServer {
 
   app.get('/api/data', (_req, res) => {
     res.json({
-      comparison: currentComparison,
       recentEvents: currentEvents.slice(0, 10),
       dailyPnl: currentDailyPnl,
       botState: currentBotState,
@@ -604,8 +600,7 @@ export function startDashboard(port: number): DashboardServer {
   });
 
   return {
-    updateData(comparison, events, botState, dailyPnl) {
-      currentComparison = comparison;
+    updateData(events, botState, dailyPnl) {
       currentEvents = events;
       currentBotState = botState;
       if (dailyPnl) currentDailyPnl = dailyPnl;
@@ -732,7 +727,7 @@ const NAV_HTML = `
 // ── Paper page ────────────────────────────────────────────────────────────
 
 function renderPaperHtml(data: {
-  comparison: ComparisonSnapshot | null;
+  comparison: any;
   recentEvents: RebalanceEvent[];
   dailyPnl: DailyPnlRow[];
   botState: BotState;

@@ -3,9 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { WhirlpoolContext, ORCA_WHIRLPOOL_PROGRAM_ID } from '@orca-so/whirlpools-sdk';
 import { OracleService } from './data/oracle.js';
 import { PoolService } from './data/pool.js';
-import { PaperTradingEngine } from './paper/ledger.js';
 import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled } from './db/sqlite.js';
-import { printCycle, printEvent } from './output/terminal.js';
 import { startDashboard } from './output/dashboard.js';
 import { LiveExecutor, type LivePosition } from './live/executor.js';
 import { startTelegramReporter } from './output/telegram.js';
@@ -18,11 +16,7 @@ import type { BotState, Regime, EventType } from './types.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
-const BOT_MODE = (process.env.BOT_MODE ?? 'SHADOW').toUpperCase();
-const IS_LIVE = BOT_MODE === 'LIVE';
-
-const REQUIRED_VARS = ['RPC_URL', 'PYTH_SOL_USD_FEED', 'WHIRLPOOL_ADDRESS', 'PAPER_CAPITAL_USDC', 'DB_PATH'];
-if (IS_LIVE) REQUIRED_VARS.push('WALLET_PRIVATE_KEY');
+const REQUIRED_VARS = ['RPC_URL', 'PYTH_SOL_USD_FEED', 'WHIRLPOOL_ADDRESS', 'DB_PATH', 'WALLET_PRIVATE_KEY'];
 
 for (const key of REQUIRED_VARS) {
   if (!process.env[key]) {
@@ -34,7 +28,6 @@ for (const key of REQUIRED_VARS) {
 const RPC_URL = process.env.RPC_URL!;
 const PYTH_SOL_USD_FEED = process.env.PYTH_SOL_USD_FEED!;
 const WHIRLPOOL_ADDRESS = process.env.WHIRLPOOL_ADDRESS!;
-const PAPER_CAPITAL_USDC = parseFloat(process.env.PAPER_CAPITAL_USDC!);
 const DB_PATH = process.env.DB_PATH!;
 const DECISION_INTERVAL_SECONDS = parseInt(process.env.DECISION_INTERVAL_SECONDS ?? '30');
 const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT ?? '3000');
@@ -58,35 +51,8 @@ const db = initDb(DB_PATH);
 const conn = new Connection(RPC_URL, { commitment: 'confirmed' });
 const pool = new PoolService(conn, WHIRLPOOL_ADDRESS);
 
-// Paper engine always runs (for comparison)
-let engine: PaperTradingEngine;
 const savedState = getBotState(db);
 
-if (savedState && savedState.ledger_json) {
-  try {
-    const botLedger = JSON.parse(savedState.ledger_json);
-    const naiveLedger = savedState.naive_json ? JSON.parse(savedState.naive_json) : undefined;
-    engine = new PaperTradingEngine(
-      PAPER_CAPITAL_USDC,
-      (p: number) => pool.priceToTick(p),
-      REGIME_WINDOW_DAYS,
-      TREND_THRESHOLD,
-      {
-        bot: botLedger,
-        naive: naiveLedger ?? botLedger,
-        botState: savedState.state as BotState,
-        regime: (savedState.regime ?? 'RANGING') as Regime,
-      },
-    );
-    console.log(JSON.stringify({ level: 'info', msg: 'paper state restored from DB', timestamp: Date.now() }));
-  } catch {
-    engine = new PaperTradingEngine(PAPER_CAPITAL_USDC, (p: number) => pool.priceToTick(p), REGIME_WINDOW_DAYS, TREND_THRESHOLD);
-  }
-} else {
-  engine = new PaperTradingEngine(PAPER_CAPITAL_USDC, (p: number) => pool.priceToTick(p), REGIME_WINDOW_DAYS, TREND_THRESHOLD);
-}
-
-// Live executor (only if LIVE mode)
 let liveExecutor: LiveExecutor | null = null;
 let liveRegime: Regime = 'RANGING';
 let liveBotState: BotState = 'IDLE';
@@ -160,7 +126,7 @@ async function main() {
   }
 
   // Live mode setup
-  if (IS_LIVE) {
+  {
     const wallet = loadWallet(process.env.WALLET_PRIVATE_KEY!);
     const balances = await getWalletBalances(conn, wallet.publicKey);
     const solPrice = (await pool.getCurrentPrice());
@@ -317,6 +283,11 @@ async function main() {
     }
   }
 
+  if (!liveExecutor) {
+    console.error('LiveExecutor not initialized. Check WALLET_PRIVATE_KEY.');
+    process.exit(1);
+  }
+
   // Wait for first price
   let firstPrice = oracle.getPrice();
   let waited = 0;
@@ -335,11 +306,10 @@ async function main() {
   console.log(JSON.stringify({ level: 'info', msg: `First price: $${firstPrice.price.toFixed(2)}`, timestamp: Date.now() }));
 
   // Banner
-  const modeStr = IS_LIVE ? 'LIVE MODE ⚡ REAL MONEY' : 'SHADOW MODE';
   console.log(`
 +-------------------------------------------+
-|  SOL/USDC LP Bot MVP  ·  ${modeStr.padEnd(16)}|
-|  Capital: $${PAPER_CAPITAL_USDC.toLocaleString('en-US')} USDC  ·  Pool: SOL/USDC  |
+|  SOL/USDC LP Bot MVP  ·  LIVE MODE ⚡ REAL MONEY|
+|  Capital: $${MAX_LIVE_CAPITAL_USDC.toLocaleString('en-US')} USDC  ·  Pool: SOL/USDC  |
 |  Dashboard: http://localhost:${DASHBOARD_PORT}          |
 |  DB: ${DB_PATH.padEnd(36)}|
 |  Press Ctrl+C to stop gracefully          |
@@ -348,7 +318,6 @@ async function main() {
 
   // ── DECISION LOOP ─────────────────────────────────────────────────────
 
-  let lastEventType = '';
   let cycleRunning = false;
   let lastPruneTime = Date.now();
 
@@ -359,51 +328,36 @@ async function main() {
       const price = oracle.getPrice();
       if (!price) return;
 
-      const poolState = await pool.fetchState();
+      await pool.fetchState();
 
-      if (IS_LIVE && liveExecutor) {
-        // Live mode: only run live engine (skip if paused)
-        if (!botPaused) await runLiveCycle(price.price);
+      if (!botPaused) await runLiveCycle(price.price);
 
-        // Store price tick for regime detection
-        insertPriceTick(db, {
-          timestamp: Date.now(), price: price.price, confidence: price.confidence,
-          regime: liveRegime, prox_lower: null, prox_upper: null, in_range: 0,
-        });
+      // Store price tick for regime detection
+      insertPriceTick(db, {
+        timestamp: Date.now(), price: price.price, confidence: price.confidence,
+        regime: liveRegime, prox_lower: null, prox_upper: null, in_range: 0,
+      });
 
-        // Print live status to terminal
-        const livePos = liveExecutor.getCurrentPosition();
-        const stateStr = `[${liveBotState}] SOL=$${price.price.toFixed(2)} regime=${liveRegime}`;
-        const posStr = livePos ? `pos: $${livePos.priceLower.toFixed(2)}-$${livePos.priceUpper.toFixed(2)}` : 'no position';
-        console.log(JSON.stringify({ level: 'info', msg: `LIVE cycle: ${stateStr} ${posStr}`, timestamp: Date.now() }));
-      } else {
-        // Shadow mode: run paper engine
-        const result = engine.processCycle(price.price, poolState, db);
-        const comparison = engine.getComparison(price.price);
+      // Print live status to terminal
+      const livePos = liveExecutor!.getCurrentPosition();
+      const stateStr = `[${liveBotState}] SOL=$${price.price.toFixed(2)} regime=${liveRegime}`;
+      const posStr = livePos ? `pos: $${livePos.priceLower.toFixed(2)}-$${livePos.priceUpper.toFixed(2)}` : 'no position';
+      console.log(JSON.stringify({ level: 'info', msg: `LIVE cycle: ${stateStr} ${posStr}`, timestamp: Date.now() }));
 
-        printCycle(result, comparison);
-
-        if (result.eventType !== 'PRICE_UPDATE' && result.eventType !== 'CYCLE_SKIP' && result.eventType !== lastEventType) {
-          const events = getRebalanceEvents(db, 1);
-          if (events.length > 0) printEvent(events[0]);
-        }
-        lastEventType = result.eventType;
-      }
-
-      const comparison = engine.getComparison(price.price);
-      dashboard.updateData(comparison, getRebalanceEvents(db, 50), IS_LIVE ? liveBotState : engine.getState(), getDailyPnl(db, 7));
+      dashboard.updateData(getRebalanceEvents(db, 50), liveBotState, getDailyPnl(db, 7));
 
       // Update live dashboard data
-      if (IS_LIVE && liveExecutor) {
+      {
+        const exec = liveExecutor!;
         try {
-          const wallet = (liveExecutor as any).wallet;
+          const wallet = (exec as any).wallet;
           const balances = await getWalletBalances(conn, wallet.publicKey);
-          const livePos = liveExecutor.getCurrentPosition();
-          const posData = await liveExecutor.getPositionData();
-          const posComp = await liveExecutor.getPositionComposition();
+          const livePos = exec.getCurrentPosition();
+          const posData = await exec.getPositionData();
+          const posComp = await exec.getPositionComposition();
 
           // Real pending fees from on-chain fee growth data (collectFeesQuote)
-          const pendingFees = await liveExecutor.getPendingFees();
+          const pendingFees = await exec.getPendingFees();
           const pendingFeesSol = pendingFees?.feeSolDecimal ?? 0;
           const pendingFeesUsdc = pendingFees?.feeUsdcDecimal ?? 0;
           const pendingFeesTotal = pendingFees?.feeTotalUsdc ?? 0;
@@ -417,7 +371,7 @@ async function main() {
           const totalWithPosition = walletValueUsdc + positionValueUsdc;
 
           // Estimated 24h yield from on-chain liquidity share + pool fee rate
-          const yieldEst = await liveExecutor.getEstimatedYield24h();
+          const yieldEst = await exec.getEstimatedYield24h();
           const estDailyFeesUsdc = yieldEst?.dailyFeesUsdc ?? 0;
           const estAprPct = yieldEst?.aprPct ?? 0;
 
@@ -490,20 +444,18 @@ async function main() {
       }
 
       // Persist state
-      const livePos = liveExecutor?.getCurrentPosition();
+      const livePos2 = liveExecutor?.getCurrentPosition();
       upsertBotState(db, {
-        state: IS_LIVE ? liveBotState : engine.getState(),
-        regime: IS_LIVE ? liveRegime : engine.getRegime(),
-        position_json: IS_LIVE && livePos
-          ? JSON.stringify({ ...livePos, positionMint: livePos.positionMint.toBase58(), positionAddress: livePos.positionAddress.toBase58() })
-          : JSON.stringify(engine.getBotLedger().openPosition),
-        ledger_json: JSON.stringify(engine.getBotLedger()),
-        naive_json: JSON.stringify(engine.getNaiveLedger()),
+        state: liveBotState,
+        regime: liveRegime,
+        position_json: livePos2
+          ? JSON.stringify({ ...livePos2, positionMint: livePos2.positionMint.toBase58(), positionAddress: livePos2.positionAddress.toBase58() })
+          : 'null',
         updated_at: Date.now(),
         cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
       });
 
-      checkAndWriteDailyPnl(comparison);
+      checkAndWriteDailyPnl(price.price);
 
       // Prune old price ticks once per day
       const now2 = Date.now();
@@ -523,8 +475,8 @@ async function main() {
   // Dashboard control handlers
   let botPaused = false;
 
-  if (IS_LIVE && liveExecutor) {
-    const executor = liveExecutor;
+  {
+    const executor = liveExecutor!;
     const liveWallet = (executor as any).wallet;
 
     dashboard.onPause(() => {
@@ -642,8 +594,7 @@ async function main() {
       liveBotState = 'IDLE';
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
-        position_json: 'null', ledger_json: JSON.stringify(engine.getBotLedger()),
-        naive_json: JSON.stringify(engine.getNaiveLedger()), updated_at: Date.now(),
+        position_json: 'null', updated_at: Date.now(),
         cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
       });
 
@@ -683,8 +634,7 @@ async function main() {
       liveBotState = 'IDLE';
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
-        position_json: 'null', ledger_json: JSON.stringify(engine.getBotLedger()),
-        naive_json: JSON.stringify(engine.getNaiveLedger()), updated_at: Date.now(),
+        position_json: 'null', updated_at: Date.now(),
         cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
       });
 
@@ -718,13 +668,11 @@ async function main() {
 
     const livePos = liveExecutor?.getCurrentPosition();
     upsertBotState(db, {
-      state: IS_LIVE ? liveBotState : engine.getState(),
-      regime: IS_LIVE ? liveRegime : engine.getRegime(),
-      position_json: IS_LIVE && livePos
+      state: liveBotState,
+      regime: liveRegime,
+      position_json: livePos
         ? JSON.stringify({ ...livePos, positionMint: livePos.positionMint.toBase58(), positionAddress: livePos.positionAddress.toBase58() })
-        : JSON.stringify(engine.getBotLedger().openPosition),
-      ledger_json: JSON.stringify(engine.getBotLedger()),
-      naive_json: JSON.stringify(engine.getNaiveLedger()),
+        : 'null',
       updated_at: Date.now(),
       cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
       tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
@@ -1090,19 +1038,21 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
 // ── HELPERS ───────────────────────────────────────────────────────────────
 
 let lastPnlDate = '';
-function checkAndWriteDailyPnl(comparison: ReturnType<typeof engine.getComparison>) {
+function checkAndWriteDailyPnl(currentPrice: number) {
   const today = new Date().toISOString().slice(0, 10);
   if (today === lastPnlDate) return;
   lastPnlDate = today;
+  const totalValue = currentLiveData?.totalValueWithPosition ?? 0;
+  const totalFees = liveCumFeesSol * currentPrice + liveCumFeesUsdc;
   upsertDailyPnl(db, {
     date: today,
-    opening_value: comparison.bot.portfolioValue,
-    closing_value: comparison.bot.portfolioValue,
-    fees_sol: 0, fees_usdc: comparison.bot.cumFees,
-    il_cost: comparison.bot.cumIL,
-    net_pnl: comparison.bot.netPnl, net_pnl_pct: comparison.bot.netPnlPct,
-    rebalances: comparison.bot.rebalanceCount,
-    in_range_pct: null, regime: comparison.bot.regime,
+    opening_value: totalValue,
+    closing_value: totalValue,
+    fees_sol: liveCumFeesSol, fees_usdc: liveCumFeesUsdc,
+    il_cost: liveRealizedIl,
+    net_pnl: totalFees + liveRealizedIl, net_pnl_pct: totalValue > 0 ? ((totalFees + liveRealizedIl) / totalValue) * 100 : 0,
+    rebalances: 0,
+    in_range_pct: null, regime: liveRegime,
   });
 }
 

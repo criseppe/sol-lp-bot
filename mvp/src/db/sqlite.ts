@@ -19,8 +19,8 @@ export interface BotStateRow {
   state: BotState;
   regime: Regime | null;
   position_json: string | null;
-  ledger_json: string | null;
-  naive_json: string | null;
+  ledger_json?: string | null;
+  naive_json?: string | null;
   updated_at: number;
   cum_fees_sol?: number;
   cum_fees_usdc?: number;
@@ -256,7 +256,7 @@ export function upsertBotState(db: Database.Database, state: BotStateRow): void 
   db.prepare(`
     INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports)
     VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports)
-  `).run({ ...state, cum_fees_sol: state.cum_fees_sol ?? 0, cum_fees_usdc: state.cum_fees_usdc ?? 0, realized_il: state.realized_il ?? 0, tx_count: state.tx_count ?? 0, cum_gas_lamports: state.cum_gas_lamports ?? 0 });
+  `).run({ ...state, ledger_json: state.ledger_json ?? null, naive_json: state.naive_json ?? null, cum_fees_sol: state.cum_fees_sol ?? 0, cum_fees_usdc: state.cum_fees_usdc ?? 0, realized_il: state.realized_il ?? 0, tx_count: state.tx_count ?? 0, cum_gas_lamports: state.cum_gas_lamports ?? 0 });
 }
 
 export function getBotState(db: Database.Database): BotStateRow | null {
