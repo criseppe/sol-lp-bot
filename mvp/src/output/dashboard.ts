@@ -1660,7 +1660,9 @@ function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: numb
   snapshots7d.forEach(s => {
     const date = new Date(s.timestamp).toISOString().slice(0, 10);
     const cumFeesUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
-    const pendingFeesUsdc = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
+    // Sanity check: pending fees > $1000 is overflow (u128 wrapping artifact), ignore
+    const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
+    const pendingFeesUsdc = rawPending > 1000 ? 0 : rawPending;
     feeDailyMap.set(date, { totalFeesUsdc: cumFeesUsdc + pendingFeesUsdc });
   });
   const feeDays = Array.from(feeDailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-7);
