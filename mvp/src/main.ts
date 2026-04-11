@@ -957,7 +957,7 @@ async function runLiveCycle(price: number): Promise<void> {
 
       if (deployCheck.shouldDeploy) {
         console.log(JSON.stringify({ level: 'info', msg: `AUTO_DEPLOY: deploying $${deployCheck.deployableUsdc.toFixed(2)} idle capital`, timestamp: now }));
-        const result = await liveExecutor.increaseLiquidity(price);
+        const result = await liveExecutor.increaseLiquidity(price, deployCheck.deployableUsdc);
         if (!result) {
           console.log(JSON.stringify({ level: 'warn', msg: 'AUTO_DEPLOY: increaseLiquidity returned null, skipping', timestamp: now }));
         } else {

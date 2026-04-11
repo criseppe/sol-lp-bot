@@ -681,7 +681,7 @@ export class LiveExecutor {
     };
   }
 
-  async increaseLiquidity(currentPrice: number): Promise<{
+  async increaseLiquidity(currentPrice: number, maxDeployUsdc?: number): Promise<{
     solDeposited: number; usdcDeposited: number; totalUsdc: number; liquidityAdded: string;
   } | null> {
     if (!this.currentPosition) return null;
@@ -698,16 +698,17 @@ export class LiveExecutor {
     let solAvailable = Math.max(0, solBal - solReserve);
     let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
 
-    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail)`, timestamp: Date.now() }));
+    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail)${maxDeployUsdc ? `, cap: $${maxDeployUsdc.toFixed(2)}` : ''}`, timestamp: Date.now() }));
 
-    // Calculate ideal ratio (same logic as openPosition)
+    // Calculate ideal ratio (same logic as openPosition), capped at maxDeployUsdc if provided
     const ratioQuote = increaseLiquidityQuoteByInputToken(
       solMint, new Decimal(1), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
     const totalAvailableUsdc = solAvailable * currentPrice + usdcAvailable;
-    const idealSol = totalAvailableUsdc / valuePerSolUnit;
+    const deployTargetUsdc = maxDeployUsdc != null ? Math.min(totalAvailableUsdc, maxDeployUsdc) : totalAvailableUsdc;
+    const idealSol = deployTargetUsdc / valuePerSolUnit;
     const idealUsdc = idealSol * usdcPer1Sol;
 
     const solDeficit = idealSol - solAvailable;
