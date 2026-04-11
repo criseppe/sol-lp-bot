@@ -1890,12 +1890,33 @@ ${(() => {
 
   if (days.length === 0) return '<div class="card" style="margin-bottom:16px"><h2>Daily Portfolio Value (7 days)</h2><div style="color:#8b949e;text-align:center;padding:20px">Collecting data...</div></div>';
 
+  // Also get cumulative fees per day for PnL line
+  const feeDailyMap2 = new Map<string, number>();
+  data.snapshots7d.forEach(s => {
+    const date = new Date(s.timestamp).toISOString().slice(0, 10);
+    const cumFeesUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
+    const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
+    const pendingFeesUsdc = rawPending > 1000 ? 0 : rawPending;
+    feeDailyMap2.set(date, cumFeesUsdc + pendingFeesUsdc);
+  });
+
+  // Compute net PnL per day: total_value - cumulative_injections - initial_value
+  let cumInjected = 0;
+  const initialValue = days[0][1].total;
+  const pnlPoints: Array<{ date: string; pnl: number }> = [];
+  days.forEach(([date, val]) => {
+    cumInjected += dailyInjections.get(date) ?? 0;
+    const pnl = val.total - initialValue - cumInjected;
+    pnlPoints.push({ date, pnl });
+  });
+
   // Each bar = wallet + position + injections stacked
   const maxVal = Math.max(...days.map(([d, v]) => v.total + (dailyInjections.get(d) ?? 0)));
-  const barW = Math.min(80, Math.floor(500 / days.length) - 8);
-  const chartH = 100;
-  const topPad = 35;
+  const barW = Math.min(70, Math.floor(440 / days.length) - 8);
+  const chartH = 120;
+  const topPad = 15;
   const baseY = chartH + topPad;
+  const calloutX = days.length * (barW + 8) + 60; // callout column starts after bars
 
   const bars = days.map(([date, val], i) => {
     const x = i * (barW + 8) + 50;
@@ -1904,34 +1925,64 @@ ${(() => {
     const walletVal = val.wallet;
     const positionVal = val.position;
 
-    // Scale: bar height proportional to total value
     const fullH = Math.max(4, (dayTotal / maxVal) * chartH * 0.85 + chartH * 0.15);
     const y = baseY - fullH;
 
-    // Stack proportions within the bar
-    const injH = injected > 0 ? Math.max(2, (injected / dayTotal) * fullH) : 0;
-    const posH = positionVal > 0 ? Math.max(2, (positionVal / dayTotal) * (fullH - injH)) : 0;
+    const injH = injected > 0 ? Math.max(3, (injected / dayTotal) * fullH) : 0;
+    const posH = positionVal > 0 ? Math.max(3, (positionVal / dayTotal) * (fullH - injH)) : 0;
     const walH = fullH - posH - injH;
 
     const dayLabel = date.slice(5);
     const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
 
+    // Callout labels to the right of bars
+    const walMidY = y + walH / 2;
+    const posMidY = y + walH + posH / 2;
+    const injMidY = y + walH + posH + injH / 2;
+
+    // Only show callout labels on the last bar to avoid clutter
+    const isLast = i === days.length - 1;
+    const callouts = isLast ? `
+      <line x1="${x + barW}" y1="${walMidY}" x2="${calloutX - 4}" y2="${walMidY}" stroke="#22c55e50" stroke-width="1"/>
+      <text x="${calloutX}" y="${walMidY + 3}" fill="#22c55e" font-size="9">Wallet $${fmt(walletVal, 0)}</text>
+      <line x1="${x + barW}" y1="${posMidY}" x2="${calloutX - 4}" y2="${posMidY + 12}" stroke="#58a6ff50" stroke-width="1"/>
+      <text x="${calloutX}" y="${posMidY + 15}" fill="#58a6ff" font-size="9">Position $${fmt(positionVal, 0)}</text>
+      ${injH > 0 ? `<line x1="${x + barW}" y1="${injMidY}" x2="${calloutX - 4}" y2="${injMidY + 24}" stroke="#a855f750" stroke-width="1"/>
+      <text x="${calloutX}" y="${injMidY + 27}" fill="#a855f7" font-size="9">Injected $${fmt(injected, 0)}</text>` : ''}` : '';
+
     return `
-      <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2" title="Wallet: $${fmt(walletVal, 0)}"/>
-      <rect x="${x}" y="${y + walH}" width="${barW}" height="${posH}" fill="#58a6ff" rx="0" title="Position: $${fmt(positionVal, 0)}"/>
-      ${injH > 0 ? `<rect x="${x}" y="${y + walH + posH}" width="${barW}" height="${injH}" fill="#a855f7" rx="0" title="Injected: $${fmt(injected, 0)}"/>` : ''}
-      <text x="${x + barW/2}" y="${Math.max(topPad + 5, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(dayTotal, 0)}</text>
+      <rect x="${x}" y="${y}" width="${barW}" height="${walH}" fill="#22c55e80" rx="2"/>
+      <rect x="${x}" y="${y + walH}" width="${barW}" height="${posH}" fill="#58a6ff" rx="0"/>
+      ${injH > 0 ? `<rect x="${x}" y="${y + walH + posH}" width="${barW}" height="${injH}" fill="#a855f7" rx="0"/>` : ''}
+      <text x="${x + barW/2}" y="${Math.max(topPad + 2, y - 3)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${fmt(dayTotal, 0)}</text>
       <text x="${x + barW/2}" y="${baseY + 12}" text-anchor="middle" fill="#8b949e" font-size="9">${dayLabel}</text>
-      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>`;
+      <text x="${x + barW/2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>
+      ${callouts}`;
   }).join('');
+
+  // PnL line overlay
+  const pnlVals = pnlPoints.map(p => p.pnl);
+  const pnlMin = Math.min(...pnlVals, 0);
+  const pnlMax = Math.max(...pnlVals, 0);
+  const pnlRange = pnlMax - pnlMin || 1;
+  const pnlLinePoints = pnlPoints.map((p, i) => {
+    const x = i * (barW + 8) + 50 + barW / 2;
+    const y = baseY - ((p.pnl - pnlMin) / pnlRange) * chartH * 0.7 - chartH * 0.05;
+    return `${x},${y}`;
+  }).join(' ');
+  const lastPnl = pnlPoints[pnlPoints.length - 1]?.pnl ?? 0;
+  const pnlColor = lastPnl >= 0 ? '#22c55e' : '#ef4444';
+  const lastPnlX = (pnlPoints.length - 1) * (barW + 8) + 50 + barW / 2;
+  const lastPnlY = baseY - ((lastPnl - pnlMin) / pnlRange) * chartH * 0.7 - chartH * 0.05;
 
   const hasInjections = dailyInjections.size > 0;
   return `<div class="card" style="margin-bottom:16px">
   <h2>Daily Portfolio Value (7 days)</h2>
-  <div style="font-size:11px;color:#8b949e;margin-bottom:6px;display:flex;gap:16px">
+  <div style="font-size:11px;color:#8b949e;margin-bottom:6px;display:flex;gap:16px;flex-wrap:wrap">
     <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e80;border-radius:2px;vertical-align:middle"></span> Wallet</span>
     <span><span style="display:inline-block;width:10px;height:10px;background:#58a6ff;border-radius:2px;vertical-align:middle"></span> Position</span>
     ${hasInjections ? '<span><span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:2px;vertical-align:middle"></span> Injections</span>' : ''}
+    <span><span style="display:inline-block;width:16px;height:2px;background:${pnlColor};vertical-align:middle"></span> Net PnL: <b style="color:${pnlColor}">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</b></span>
   </div>
   <svg width="100%" height="170" viewBox="0 0 600 170" preserveAspectRatio="xMidYMid meet">
     <line x1="45" y1="${topPad}" x2="45" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
@@ -1939,6 +1990,9 @@ ${(() => {
     <text x="5" y="${topPad + 5}" fill="#8b949e" font-size="9">$${fmt(maxVal, 0)}</text>
     <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$0</text>
     ${bars}
+    <polyline points="${pnlLinePoints}" fill="none" stroke="${pnlColor}" stroke-width="2" stroke-dasharray="4,2"/>
+    <circle cx="${lastPnlX}" cy="${lastPnlY}" r="3" fill="${pnlColor}"/>
+    <text x="${lastPnlX + 6}" y="${lastPnlY + 4}" fill="${pnlColor}" font-size="9" font-weight="bold">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</text>
   </svg>
 </div>`;
 })()}
