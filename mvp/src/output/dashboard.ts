@@ -2030,7 +2030,7 @@ ${(() => {
     <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e80;border-radius:2px;vertical-align:middle"></span> Wallet</span>
     <span><span style="display:inline-block;width:10px;height:10px;background:#58a6ff;border-radius:2px;vertical-align:middle"></span> Position</span>
     ${hasInjections ? '<span><span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:2px;vertical-align:middle"></span> Injections</span>' : ''}
-    <span><span style="display:inline-block;width:16px;height:2px;background:${pnlColor};vertical-align:middle"></span> Net PnL: <b style="color:${pnlColor}">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</b></span>
+    <span><span style="display:inline-block;width:16px;height:2px;background:${pnlColor};vertical-align:middle"></span> Portfolio Change: <b style="color:${pnlColor}">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</b></span>
   </div>
   <svg width="100%" height="170" viewBox="0 0 600 170" preserveAspectRatio="xMidYMid meet">
     <line x1="45" y1="${topPad}" x2="45" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
@@ -2050,7 +2050,7 @@ ${(() => {
       <th style="text-align:right;padding:6px 8px;color:#58a6ff">Position</th>
       <th style="text-align:right;padding:6px 8px;color:#a855f7">Injected</th>
       <th style="text-align:right;padding:6px 8px;color:#c9d1d9">Total</th>
-      <th style="text-align:right;padding:6px 8px;color:#eab308">Net PnL</th>
+      <th style="text-align:right;padding:6px 8px;color:#eab308">Portfolio Change</th>
     </tr>
     ${days.map(([date, val], i) => {
       const inj = dailyInjections.get(date) ?? 0;
