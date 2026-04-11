@@ -80,10 +80,10 @@ export function shouldReenterAfterUpside(
   if (peakPrice <= 0) return { should: true, reason: 'TIMEOUT' };
   const pullbackPct = ((peakPrice - currentPrice) / peakPrice) * 100;
   const hoursWaiting = (now - watchStartTime) / 3600000;
-  if (pullbackPct >= REENTRY.PULLBACK_THRESHOLD_PCT) {
+  if (pullbackPct >= runtime.pullbackThresholdPct) {
     return { should: true, reason: 'PULLBACK' };
   }
-  if (hoursWaiting >= REENTRY.TIMEOUT_HOURS) {
+  if (hoursWaiting >= runtime.timeoutHours) {
     return { should: true, reason: 'TIMEOUT' };
   }
   return { should: false, reason: 'WAITING' };
@@ -93,7 +93,7 @@ export function isFlashCrash(prices: number[]): boolean {
   if (prices.length < 2) return false;
   if (prices[0] <= 0) return false;
   const drop = ((prices[0] - prices[prices.length - 1]) / prices[0]) * 100;
-  return drop >= REENTRY.FLASH_CRASH_PCT;
+  return drop >= runtime.flashCrashPct;
 }
 
 // ─── RULE 4: Re-entry Split ───────────────────────────────────────────────
@@ -204,10 +204,11 @@ export function checkAutoDeploy(opts: {
     return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_LOW_IDLE: SOL=${idleSol.toFixed(4)} < ${minIdleSol}, USDC=${idleUsdcRaw.toFixed(2)} < ${minIdleUsdc}`, ...base };
   }
 
-  // BR-6: Cooldown — max one per 30 minutes
+  // BR-6: Cooldown
+  const cooldownMin = runtime.autoDeployCooldownMinutes;
   const minSinceLast = (now - lastDeployTime) / 60_000;
-  if (minSinceLast < 30) {
-    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_COOLDOWN: ${(30 - minSinceLast).toFixed(0)}min remaining`, ...base };
+  if (minSinceLast < cooldownMin) {
+    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_COOLDOWN: ${(cooldownMin - minSinceLast).toFixed(0)}min remaining`, ...base };
   }
 
   // BR-3: Check regime capital cap

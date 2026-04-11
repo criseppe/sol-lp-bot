@@ -976,7 +976,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
   const totalWalletUsdc = balances.sol * price + balances.usdc;
-  const reserveUsdc = 0.1 * price + 1; // SOL reserve (in USDC) + USDC reserve
+  const reserveUsdc = runtime.solReserve * price + runtime.usdcReserve;
   const deployUsdc = Math.min(totalWalletUsdc * effectiveParams.deployPct, totalWalletUsdc - reserveUsdc);
   if (deployUsdc < 5) {
     console.log(JSON.stringify({ level: 'warn', msg: 'insufficient funds to open position', sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));
