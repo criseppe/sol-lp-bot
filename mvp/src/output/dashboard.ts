@@ -2162,16 +2162,22 @@ single-candle drop &#x2265; 5%     &#x2192; flash crash, wait 15 min first</div>
 
 <div class="rule-card">
   <h3><span class="rule-num">6</span> Fee Harvest</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Collects accrued trading fees from the position. More frequent in volatile markets to lock gains before IL erases them.</p>
-  <div class="logic-box"><span class="tag tag-ranging">RANGING</span>  every 7 days   (let fees accumulate)
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Collects accrued trading fees from the position. More frequent in volatile markets to lock gains before IL erases them. After collection, converts harvested SOL to USDC based on regime policy.</p>
+  <div class="logic-box"><b>Harvest intervals:</b>
+<span class="tag tag-ranging">RANGING</span>  every 7 days   (let fees accumulate)
 <span class="tag tag-bull">BULLISH</span>  every 4 days
 <span class="tag tag-bear">BEARISH</span>  every 2 days   (lock gains quickly)
-<span class="tag tag-extreme">EXTREME</span> every 1 day    (harvest ASAP)</div>
+<span class="tag tag-extreme">EXTREME</span> every 1 day    (harvest ASAP)
+
+<b>Post-harvest SOL &#x2192; USDC conversion:</b>
+<span class="tag tag-ranging">RANGING</span>  0% (keep SOL)   <span class="tag tag-bull">BULLISH</span>  70% converted
+<span class="tag tag-bear">BEARISH</span> 100% converted   <span class="tag tag-extreme">EXTREME</span> 100% converted</div>
   <div class="example-box">
-    <div class="example-title">RANGING: 7-day harvest cycle</div>
-    <div class="example-text">Position earns a share of 0.05% pool fee on every swap through its range.</div>
-    <div class="example-text">Day 7: daysSinceHarvest = 7 &#x2265; 7 &#x2192; collectFees tx &#x2192; 0.001 SOL + 0.08 USDC to wallet.</div>
-    <div class="example-note">Harvesting too often wastes on-chain transactions. In EXTREME, daily harvest locks gains before a crash erases them via IL.</div>
+    <div class="example-title">BEARISH: harvest + full SOL conversion</div>
+    <div class="example-text">Day 2: collectFees tx &#x2192; 0.001 SOL + 0.08 USDC to wallet.</div>
+    <div class="example-text">BEARISH policy = 100% convert &#x2192; swap 0.001 SOL &#x2192; ~$0.08 USDC.</div>
+    <div class="example-text">Result: all harvested value in USDC, protected from further SOL decline.</div>
+    <div class="example-note">In RANGING, harvested SOL stays as SOL (0% conversion). In trending/volatile markets, converting to USDC locks gains and reduces exposure.</div>
   </div>
   <div class="trigger">Runs: checked every 1 hour against last harvest time</div>
 </div>
