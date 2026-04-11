@@ -11,7 +11,7 @@ import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine/regime.js';
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
-import { REENTRY, RISK, MINTS } from './constants.js';
+import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
 import { getConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
@@ -401,7 +401,7 @@ async function main() {
           if (livePos && livePos.entryPrice && livePos.entryPrice !== price.price) {
             const priceRatio = price.price / livePos.entryPrice;
             const ilPct = 2 * Math.sqrt(priceRatio) / (1 + priceRatio) - 1;
-            ilUsdc = ilPct * totalWithPosition;
+            ilUsdc = ilPct * positionValueUsdc;
           }
 
           const liveDataUpdate: LiveData = {
@@ -948,6 +948,18 @@ async function runLiveCycle(price: number): Promise<void> {
           prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
           decision: 'AUTO_DEPLOY', reasoning: `${deployCheck.reason}\nDeposited ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}). Position range: $${currentPos.priceLower.toFixed(2)}-$${currentPos.priceUpper.toFixed(2)}.`,
           params_json: JSON.stringify({ idleUsdc: deployCheck.idleUsdc, idealPrice: deployCheck.idealPrice, deployPct: deployCheck.currentDeployPct, deployableUsdc: deployCheck.deployableUsdc }) });
+
+        // Persist updated entrySol/entryUsdc immediately (don't wait for next cycle)
+        const updatedPos = liveExecutor!.getCurrentPosition();
+        if (updatedPos) {
+          upsertBotState(db, {
+            state: liveBotState, regime: liveRegime,
+            position_json: JSON.stringify({ ...updatedPos, positionMint: updatedPos.positionMint.toBase58(), positionAddress: updatedPos.positionAddress.toBase58() }),
+            updated_at: Date.now(),
+            cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+            tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+          });
+        }
         }
       } else {
         // Log skip reason periodically (every 30 min, same cadence as HOLD log)

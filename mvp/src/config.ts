@@ -71,37 +71,65 @@ const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
 export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const g = (key: string) => dbConfig[key];
   const n = (key: string) => { const v = g(key); return v != null ? parseFloat(v) : undefined; };
+  // Validated number: only apply if within bounds
+  const nv = (key: string, min: number, max: number) => {
+    const v = n(key);
+    if (v == null) return undefined;
+    if (!isFinite(v) || v < min || v > max) {
+      console.log(JSON.stringify({ level: 'warn', msg: `Config rejected: ${key}=${v} outside [${min}, ${max}]`, timestamp: Date.now() }));
+      return undefined;
+    }
+    return v;
+  };
 
-  if (n('decisionIntervalSeconds') != null) runtime.decisionIntervalSeconds = n('decisionIntervalSeconds')!;
-  if (n('regimeWindowDays') != null) runtime.regimeWindowDays = n('regimeWindowDays')!;
-  if (n('trendThreshold') != null) runtime.trendThreshold = n('trendThreshold')!;
-  if (n('maxLiveCapitalUsdc') != null) runtime.maxLiveCapitalUsdc = n('maxLiveCapitalUsdc')!;
-  if (n('solReserve') != null) runtime.solReserve = n('solReserve')!;
-  if (n('usdcReserve') != null) runtime.usdcReserve = n('usdcReserve')!;
-  if (n('minPositionSizeUsdc') != null) runtime.minPositionSizeUsdc = n('minPositionSizeUsdc')!;
-  if (n('autoDeployCheckMinutes') != null) runtime.autoDeployCheckMinutes = n('autoDeployCheckMinutes')!;
-  if (n('autoDeployCooldownMinutes') != null) runtime.autoDeployCooldownMinutes = n('autoDeployCooldownMinutes')!;
-  if (n('minIdleUsdc') != null) runtime.minIdleUsdc = n('minIdleUsdc')!;
-  if (n('minIdleSol') != null) runtime.minIdleSol = n('minIdleSol')!;
-  if (n('minDeployUsdc') != null) runtime.minDeployUsdc = n('minDeployUsdc')!;
-  if (n('deployRatioTolerance') != null) runtime.deployRatioTolerance = n('deployRatioTolerance')!;
-  if (n('pullbackThresholdPct') != null) runtime.pullbackThresholdPct = n('pullbackThresholdPct')!;
-  if (n('timeoutHours') != null) runtime.timeoutHours = n('timeoutHours')!;
-  if (n('flashCrashPct') != null) runtime.flashCrashPct = n('flashCrashPct')!;
-  if (n('flashCrashWaitMinutes') != null) runtime.flashCrashWaitMinutes = n('flashCrashWaitMinutes')!;
-  if (n('dailyLossLimitPct') != null) runtime.dailyLossLimitPct = n('dailyLossLimitPct')!;
-  if (n('weeklyDrawdownLimitPct') != null) runtime.weeklyDrawdownLimitPct = n('weeklyDrawdownLimitPct')!;
-  if (n('maxIlPct') != null) runtime.maxIlPct = n('maxIlPct')!;
-  if (n('rebalanceLoopLimit') != null) runtime.rebalanceLoopLimit = n('rebalanceLoopLimit')!;
+  // Decision loop
+  const v1 = nv('decisionIntervalSeconds', 10, 600); if (v1 != null) runtime.decisionIntervalSeconds = v1;
+  const v2 = nv('regimeWindowDays', 1, 30); if (v2 != null) runtime.regimeWindowDays = v2;
+  const v3 = nv('trendThreshold', 0.05, 0.95); if (v3 != null) runtime.trendThreshold = v3;
+  const v4 = nv('pythMaxConfidencePct', 0.1, 5); if (v4 != null) runtime.pythMaxConfidencePct = v4;
+  const v5 = nv('pythMaxStalenessSec', 10, 300); if (v5 != null) runtime.pythMaxStalenessSec = v5;
+
+  // Capital & reserves
+  const v6 = nv('maxLiveCapitalUsdc', 10, 1000000); if (v6 != null) runtime.maxLiveCapitalUsdc = v6;
+  const v7 = nv('solReserve', 0.01, 10); if (v7 != null) runtime.solReserve = v7;
+  const v8 = nv('usdcReserve', 0, 100); if (v8 != null) runtime.usdcReserve = v8;
+  const v9 = nv('minPositionSizeUsdc', 1, 10000); if (v9 != null) runtime.minPositionSizeUsdc = v9;
+
+  // Auto deploy
+  const v10 = nv('autoDeployCheckMinutes', 1, 60); if (v10 != null) runtime.autoDeployCheckMinutes = v10;
+  const v11 = nv('autoDeployCooldownMinutes', 1, 1440); if (v11 != null) runtime.autoDeployCooldownMinutes = v11;
+  const v12 = nv('minIdleUsdc', 0.1, 10000); if (v12 != null) runtime.minIdleUsdc = v12;
+  const v13 = nv('minIdleSol', 0.001, 100); if (v13 != null) runtime.minIdleSol = v13;
+  const v14 = nv('minDeployUsdc', 1, 10000); if (v14 != null) runtime.minDeployUsdc = v14;
+  const v15 = nv('deployRatioTolerance', 0.001, 0.5); if (v15 != null) runtime.deployRatioTolerance = v15;
+
+  // Re-entry
+  const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
+  const v17 = nv('timeoutHours', 0.05, 48); if (v17 != null) runtime.timeoutHours = v17;
+  const v18 = nv('flashCrashPct', 1, 30); if (v18 != null) runtime.flashCrashPct = v18;
+  const v19 = nv('flashCrashWaitMinutes', 1, 120); if (v19 != null) runtime.flashCrashWaitMinutes = v19;
+
+  // Circuit breakers
+  const v20 = nv('dailyLossLimitPct', 1, 50); if (v20 != null) runtime.dailyLossLimitPct = v20;
+  const v21 = nv('weeklyDrawdownLimitPct', 1, 80); if (v21 != null) runtime.weeklyDrawdownLimitPct = v21;
+  const v22 = nv('maxIlPct', 1, 50); if (v22 != null) runtime.maxIlPct = v22;
+  const v23 = nv('rebalanceLoopLimit', 1, 100); if (v23 != null) runtime.rebalanceLoopLimit = v23;
 
   const rwo = g('rangeWidthOverride');
   if (rwo != null) runtime.rangeWidthOverride = rwo === 'null' || rwo === '' ? null : parseFloat(rwo);
 
-  // Regime params
+  // Regime params (with bounds)
+  const rpBounds: Record<string, [number, number]> = {
+    rangeWidthPct: [0.1, 20], skewDown: [0, 1], skewUp: [0, 1],
+    proxThresholdLower: [0.1, 1], proxThresholdUpper: [0.1, 1],
+    deployPct: [0.01, 1], solReentrySplit: [0, 1],
+    harvestIntervalDays: [0.1, 30], harvestSolConvertPct: [0, 1],
+  };
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {
       const key = `regime.${regime}.${field}`;
-      const val = n(key);
+      const bounds = rpBounds[field] ?? [0, 1000];
+      const val = nv(key, bounds[0], bounds[1]);
       if (val != null) (runtime.regimeParams[regime] as any)[field] = val;
     }
   }
@@ -116,6 +144,8 @@ export function exportConfig(): Record<string, string> {
   out['decisionIntervalSeconds'] = String(runtime.decisionIntervalSeconds);
   out['regimeWindowDays'] = String(runtime.regimeWindowDays);
   out['trendThreshold'] = String(runtime.trendThreshold);
+  out['pythMaxConfidencePct'] = String(runtime.pythMaxConfidencePct);
+  out['pythMaxStalenessSec'] = String(runtime.pythMaxStalenessSec);
   out['maxLiveCapitalUsdc'] = String(runtime.maxLiveCapitalUsdc);
   out['solReserve'] = String(runtime.solReserve);
   out['usdcReserve'] = String(runtime.usdcReserve);
