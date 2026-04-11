@@ -30,6 +30,7 @@ export interface BotStateRow {
   pullback_active?: number;
   pullback_peak?: number;
   pullback_start?: number;
+  last_harvest_time?: number;
 }
 
 export interface DailyPnlRow {
@@ -190,6 +191,7 @@ export function initDb(dbPath: string): Database.Database {
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`); } catch (_) {}
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`); } catch (_) {}
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_start INTEGER DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN last_harvest_time INTEGER DEFAULT 0`); } catch (_) {}
 
   // Migration: add rule2_active column to existing rebalance_events tables
   try {
@@ -283,13 +285,13 @@ export function getRebalanceEvents(db: Database.Database, limit: number): Rebala
 
 export function upsertBotState(db: Database.Database, state: BotStateRow): void {
   db.prepare(`
-    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start)
-    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start)
-  `).run({ ...state, ledger_json: state.ledger_json ?? null, naive_json: state.naive_json ?? null, cum_fees_sol: state.cum_fees_sol ?? 0, cum_fees_usdc: state.cum_fees_usdc ?? 0, realized_il: state.realized_il ?? 0, tx_count: state.tx_count ?? 0, cum_gas_lamports: state.cum_gas_lamports ?? 0, pullback_active: state.pullback_active ?? 0, pullback_peak: state.pullback_peak ?? 0, pullback_start: state.pullback_start ?? 0 });
+    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time)
+    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time)
+  `).run({ ...state, ledger_json: state.ledger_json ?? null, naive_json: state.naive_json ?? null, cum_fees_sol: state.cum_fees_sol ?? 0, cum_fees_usdc: state.cum_fees_usdc ?? 0, realized_il: state.realized_il ?? 0, tx_count: state.tx_count ?? 0, cum_gas_lamports: state.cum_gas_lamports ?? 0, pullback_active: state.pullback_active ?? 0, pullback_peak: state.pullback_peak ?? 0, pullback_start: state.pullback_start ?? 0, last_harvest_time: state.last_harvest_time ?? 0 });
 }
 
 export function getBotState(db: Database.Database): BotStateRow | null {
-  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
+  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
   return row ?? null;
 }
 

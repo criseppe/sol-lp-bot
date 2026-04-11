@@ -66,7 +66,7 @@ let liveBotState: BotState = 'IDLE';
 let livePullbackActive = false;
 let livePullbackPeak = 0;
 let livePullbackStart = 0;
-let liveLastHarvestTime = 0; // 0 = harvest on first check if due
+let liveLastHarvestTime = savedState?.last_harvest_time ?? 0;
 let liveLastRegimeCheck = 0;
 let liveLastRegimeEvalLog = 0;
 let liveRebalancesThisHour = 0;
@@ -115,7 +115,7 @@ if (savedState?.pullback_active) {
 
 // Helper: pullback fields for every state save
 function pullbackFields() {
-  return { pullback_active: livePullbackActive ? 1 : 0, pullback_peak: livePullbackPeak, pullback_start: livePullbackStart };
+  return { pullback_active: livePullbackActive ? 1 : 0, pullback_peak: livePullbackPeak, pullback_start: livePullbackStart, last_harvest_time: liveLastHarvestTime };
 }
 
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
