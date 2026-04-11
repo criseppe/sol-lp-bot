@@ -3,9 +3,10 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv } from '../db/sqlite.js';
+import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
+import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
 
 interface OnChainTx {
   signature: string;
@@ -275,6 +276,33 @@ export function startDashboard(port: number): DashboardServer {
   // Strategy page
   app.get('/strategy', (_req, res) => {
     res.type('html').send(renderStrategyHtml());
+  });
+
+  // Config page + API
+  app.get('/config', (_req, res) => {
+    res.type('html').send(renderConfigHtml());
+  });
+
+  app.get('/api/config', (_req, res) => {
+    res.json(exportConfig());
+  });
+
+  app.use(express.json());
+  app.post('/api/config', (req, res) => {
+    try {
+      const entries = req.body as Record<string, string>;
+      if (!entries || typeof entries !== 'object') {
+        res.status(400).json({ error: 'Expected JSON object of key-value pairs' });
+        return;
+      }
+      if (!dbRef) { res.status(500).json({ error: 'DB not initialized' }); return; }
+      setConfigBatch(dbRef, entries);
+      applyConfigFromDb(entries);
+      console.log(JSON.stringify({ level: 'info', msg: `Config updated: ${Object.keys(entries).length} keys`, keys: Object.keys(entries), timestamp: Date.now() }));
+      res.json({ success: true, updated: Object.keys(entries).length });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
   });
 
   // Health check state
@@ -725,6 +753,7 @@ const NAV_HTML = `
   <a href="/live" id="nav-live">Live Wallet</a>
   <a href="/insights" id="nav-insights">Insights</a>
   <a href="/strategy" id="nav-strategy">Strategy</a>
+  <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
 </div>`;
 
@@ -1928,6 +1957,263 @@ ${data.recentTxs.length > 0 ? `
 
 </body>
 </html>`;
+}
+
+// ── Config page ──────────────────────────────────────────────────────────
+
+function renderConfigHtml(): string {
+  const c = runtime;
+  const rp = c.regimeParams;
+  const regimes = ['RANGING', 'BULLISH_TREND', 'BEARISH_TREND', 'EXTREME'] as const;
+  const rpFields = [
+    { key: 'rangeWidthPct', label: 'Range width %', desc: 'Width of LP position as % of price. Tighter = more fees but more OOR.', ex: '1.5→2%: range goes from ~$1.28 to ~$1.70 at $85 SOL.' },
+    { key: 'skewDown', label: 'Skew down', desc: 'Fraction of range below current price (0-1). Higher = more downside room.', ex: '0.30→0.50: symmetric range. 0.30: 30% below, 70% above.' },
+    { key: 'skewUp', label: 'Skew up', desc: 'Fraction of range above current price (0-1). Auto = 1 - skewDown.', ex: '0.70→0.50: symmetric. Should sum to 1.0 with skewDown.' },
+    { key: 'proxThresholdLower', label: 'Downside exit %', desc: 'Rule 2 fires when proximity to lower bound reaches this (0-1).', ex: '0.65→0.50: exits earlier (halfway to bound). Less IL but more rebalances.' },
+    { key: 'proxThresholdUpper', label: 'Upside exit %', desc: 'Rule 2 fires when proximity to upper bound reaches this (0-1).', ex: '0.88→0.95: holds almost to bound. More fees but risks full OOR.' },
+    { key: 'deployPct', label: 'Deploy %', desc: 'Fraction of total capital deployed into position (0-1). Rest = reserve.', ex: '1.00→0.75: keeps 25% as reserve. Less fees but safer in volatility.' },
+    { key: 'solReentrySplit', label: 'SOL re-entry split', desc: 'Target SOL fraction of wallet after downside exit (0-1).', ex: '0.50→0.30: hold 30% SOL / 70% USDC. Less SOL exposure on drops.' },
+    { key: 'harvestIntervalDays', label: 'Harvest days', desc: 'Collect fees every N days. Lower = lock gains sooner.', ex: '7→3: harvest twice a week instead of once. More TXs but locks gains.' },
+    { key: 'harvestSolConvertPct', label: 'SOL→USDC harvest %', desc: 'After harvest, convert this % of SOL fees to USDC (0-1).', ex: '0→0.50: convert half of harvested SOL to USDC. De-risks gains.' },
+  ];
+
+  function rpRow(field: typeof rpFields[0]): string {
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px" title="${field.desc}&#10;&#10;Example: ${field.ex}">${field.label} <span style="color:#30363d;cursor:help" title="${field.desc}&#10;&#10;Example: ${field.ex}">&#x2753;</span></td>
+      ${regimes.map(r => `<td style="padding:4px 6px"><input type="number" step="any" class="cfg-input" data-key="regime.${r}.${field.key}" value="${(rp[r] as any)[field.key]}" style="width:60px"></td>`).join('')}
+    </tr>`;
+  }
+
+  function field(key: string, value: string | number, label: string, desc: string, ex: string, inputType = 'number'): string {
+    const inputStyle = 'background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:80px';
+    const isToggle = inputType === 'toggle';
+    const inputHtml = isToggle
+      ? `<select class="cfg-input" data-key="${key}" style="${inputStyle};width:90px"><option value="null" ${value === 'null' ? 'selected' : ''}>OFF</option><option value="${typeof value === 'number' ? value : ''}" ${value !== 'null' && value !== '' ? 'selected' : ''}>ON</option></select>`
+      : `<input type="${inputType}" step="any" class="cfg-input" data-key="${key}" value="${value}" style="${inputStyle}">`;
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:8px;color:#c9d1d9;font-size:12px">${label}</td>
+      <td style="padding:8px">${inputHtml}</td>
+      <td style="padding:8px;color:#8b949e;font-size:11px;max-width:250px">${desc}</td>
+      <td style="padding:8px;color:#58a6ff;font-size:11px;max-width:250px">${ex}</td>
+    </tr>`;
+  }
+
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOL/USDC LP Bot - Configuration</title>
+<style>${SHARED_STYLES}
+.cfg-section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
+.cfg-section h3{color:#58a6ff;font-size:14px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #21262d}
+.cfg-input{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px}
+.cfg-input:focus{border-color:#58a6ff;outline:none}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:6px 8px;color:#8b949e;font-size:11px;border-bottom:1px solid #30363d}
+.save-bar{position:sticky;bottom:0;background:#0d1117;border-top:2px solid #58a6ff;padding:12px 16px;display:flex;align-items:center;gap:12px;z-index:10}
+.save-btn{background:#238636;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer}
+.save-btn:hover{background:#2ea043}
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center}
+.modal-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:450px;width:90%}
+.modal-box h3{color:#f0883e;margin-bottom:12px}
+.modal-box p{color:#c9d1d9;font-size:13px;line-height:1.6;margin-bottom:16px}
+.modal-btns{display:flex;gap:12px;justify-content:flex-end}
+.modal-btns button{padding:8px 20px;border-radius:6px;border:none;font-size:13px;cursor:pointer}
+.btn-cancel{background:#21262d;color:#c9d1d9}
+.btn-confirm{background:#da3633;color:#fff}
+#save-status{font-size:13px}
+</style></head><body>
+<div class="banner">
+  <div class="mode" style="color:#f0883e">Configuration</div>
+  <h1>SOL/USDC LP Bot</h1>
+  <div style="color:#8b949e;font-size:11px">All changes take effect immediately. No restart required.</div>
+</div>
+${NAV_HTML}
+<script>document.getElementById('nav-config').classList.add('active')</script>
+
+<!-- SECTION 1: Decision Loop -->
+<div class="cfg-section">
+  <h3>1. Decision Loop</h3>
+  <table>
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('decisionIntervalSeconds', c.decisionIntervalSeconds, 'Cycle interval (sec)', 'How often the bot reads price and makes decisions.', 'At 30s: faster OOR detection but 2x RPC calls. At 120s: saves RPC but slower reaction.')}
+    ${field('regimeWindowDays', c.regimeWindowDays, 'Regime window (days)', 'Days of daily closes for regime detection.', 'At 14 days: smoother regime, slower to react. At 3 days: reactive but may flap.')}
+    ${field('trendThreshold', c.trendThreshold, 'Trend threshold', 'dirRatio above this = trending. Higher = stays RANGING longer.', 'At 0.50: only strong trends flip regime. At 0.20: even mild trends trigger.')}
+  </table>
+</div>
+
+<!-- SECTION 2: Position Rules -->
+<div class="cfg-section">
+  <h3>2. Position Rules</h3>
+  <table style="margin-bottom:16px">
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:8px;color:#c9d1d9;font-size:12px">Range width override</td>
+      <td style="padding:8px">
+        <select id="rwo-toggle" class="cfg-input" style="width:60px" onchange="document.getElementById('rwo-val').style.display=this.value==='on'?'inline':'none'">
+          <option value="off" ${c.rangeWidthOverride == null ? 'selected' : ''}>OFF</option>
+          <option value="on" ${c.rangeWidthOverride != null ? 'selected' : ''}>ON</option>
+        </select>
+        <input type="number" step="any" id="rwo-val" class="cfg-input" data-key="rangeWidthOverride" value="${c.rangeWidthOverride ?? 1.5}" style="width:60px;margin-left:4px;${c.rangeWidthOverride == null ? 'display:none' : ''}">
+      </td>
+      <td style="padding:8px;color:#8b949e;font-size:11px">Force fixed range width regardless of regime. OFF = adaptive.</td>
+      <td style="padding:8px;color:#58a6ff;font-size:11px">ON at 1.5%: always tight range. OFF: adapts 1.5-6% by regime.</td>
+    </tr>
+  </table>
+  <div style="color:#8b949e;font-size:11px;margin-bottom:8px">Per-regime parameters (hover <span style="color:#30363d">&#x2753;</span> for description + example):</div>
+  <div style="overflow-x:auto">
+  <table>
+    <tr>
+      <th></th>
+      <th style="color:#4a9eff;text-align:center">Ranging</th>
+      <th style="color:#22c55e;text-align:center">Bullish</th>
+      <th style="color:#ef4444;text-align:center">Bearish</th>
+      <th style="color:#a855f7;text-align:center">Extreme</th>
+    </tr>
+    ${rpFields.map(f => rpRow(f)).join('')}
+  </table>
+  </div>
+</div>
+
+<!-- SECTION 3: Capital & Reserves -->
+<div class="cfg-section">
+  <h3>3. Capital &amp; Reserves</h3>
+  <table>
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $10k: allows large wallet. At $500: stops on accidental deposits.')}
+    ${field('solReserve', c.solReserve, 'SOL reserve', 'Always kept for gas + rent. Never deposited.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
+    ${field('usdcReserve', c.usdcReserve, 'USDC reserve ($)', 'Minimum USDC always in wallet.', 'At $5: more buffer. At $0: risk token account errors.')}
+    ${field('minPositionSizeUsdc', c.minPositionSizeUsdc, 'Min position size ($)', 'Won&#39;t open below this. Prevents dust positions.', 'At $500: only meaningful positions. At $50: allows small deploys.')}
+  </table>
+</div>
+
+<!-- SECTION 4: Auto Deploy -->
+<div class="cfg-section">
+  <h3>4. Auto Deploy (Rule 7)</h3>
+  <table>
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('autoDeployCheckMinutes', c.autoDeployCheckMinutes, 'Check frequency (min)', 'How often to check for idle funds. Each check = 2 RPC calls.', 'At 10 min: half RPC cost. At 1 min: very responsive but noisy.')}
+    ${field('autoDeployCooldownMinutes', c.autoDeployCooldownMinutes, 'Cooldown (min)', 'Minimum time between deployments.', 'At 15 min: faster cleanup of swap leftovers. At 60: less activity.')}
+    ${field('minIdleUsdc', c.minIdleUsdc, 'Min idle USDC ($)', 'Min idle USDC after reserve to trigger deploy.', 'At $20: ignores small amounts. At $1: deploys tiny leftovers.')}
+    ${field('minIdleSol', c.minIdleSol, 'Min idle SOL', 'Min idle SOL after reserve to trigger deploy.', 'At 0.5 SOL (~$42): only meaningful amounts. At 0.01: deploys dust.')}
+    ${field('minDeployUsdc', c.minDeployUsdc, 'Min deploy ($)', 'Min total deployable value to trigger.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
+    ${field('deployRatioTolerance', c.deployRatioTolerance, 'Price ratio tolerance', 'Max deviation from geometric mean (0-1). Wider = more deploy opportunities.', 'At 0.05: deploys even near range edges. At 0.01: only near center.')}
+  </table>
+</div>
+
+<!-- SECTION 5: Re-entry -->
+<div class="cfg-section">
+  <h3>5. Re-entry (Rule 3)</h3>
+  <table>
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('pullbackThresholdPct', c.pullbackThresholdPct, 'Pullback threshold (%)', 'Price must drop this % from peak to re-enter.', 'At 5%: bigger pullback, better entry but longer wait. At 1%: quick re-entry.')}
+    ${field('timeoutHours', c.timeoutHours, 'Timeout (hours)', 'Re-enter after this long even without pullback.', 'At 8h: more patience. At 1h: re-enters quickly, prioritizes fee earning.')}
+    ${field('flashCrashPct', c.flashCrashPct, 'Flash crash threshold (%)', 'Drop this % in ~5 min = flash crash. Triggers cooldown.', 'At 10%: only extreme crashes trigger. At 3%: even moderate drops pause.')}
+    ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash. Also resets peak + timeout.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
+  </table>
+</div>
+
+<!-- SECTION 6: Circuit Breakers -->
+<div class="cfg-section">
+  <h3>6. Circuit Breakers</h3>
+  <table>
+    <tr><th>Parameter</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('dailyLossLimitPct', c.dailyLossLimitPct, 'Daily loss limit (%)', 'HALT if portfolio drops more than this in a day.', 'At 10%: more tolerance for volatile days. At 3%: very conservative.')}
+    ${field('weeklyDrawdownLimitPct', c.weeklyDrawdownLimitPct, 'Weekly drawdown (%)', 'HALT if portfolio drops this from weekly peak.', 'At 25%: allows larger drawdown. At 10%: halts early in downtrends.')}
+    ${field('maxIlPct', c.maxIlPct, 'Max IL (%)', 'Force rebalance if IL exceeds this on any position.', 'At 15%: allows more IL (wider ranges). At 5%: very tight IL control.')}
+    ${field('rebalanceLoopLimit', c.rebalanceLoopLimit, 'Rebalance limit (/hour)', 'Max close+reopen cycles per hour.', 'At 20: more activity in volatile markets. At 5: stricter limit.')}
+  </table>
+</div>
+
+<!-- SAVE BAR -->
+<div class="save-bar">
+  <button class="save-btn" onclick="showConfirm()">Save Configuration</button>
+  <span id="save-status"></span>
+</div>
+
+<!-- CONFIRMATION MODAL -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal-box">
+    <h3>Confirm Configuration Change</h3>
+    <p>These changes take effect <b>immediately</b> on the running bot. No restart required.<br><br>
+    <span id="change-count"></span> parameter(s) will be updated.</p>
+    <div id="change-list" style="max-height:200px;overflow-y:auto;background:#0d1117;border-radius:6px;padding:8px;font-size:11px;color:#8b949e;margin-bottom:12px"></div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="hideConfirm()">Cancel</button>
+      <button class="btn-confirm" onclick="doSave()">Apply Changes</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var originalValues = {};
+document.querySelectorAll('.cfg-input').forEach(function(el) {
+  originalValues[el.dataset.key || el.id] = el.value;
+});
+
+function getChanges() {
+  var changes = {};
+  document.querySelectorAll('.cfg-input').forEach(function(el) {
+    var key = el.dataset.key;
+    if (!key) return;
+    var val = el.value;
+    // Handle range width override toggle
+    if (key === 'rangeWidthOverride') {
+      var toggle = document.getElementById('rwo-toggle');
+      if (toggle.value === 'off') val = 'null';
+    }
+    if (val !== originalValues[key]) {
+      changes[key] = val;
+    }
+  });
+  return changes;
+}
+
+function showConfirm() {
+  var changes = getChanges();
+  var keys = Object.keys(changes);
+  if (keys.length === 0) {
+    document.getElementById('save-status').textContent = 'No changes to save.';
+    document.getElementById('save-status').style.color = '#8b949e';
+    return;
+  }
+  document.getElementById('change-count').textContent = keys.length;
+  var list = keys.map(function(k) {
+    return '<div style="padding:2px 0"><span style="color:#58a6ff">' + k + '</span>: ' + (originalValues[k] || '(default)') + ' → <b style="color:#f0883e">' + changes[k] + '</b></div>';
+  }).join('');
+  document.getElementById('change-list').innerHTML = list;
+  document.getElementById('confirm-modal').style.display = 'flex';
+}
+
+function hideConfirm() {
+  document.getElementById('confirm-modal').style.display = 'none';
+}
+
+function doSave() {
+  hideConfirm();
+  var changes = getChanges();
+  var status = document.getElementById('save-status');
+  status.textContent = 'Saving...';
+  status.style.color = '#f0883e';
+  fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(changes)
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.success) {
+      status.textContent = 'Saved ' + data.updated + ' parameter(s). Changes are live.';
+      status.style.color = '#22c55e';
+      // Update original values to reflect saved state
+      Object.keys(changes).forEach(function(k) { originalValues[k] = changes[k]; });
+    } else {
+      status.textContent = 'Error: ' + (data.error || 'unknown');
+      status.style.color = '#ef4444';
+    }
+  }).catch(function(err) {
+    status.textContent = 'Error: ' + err;
+    status.style.color = '#ef4444';
+  });
+}
+</script>
+</body></html>`;
 }
 
 // ── Strategy page ─────────────────────────────────────────────────────────

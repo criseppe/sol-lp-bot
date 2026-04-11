@@ -160,6 +160,12 @@ export function initDb(dbPath: string): Database.Database {
       enabled         INTEGER NOT NULL DEFAULT 1,
       updated_at      INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS config (
+      key             TEXT PRIMARY KEY,
+      value           TEXT NOT NULL,
+      updated_at      INTEGER NOT NULL
+    );
   `);
 
   // Migration: add rule2_active column to existing rebalance_events tables
@@ -485,4 +491,29 @@ export function exportAllData(db: Database.Database): {
     regime_history: db.prepare('SELECT * FROM regime_history ORDER BY timestamp ASC').all(),
     daily_pnl: db.prepare('SELECT * FROM daily_pnl ORDER BY date ASC').all(),
   };
+}
+
+// ── Config key-value store ───────────────────────────────────────────────
+
+export function getConfig(db: Database.Database): Record<string, string> {
+  const rows = db.prepare('SELECT key, value FROM config').all() as Array<{ key: string; value: string }>;
+  const result: Record<string, string> = {};
+  for (const r of rows) result[r.key] = r.value;
+  return result;
+}
+
+export function setConfig(db: Database.Database, key: string, value: string): void {
+  db.prepare('INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+    .run(key, value, Date.now());
+}
+
+export function setConfigBatch(db: Database.Database, entries: Record<string, string>): void {
+  const stmt = db.prepare('INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at');
+  const now = Date.now();
+  const tx = db.transaction(() => {
+    for (const [key, value] of Object.entries(entries)) {
+      stmt.run(key, value, now);
+    }
+  });
+  tx();
 }

@@ -13,6 +13,8 @@ import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
 import { REENTRY, RISK, MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
+import { runtime, applyConfigFromDb } from './config.js';
+import { getConfig } from './db/sqlite.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -29,22 +31,27 @@ const RPC_URL = process.env.RPC_URL!;
 const PYTH_SOL_USD_FEED = process.env.PYTH_SOL_USD_FEED!;
 const WHIRLPOOL_ADDRESS = process.env.WHIRLPOOL_ADDRESS!;
 const DB_PATH = process.env.DB_PATH!;
-const DECISION_INTERVAL_SECONDS = parseInt(process.env.DECISION_INTERVAL_SECONDS ?? '60');
 const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT ?? '3000');
-const REGIME_WINDOW_DAYS = parseInt(process.env.REGIME_WINDOW_DAYS ?? '7');
-const TREND_THRESHOLD = parseFloat(process.env.TREND_THRESHOLD ?? '0.35');
-const PYTH_MAX_CONFIDENCE_PCT = parseFloat(process.env.PYTH_MAX_CONFIDENCE_PCT ?? '0.5');
-const PYTH_MAX_STALENESS_SECONDS = parseInt(process.env.PYTH_MAX_STALENESS_SECONDS ?? '60');
-const MAX_LIVE_CAPITAL_USDC = parseFloat(process.env.MAX_LIVE_CAPITAL_USDC ?? '150');
-const RANGE_WIDTH_OVERRIDE = process.env.RANGE_WIDTH_OVERRIDE ? parseFloat(process.env.RANGE_WIDTH_OVERRIDE) : null;
-const MIN_IDLE_USDC = parseFloat(process.env.MIN_IDLE_USDC ?? '5');
-const MIN_IDLE_SOL = parseFloat(process.env.MIN_IDLE_SOL ?? '0.05');
-const MIN_DEPLOY_USDC = parseFloat(process.env.MIN_DEPLOY_USDC ?? '10');
-const DEPLOY_RATIO_TOLERANCE = parseFloat(process.env.DEPLOY_RATIO_TOLERANCE ?? '0.02');
+
+// Initialize runtime config from env vars (DB overrides applied after DB init)
+runtime.decisionIntervalSeconds = parseInt(process.env.DECISION_INTERVAL_SECONDS ?? '60');
+runtime.regimeWindowDays = parseInt(process.env.REGIME_WINDOW_DAYS ?? '7');
+runtime.trendThreshold = parseFloat(process.env.TREND_THRESHOLD ?? '0.35');
+runtime.pythMaxConfidencePct = parseFloat(process.env.PYTH_MAX_CONFIDENCE_PCT ?? '0.5');
+runtime.pythMaxStalenessSec = parseInt(process.env.PYTH_MAX_STALENESS_SECONDS ?? '60');
+runtime.maxLiveCapitalUsdc = parseFloat(process.env.MAX_LIVE_CAPITAL_USDC ?? '150');
+runtime.rangeWidthOverride = process.env.RANGE_WIDTH_OVERRIDE ? parseFloat(process.env.RANGE_WIDTH_OVERRIDE) : null;
+runtime.minIdleUsdc = parseFloat(process.env.MIN_IDLE_USDC ?? '5');
+runtime.minIdleSol = parseFloat(process.env.MIN_IDLE_SOL ?? '0.05');
+runtime.minDeployUsdc = parseFloat(process.env.MIN_DEPLOY_USDC ?? '10');
+runtime.deployRatioTolerance = parseFloat(process.env.DEPLOY_RATIO_TOLERANCE ?? '0.02');
 
 // ── 2. INIT DATABASE ──────────────────────────────────────────────────────
 
 const db = initDb(DB_PATH);
+
+// Apply config overrides from DB (takes precedence over env vars)
+applyConfigFromDb(getConfig(db));
 
 // ── 3. SETUP ──────────────────────────────────────────────────────────────
 
@@ -85,7 +92,7 @@ let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detectio
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
-const oracle = new OracleService(PYTH_SOL_USD_FEED, PYTH_MAX_CONFIDENCE_PCT, PYTH_MAX_STALENESS_SECONDS);
+const oracle = new OracleService(PYTH_SOL_USD_FEED, runtime.pythMaxConfidencePct, runtime.pythMaxStalenessSec);
 const dashboard = startDashboard(DASHBOARD_PORT);
 dashboard.setDb(db);
 
@@ -147,7 +154,7 @@ async function main() {
       timestamp: Date.now(),
     }));
 
-    validateWalletForLive(balances.sol, balances.usdc, MAX_LIVE_CAPITAL_USDC, solPrice);
+    validateWalletForLive(balances.sol, balances.usdc, runtime.maxLiveCapitalUsdc, solPrice);
     liveExecutor = new LiveExecutor(conn, wallet, WHIRLPOOL_ADDRESS);
 
     // Restore gas stats from DB (persisted on every state save and shutdown)
@@ -313,7 +320,7 @@ async function main() {
   console.log(`
 +-------------------------------------------+
 |  SOL/USDC LP Bot MVP  ·  LIVE MODE ⚡ REAL MONEY|
-|  Capital: $${MAX_LIVE_CAPITAL_USDC.toLocaleString('en-US')} USDC  ·  Pool: SOL/USDC  |
+|  Capital: $${runtime.maxLiveCapitalUsdc.toLocaleString('en-US')} USDC  ·  Pool: SOL/USDC  |
 |  Dashboard: http://localhost:${DASHBOARD_PORT}          |
 |  DB: ${DB_PATH.padEnd(36)}|
 |  Press Ctrl+C to stop gracefully          |
@@ -484,7 +491,7 @@ async function main() {
     } finally {
       cycleRunning = false;
     }
-  }, DECISION_INTERVAL_SECONDS * 1000);
+  }, runtime.decisionIntervalSeconds * 1000);
 
   // Dashboard control handlers
   let botPaused = false;
@@ -711,15 +718,15 @@ async function runLiveCycle(price: number): Promise<void> {
 
   // Regime update (every 1 hour)
   if (now - liveLastRegimeCheck > 3_600_000) {
-    const closes = getDailyCloses(db, REGIME_WINDOW_DAYS);
+    const closes = getDailyCloses(db, runtime.regimeWindowDays);
     const MIN_CLOSES_FOR_REGIME_CHANGE = 5;
     const result = closes.length >= 3
-      ? detectRegimeWithMetrics(closes, TREND_THRESHOLD)
+      ? detectRegimeWithMetrics(closes, runtime.trendThreshold)
       : { regime: 'RANGING' as const, dirRatio: 0, realisedVol: 0, priceCount: closes.length };
 
     // Determine thresholds for reasoning
     const volStatus = result.realisedVol > 0.08 ? 'ABOVE 0.08 threshold → EXTREME' : `${result.realisedVol.toFixed(4)} (below 0.08 threshold)`;
-    const dirStatus = result.dirRatio > TREND_THRESHOLD ? `ABOVE ${TREND_THRESHOLD} threshold → trending` : `${result.dirRatio.toFixed(3)} (below ${TREND_THRESHOLD} threshold → ranging)`;
+    const dirStatus = result.dirRatio > runtime.trendThreshold ? `ABOVE ${runtime.trendThreshold} threshold → trending` : `${result.dirRatio.toFixed(3)} (below ${runtime.trendThreshold} threshold → ranging)`;
     const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
     // Suppress regime changes on thin data to prevent flapping
     const changed = result.regime !== liveRegime && closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE;
@@ -730,11 +737,11 @@ async function runLiveCycle(price: number): Promise<void> {
       insertDecisionLog(db, { timestamp: now, price, regime: result.regime, bot_state: liveBotState,
         prox_lower: null, prox_upper: null, in_range: null,
         decision: changed ? 'REGIME_CHANGE' : 'REGIME_EVAL',
-        reasoning: `Regime evaluation: ${result.priceCount} daily closes analyzed over ${REGIME_WINDOW_DAYS} days. ` +
+        reasoning: `Regime evaluation: ${result.priceCount} daily closes analyzed over ${runtime.regimeWindowDays} days. ` +
           `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
           `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'} ` +
           `Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
-        params_json: JSON.stringify({ dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount, trendThreshold: TREND_THRESHOLD }) });
+        params_json: JSON.stringify({ dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount, trendThreshold: runtime.trendThreshold }) });
     }
 
     if (changed) {
@@ -747,7 +754,7 @@ async function runLiveCycle(price: number): Promise<void> {
       });
       insertRebalanceEventWithRule2(db, {
         timestamp: now, eventType: 'REGIME_CHANGE', price, regime: result.regime,
-        note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${TREND_THRESHOLD}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
+        note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${runtime.trendThreshold}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
     }
@@ -759,9 +766,9 @@ async function runLiveCycle(price: number): Promise<void> {
     liveRebalancesThisHour = 0;
     liveRebalanceHourStart = now;
   }
-  if (liveRebalancesThisHour >= RISK.REBALANCE_LOOP_LIMIT) return;
+  if (liveRebalancesThisHour >= runtime.rebalanceLoopLimit) return;
 
-  const params = getRegimeParams(liveRegime);
+  const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
   const currentPos = liveExecutor.getCurrentPosition();
 
   // No position → open one
@@ -772,14 +779,14 @@ async function runLiveCycle(price: number): Promise<void> {
         return; // still in flash crash cooldown, skip re-entry
       }
       if (isFlashCrash(liveRecentPrices)) {
-        liveFlashCrashCooldownUntil = now + REENTRY.FLASH_CRASH_WAIT_MINUTES * 60_000;
+        liveFlashCrashCooldownUntil = now + runtime.flashCrashWaitMinutes * 60_000;
         const oldPeak = livePullbackPeak;
         livePullbackPeak = price;   // Reset peak to crash level
         livePullbackStart = now;    // Reset 4h timeout from now
-        console.log(JSON.stringify({ level: 'warn', msg: `Flash crash detected (>=${REENTRY.FLASH_CRASH_PCT}% drop). Peak reset $${oldPeak.toFixed(2)} → $${price.toFixed(2)}. Timeout reset. Waiting ${REENTRY.FLASH_CRASH_WAIT_MINUTES}min.`, timestamp: now }));
+        console.log(JSON.stringify({ level: 'warn', msg: `Flash crash detected (>=${runtime.flashCrashPct}% drop). Peak reset $${oldPeak.toFixed(2)} → $${price.toFixed(2)}. Timeout reset. Waiting ${runtime.flashCrashWaitMinutes}min.`, timestamp: now }));
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
           prox_lower: null, prox_upper: null, in_range: null,
-          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `Flash crash detected: price dropped >=${REENTRY.FLASH_CRASH_PCT}% in recent candles. Peak reset from $${oldPeak.toFixed(2)} to $${price.toFixed(2)}. 4h timeout reset. Blocking re-entry for ${REENTRY.FLASH_CRASH_WAIT_MINUTES} minutes to avoid catching a falling knife.`,
+          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `Flash crash detected: price dropped >=${runtime.flashCrashPct}% in recent candles. Peak reset from $${oldPeak.toFixed(2)} to $${price.toFixed(2)}. 4h timeout reset. Blocking re-entry for ${runtime.flashCrashWaitMinutes} minutes to avoid catching a falling knife.`,
           params_json: null });
         return;
       }
@@ -791,8 +798,8 @@ async function runLiveCycle(price: number): Promise<void> {
         const waitH = ((now - livePullbackStart) / 3600_000).toFixed(1);
         const pullPct = ((livePullbackPeak - price) / livePullbackPeak * 100).toFixed(1);
         const reason = decision.reason === 'PULLBACK'
-          ? `Rule 3 pullback re-entry: price pulled back ${pullPct}% from peak $${livePullbackPeak.toFixed(2)} (threshold: ${REENTRY.PULLBACK_THRESHOLD_PCT}%). Waited ${waitH}h.`
-          : `Rule 3 timeout re-entry: waited ${waitH}h without sufficient pullback (${pullPct}% vs ${REENTRY.PULLBACK_THRESHOLD_PCT}% threshold).`;
+          ? `Rule 3 pullback re-entry: price pulled back ${pullPct}% from peak $${livePullbackPeak.toFixed(2)} (threshold: ${runtime.pullbackThresholdPct}%). Waited ${waitH}h.`
+          : `Rule 3 timeout re-entry: waited ${waitH}h without sufficient pullback (${pullPct}% vs ${runtime.pullbackThresholdPct}% threshold).`;
         await liveOpenPosition(price, 'PULLBACK_REENTRY', reason);
       } else {
         if (price > livePullbackPeak) livePullbackPeak = price;
@@ -822,8 +829,8 @@ async function runLiveCycle(price: number): Promise<void> {
       }
       if (shouldFireUpside(prox, params.proxThresholdUpper)) {
         const proxPct = (prox.proxToUpper * 100).toFixed(0);
-        const timeoutStr = REENTRY.TIMEOUT_HOURS >= 1 ? `${REENTRY.TIMEOUT_HOURS}h` : `${Math.round(REENTRY.TIMEOUT_HOURS * 60)}min`;
-        const reason = `Rule 2 early upside exit: proxToUpper=${proxPct}% >= threshold ${(params.proxThresholdUpper*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} nearing upper bound $${currentPos.priceUpper.toFixed(2)}. Closing and entering Rule 3 pullback watch — will wait for ${REENTRY.PULLBACK_THRESHOLD_PCT}% pullback or ${timeoutStr} timeout.`;
+        const timeoutStr = runtime.timeoutHours >= 1 ? `${runtime.timeoutHours}h` : `${Math.round(runtime.timeoutHours * 60)}min`;
+        const reason = `Rule 2 early upside exit: proxToUpper=${proxPct}% >= threshold ${(params.proxThresholdUpper*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} nearing upper bound $${currentPos.priceUpper.toFixed(2)}. Closing and entering Rule 3 pullback watch — will wait for ${runtime.pullbackThresholdPct}% pullback or ${timeoutStr} timeout.`;
         await liveClosePosition(price, 'T1_UPSIDE', reason);
         livePullbackActive = true;
         livePullbackPeak = price;
@@ -895,7 +902,7 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Auto capital deployment — check every 5 minutes for idle wallet funds to deploy
-  if (prox.inRange && now - liveLastAutoDeployCheck >= 300_000) {
+  if (prox.inRange && now - liveLastAutoDeployCheck >= runtime.autoDeployCheckMinutes * 60_000) {
     liveLastAutoDeployCheck = now;
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
@@ -914,10 +921,10 @@ async function runLiveCycle(price: number): Promise<void> {
         lastDeployTime: liveLastAutoDeployTime,
         now,
         enabled: autoDeployEnabled,
-        minIdleUsdc: MIN_IDLE_USDC,
-        minIdleSol: MIN_IDLE_SOL,
-        minDeployUsdc: MIN_DEPLOY_USDC,
-        deployRatioTolerance: DEPLOY_RATIO_TOLERANCE,
+        minIdleUsdc: runtime.minIdleUsdc,
+        minIdleSol: runtime.minIdleSol,
+        minDeployUsdc: runtime.minDeployUsdc,
+        deployRatioTolerance: runtime.deployRatioTolerance,
       });
 
       if (deployCheck.shouldDeploy) {
@@ -959,9 +966,9 @@ async function runLiveCycle(price: number): Promise<void> {
 
 async function liveOpenPosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
   if (!liveExecutor) return;
-  const params = getRegimeParams(liveRegime);
-  const effectiveParams = RANGE_WIDTH_OVERRIDE !== null
-    ? { ...params, rangeWidthPct: RANGE_WIDTH_OVERRIDE }
+  const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+  const effectiveParams = runtime.rangeWidthOverride !== null
+    ? { ...params, rangeWidthPct: runtime.rangeWidthOverride }
     : params;
   const range = calcRange(price, effectiveParams, (p) => pool.priceToTick(p), (p) => pool.priceToTickLower(p), (p) => pool.priceToTickUpper(p));
 
@@ -976,7 +983,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   // Build reasoning
   const why = triggerReason ?? `No open position detected.`;
-  const widthNote = RANGE_WIDTH_OVERRIDE !== null ? ` (override: ${RANGE_WIDTH_OVERRIDE}%, regime default: ${params.rangeWidthPct}%)` : `%`;
+  const widthNote = runtime.rangeWidthOverride !== null ? ` (override: ${runtime.rangeWidthOverride}%, regime default: ${params.rangeWidthPct}%)` : `%`;
   const logic = `${why} Regime: ${liveRegime} → rangeWidth=${effectiveParams.rangeWidthPct}${widthNote}, skew=${(effectiveParams.skewDown*100).toFixed(0)}% down/${(effectiveParams.skewUp*100).toFixed(0)}% up, deploy=${(effectiveParams.deployPct*100).toFixed(0)}% of capital. Range calculated: $${range.priceLower.toFixed(2)}-$${range.priceUpper.toFixed(2)} around current price $${price.toFixed(2)}.`;
 
   try {
