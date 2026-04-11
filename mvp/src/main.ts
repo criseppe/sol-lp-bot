@@ -14,7 +14,7 @@ import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldR
 import { REENTRY, RISK, MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
-import { getConfig } from './db/sqlite.js';
+import { getConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -1060,21 +1060,63 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
 // ── HELPERS ───────────────────────────────────────────────────────────────
 
 let lastPnlDate = '';
+let dailySummaryInitialValue = 0;
+let dailySummaryCumInjected = 0;
+
 function checkAndWriteDailyPnl(currentPrice: number) {
   const today = new Date().toISOString().slice(0, 10);
-  if (today === lastPnlDate) return;
-  lastPnlDate = today;
   const totalValue = currentLiveData?.totalValueWithPosition ?? 0;
-  const totalFees = liveCumFeesSol * currentPrice + liveCumFeesUsdc;
-  upsertDailyPnl(db, {
+  const walletValue = currentLiveData?.totalValueUsdc ?? 0;
+  const positionValue = currentLiveData?.positionValueUsdc ?? 0;
+  const cumFeesUsdc = liveCumFeesSol * currentPrice + liveCumFeesUsdc;
+  const rawPending = (currentLiveData?.pendingFeesSol ?? 0) * currentPrice + (currentLiveData?.pendingFeesUsdc ?? 0);
+  const pendingFeesUsdc = rawPending > 1000 ? 0 : rawPending;
+  const totalFeesUsdc = cumFeesUsdc + pendingFeesUsdc;
+
+  // New day: write daily_pnl and reset daily tracking
+  if (today !== lastPnlDate) {
+    // Detect injection: if total jumped significantly from yesterday's close
+    if (lastPnlDate && dailySummaryInitialValue > 0) {
+      const jump = totalValue - dailySummaryInitialValue;
+      if (jump > Math.max(5, dailySummaryInitialValue * 0.05)) {
+        dailySummaryCumInjected += jump;
+      }
+    }
+    dailySummaryInitialValue = totalValue;
+    lastPnlDate = today;
+
+    upsertDailyPnl(db, {
+      date: today,
+      opening_value: totalValue,
+      closing_value: totalValue,
+      fees_sol: liveCumFeesSol, fees_usdc: liveCumFeesUsdc,
+      il_cost: liveRealizedIl,
+      net_pnl: totalFeesUsdc + liveRealizedIl, net_pnl_pct: totalValue > 0 ? ((totalFeesUsdc + liveRealizedIl) / totalValue) * 100 : 0,
+      rebalances: 0,
+      in_range_pct: null, regime: liveRegime,
+    });
+  }
+
+  // Get yesterday's cumulative fees for daily delta
+  const prevSummaries = getDailySummaries(db, 2);
+  const yesterday = prevSummaries.find(s => s.date !== today);
+  const prevCumFees = yesterday?.cum_fees_usdc ?? 0;
+  const dailyFeesEarned = Math.max(0, totalFeesUsdc - prevCumFees);
+  const portfolioChange = totalValue - dailySummaryInitialValue;
+
+  // Upsert today's summary (updates every cycle with latest values)
+  upsertDailySummary(db, {
     date: today,
-    opening_value: totalValue,
-    closing_value: totalValue,
-    fees_sol: liveCumFeesSol, fees_usdc: liveCumFeesUsdc,
-    il_cost: liveRealizedIl,
-    net_pnl: totalFees + liveRealizedIl, net_pnl_pct: totalValue > 0 ? ((totalFees + liveRealizedIl) / totalValue) * 100 : 0,
-    rebalances: 0,
-    in_range_pct: null, regime: liveRegime,
+    wallet_usdc: walletValue,
+    position_usdc: positionValue,
+    total_usdc: totalValue,
+    injected_usdc: 0, // intra-day injections tracked separately
+    fees_earned_usdc: dailyFeesEarned,
+    cum_fees_usdc: totalFeesUsdc,
+    portfolio_change: portfolioChange,
+    sol_price: currentPrice,
+    regime: liveRegime,
+    in_range_pct: null,
   });
 }
 

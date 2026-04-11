@@ -94,6 +94,21 @@ export function initDb(dbPath: string): Database.Database {
       regime        TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS daily_summary (
+      date            TEXT PRIMARY KEY,
+      wallet_usdc     REAL NOT NULL,
+      position_usdc   REAL NOT NULL,
+      total_usdc      REAL NOT NULL,
+      injected_usdc   REAL DEFAULT 0,
+      fees_earned_usdc REAL DEFAULT 0,
+      cum_fees_usdc   REAL DEFAULT 0,
+      portfolio_change REAL DEFAULT 0,
+      sol_price       REAL NOT NULL,
+      regime          TEXT,
+      in_range_pct    REAL,
+      updated_at      INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS bot_state (
       id             INTEGER PRIMARY KEY DEFAULT 1,
       state          TEXT NOT NULL DEFAULT 'IDLE',
@@ -491,6 +506,42 @@ export function exportAllData(db: Database.Database): {
     regime_history: db.prepare('SELECT * FROM regime_history ORDER BY timestamp ASC').all(),
     daily_pnl: db.prepare('SELECT * FROM daily_pnl ORDER BY date ASC').all(),
   };
+}
+
+// ── Daily summary ────────────────────────────────────────────────────────
+
+export interface DailySummaryRow {
+  date: string;
+  wallet_usdc: number;
+  position_usdc: number;
+  total_usdc: number;
+  injected_usdc: number;
+  fees_earned_usdc: number;
+  cum_fees_usdc: number;
+  portfolio_change: number;
+  sol_price: number;
+  regime: string | null;
+  in_range_pct: number | null;
+}
+
+export function upsertDailySummary(db: Database.Database, row: DailySummaryRow): void {
+  db.prepare(`
+    INSERT INTO daily_summary (date, wallet_usdc, position_usdc, total_usdc, injected_usdc, fees_earned_usdc, cum_fees_usdc, portfolio_change, sol_price, regime, in_range_pct, updated_at)
+    VALUES (@date, @wallet_usdc, @position_usdc, @total_usdc, @injected_usdc, @fees_earned_usdc, @cum_fees_usdc, @portfolio_change, @sol_price, @regime, @in_range_pct, ${Date.now()})
+    ON CONFLICT(date) DO UPDATE SET
+      wallet_usdc = excluded.wallet_usdc, position_usdc = excluded.position_usdc, total_usdc = excluded.total_usdc,
+      injected_usdc = excluded.injected_usdc, fees_earned_usdc = excluded.fees_earned_usdc, cum_fees_usdc = excluded.cum_fees_usdc,
+      portfolio_change = excluded.portfolio_change, sol_price = excluded.sol_price, regime = excluded.regime,
+      in_range_pct = excluded.in_range_pct, updated_at = ${Date.now()}
+  `).run(row);
+}
+
+export function getDailySummaries(db: Database.Database, limit: number): DailySummaryRow[] {
+  return db.prepare('SELECT * FROM daily_summary ORDER BY date DESC LIMIT ?').all(limit) as DailySummaryRow[];
+}
+
+export function getAllDailySummaries(db: Database.Database): DailySummaryRow[] {
+  return db.prepare('SELECT * FROM daily_summary ORDER BY date ASC').all() as DailySummaryRow[];
 }
 
 // ── Config key-value store ───────────────────────────────────────────────

@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import { type DailyPnlRow, type LiveSnapshotRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch } from '../db/sqlite.js';
+import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
@@ -306,43 +306,22 @@ export function startDashboard(port: number): DashboardServer {
   });
 
   // CSV download: daily portfolio breakdown (all history)
+  // CSV downloads from daily_summary table (all history, pre-computed)
   app.get('/api/daily-portfolio.csv', (_req, res) => {
     if (!dbRef) { res.status(500).send('DB not ready'); return; }
-    const snaps = getLiveSnapshots(dbRef, 9999 * 24); // all history
-    const dailyMap = new Map<string, { wallet: number; position: number; total: number; price: number }>();
-    snaps.forEach(s => {
-      const date = new Date(s.timestamp).toISOString().slice(0, 10);
-      const total = (s as any).total_with_position ?? s.total_value_usdc;
-      const position = (s as any).position_value ?? 0;
-      dailyMap.set(date, { wallet: s.total_value_usdc, position, total, price: s.price });
-    });
-    const days = Array.from(dailyMap.entries()).sort();
-    let csv = 'date,wallet_usdc,position_usdc,total_usdc,sol_price\n';
-    days.forEach(([date, v]) => { csv += `${date},${v.wallet.toFixed(2)},${v.position.toFixed(2)},${v.total.toFixed(2)},${v.price.toFixed(2)}\n`; });
+    const rows = getAllDailySummaries(dbRef);
+    let csv = 'date,wallet_usdc,position_usdc,total_usdc,injected_usdc,portfolio_change,sol_price,regime\n';
+    rows.forEach(r => { csv += `${r.date},${r.wallet_usdc.toFixed(2)},${r.position_usdc.toFixed(2)},${r.total_usdc.toFixed(2)},${r.injected_usdc.toFixed(2)},${r.portfolio_change.toFixed(2)},${r.sol_price.toFixed(2)},${r.regime ?? ''}\n`; });
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="daily-portfolio.csv"');
     res.send(csv);
   });
 
-  // CSV download: daily fees (all history)
   app.get('/api/daily-fees.csv', (_req, res) => {
     if (!dbRef) { res.status(500).send('DB not ready'); return; }
-    const snaps = getLiveSnapshots(dbRef, 9999 * 24);
-    const feeDailyMap = new Map<string, { totalFeesUsdc: number; cumSol: number; cumUsdc: number; pendingSol: number; pendingUsdc: number; price: number }>();
-    snaps.forEach(s => {
-      const date = new Date(s.timestamp).toISOString().slice(0, 10);
-      const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
-      const pendingClean = rawPending > 1000 ? 0 : rawPending;
-      const cumUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
-      feeDailyMap.set(date, { totalFeesUsdc: cumUsdc + pendingClean, cumSol: s.cum_fees_sol ?? 0, cumUsdc: s.cum_fees_usdc ?? 0, pendingSol: s.pending_fees_sol ?? 0, pendingUsdc: s.pending_fees_usdc ?? 0, price: s.price });
-    });
-    const days = Array.from(feeDailyMap.entries()).sort();
-    let csv = 'date,daily_fees_usdc,cumulative_fees_usdc,cum_fees_sol,cum_fees_usdc,pending_fees_sol,pending_fees_usdc,sol_price\n';
-    for (let i = 0; i < days.length; i++) {
-      const [date, v] = days[i];
-      const dailyDelta = i > 0 ? Math.max(0, v.totalFeesUsdc - days[i - 1][1].totalFeesUsdc) : v.totalFeesUsdc;
-      csv += `${date},${dailyDelta.toFixed(6)},${v.totalFeesUsdc.toFixed(6)},${v.cumSol.toFixed(6)},${v.cumUsdc.toFixed(6)},${v.pendingSol.toFixed(6)},${v.pendingUsdc.toFixed(6)},${v.price.toFixed(2)}\n`;
-    }
+    const rows = getAllDailySummaries(dbRef);
+    let csv = 'date,fees_earned_usdc,cumulative_fees_usdc,sol_price\n';
+    rows.forEach(r => { csv += `${r.date},${r.fees_earned_usdc.toFixed(6)},${r.cum_fees_usdc.toFixed(6)},${r.sol_price.toFixed(2)}\n`; });
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="daily-fees.csv"');
     res.send(csv);
