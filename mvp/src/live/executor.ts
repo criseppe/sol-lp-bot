@@ -720,6 +720,8 @@ export class LiveExecutor {
           whirlpool, usdcMint, new BN(Math.floor(usdcToSwap * 1e6)),
           SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
         );
+        const solBeforeSwap = solBal;
+        const usdcBeforeSwap = usdcBal;
         const swapTx = await whirlpool.swap(swapQuote);
         await this.execTx(swapTx);
         await new Promise(r => setTimeout(r, 2000));
@@ -727,7 +729,9 @@ export class LiveExecutor {
         usdcBal = await this.getUsdcBalance();
         solAvailable = Math.max(0, solBal - solReserve);
         usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcToSwap, toAmount: solAvailable, reason: `Add liquidity: swapped USDC -> SOL to match position ratio` });
+        const solReceived = solBal - solBeforeSwap;
+        const usdcSpent = usdcBeforeSwap - usdcBal;
+        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Add liquidity: swapped ${usdcSpent.toFixed(2)} USDC -> ${solReceived.toFixed(4)} SOL to match position ratio` });
       }
     } else if (usdcDeficit > 1) {
       const solToSwap = Math.min(usdcDeficit / currentPrice * 1.03, solAvailable - 0.02);
@@ -738,6 +742,8 @@ export class LiveExecutor {
           whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
           SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
         );
+        const solBeforeSwap = solBal;
+        const usdcBeforeSwap = usdcBal;
         const swapTx = await whirlpool.swap(swapQuote);
         await this.execTx(swapTx);
         await new Promise(r => setTimeout(r, 2000));
@@ -745,7 +751,9 @@ export class LiveExecutor {
         usdcBal = await this.getUsdcBalance();
         solAvailable = Math.max(0, solBal - solReserve);
         usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solToSwap, toAmount: usdcAvailable, reason: `Add liquidity: swapped SOL -> USDC to match position ratio` });
+        const usdcReceived = usdcBal - usdcBeforeSwap;
+        const solSpent = solBeforeSwap - solBal;
+        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSpent, toAmount: usdcReceived, reason: `Add liquidity: swapped ${solSpent.toFixed(4)} SOL -> ${usdcReceived.toFixed(2)} USDC to match position ratio` });
       }
     }
 

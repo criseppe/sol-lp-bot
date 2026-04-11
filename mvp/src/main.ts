@@ -128,8 +128,8 @@ autoDeployEnabled = getRuleEnabled(db, 'autoDeploy');
 dashboard.setAutoDeployEnabled(autoDeployEnabled);
 
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
-function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1]) {
-  const posId = liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
+function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1], overridePositionId?: string) {
+  const posId = overridePositionId ?? liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
   insertRebalanceEvent(db_, { ...event, rule2Active: rule2Enabled ? 1 : 0, positionId: posId ?? undefined });
 }
 
@@ -616,6 +616,7 @@ async function main() {
       }
 
       const currentPrice = currentLiveData?.solPrice ?? 0;
+      const closingPosId = executor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
       const balBefore = await getWalletBalances(conn, liveWallet.publicKey);
       console.log(JSON.stringify({ level: 'info', msg: 'Closing live position (keep bot running)...', timestamp: Date.now() }));
       const result = await executor.closePosition();
@@ -631,7 +632,7 @@ async function main() {
         solBefore: balBefore.sol, usdcBefore: balBefore.usdc,
         solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
         feeSol: result.feeSolCollected, feeUsdc: result.feeUsdcCollected, ilAtClose: result.ilAtClose,
-      });
+      }, closingPosId);
       insertDecisionLog(db, { timestamp: Date.now(), price: result.closePrice, regime: liveRegime, bot_state: 'IDLE',
         prox_lower: null, prox_upper: null, in_range: null,
         decision: 'CLOSE_POSITION', reasoning: `Position closed from dashboard. Bot paused in IDLE. Fees: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Click Resume to restart.`,
@@ -655,6 +656,7 @@ async function main() {
       oracle.stop();
 
       if (executor.getCurrentPosition()) {
+        const emergencyPosId = executor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
         const balBefore = await getWalletBalances(conn, liveWallet.publicKey);
         console.log(JSON.stringify({ level: 'info', msg: 'Closing live position...', timestamp: Date.now() }));
         const result = await executor.closePosition();
@@ -670,7 +672,7 @@ async function main() {
           solBefore: balBefore.sol, usdcBefore: balBefore.usdc,
           solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
           feeSol: result.feeSolCollected, feeUsdc: result.feeUsdcCollected, ilAtClose: result.ilAtClose,
-        });
+        }, emergencyPosId);
         insertDecisionLog(db, { timestamp: Date.now(), price: result.closePrice, regime: liveRegime, bot_state: 'IDLE',
           prox_lower: null, prox_upper: null, in_range: null,
           decision: 'EMERGENCY_STOP', reasoning: `Emergency stop from dashboard. Fees: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Received ${result.solReceived.toFixed(4)} SOL + ${result.usdcReceived.toFixed(2)} USDC.`,
@@ -725,6 +727,7 @@ async function main() {
       naive_json: JSON.stringify(engine.getNaiveLedger()),
       updated_at: Date.now(),
       cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
     });
 
     console.log(JSON.stringify({ level: 'info', msg: 'State saved. Bye.', timestamp: Date.now() }));
@@ -1045,6 +1048,8 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 async function liveClosePosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
   if (!liveExecutor) return;
   try {
+    // Capture position ID before close (closePosition clears it)
+    const closingPositionId = liveExecutor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
     const balancesBefore = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
     const result = await liveExecutor.closePosition();
     const balancesAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
@@ -1066,7 +1071,7 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
       solBefore: balancesBefore.sol, usdcBefore: balancesBefore.usdc,
       solAfter: balancesAfter.sol, usdcAfter: balancesAfter.usdc,
       feeSol: result.feeSolCollected, feeUsdc: result.feeUsdcCollected, ilAtClose: result.ilAtClose,
-    });
+    }, closingPositionId);
     insertDecisionLog(db, { timestamp: Date.now(), price, regime: liveRegime, bot_state: liveBotState,
       prox_lower: null, prox_upper: null, in_range: null,
       decision: eventType, reasoning: `${why}${posInfo}\n${execution}`,
