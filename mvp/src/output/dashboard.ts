@@ -116,6 +116,7 @@ export interface DashboardServer {
   setRule2Enabled(enabled: boolean): void;
   getAutoDeployEnabled(): boolean;
   setAutoDeployEnabled(enabled: boolean): void;
+  getPoolStats(): PoolStats | null;
   setDb(db: any): void;
   stop(): void;
 }
@@ -646,6 +647,9 @@ export function startDashboard(port: number): DashboardServer {
     },
     setAutoDeployEnabled(enabled: boolean) {
       autoDeployEnabled = enabled;
+    },
+    getPoolStats() {
+      return poolStats;
     },
     setDb(d) {
       dbRef = d;

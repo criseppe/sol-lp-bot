@@ -370,8 +370,9 @@ async function main() {
           const walletValueUsdc = balances.sol * price.price + balances.usdc;
           const totalWithPosition = walletValueUsdc + positionValueUsdc;
 
-          // Estimated 24h yield from on-chain liquidity share + pool fee rate
-          const yieldEst = await exec.getEstimatedYield24h();
+          // Estimated 24h yield from on-chain liquidity share + Orca API volume
+          const poolStatsData = dashboard.getPoolStats();
+          const yieldEst = await exec.getEstimatedYield24h(poolStatsData?.volume24h);
           const estDailyFeesUsdc = yieldEst?.dailyFeesUsdc ?? 0;
           const estAprPct = yieldEst?.aprPct ?? 0;
 
