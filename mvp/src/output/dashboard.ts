@@ -1667,16 +1667,23 @@ function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: numb
   });
   const feeDays = Array.from(feeDailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-7);
 
-  if (feeDays.length < 2) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">Need at least 2 days of data...</div></div>';
+  if (feeDays.length < 1) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">Collecting data...</div></div>';
 
   const dailyFees: Array<{ date: string; fees: number }> = [];
-  for (let i = 1; i < feeDays.length; i++) {
-    const delta = feeDays[i][1].totalFeesUsdc - feeDays[i - 1][1].totalFeesUsdc;
-    dailyFees.push({ date: feeDays[i][0], fees: Math.max(0, delta) });
+  if (feeDays.length === 1) {
+    // Only 1 day: show cumulative total as single bar
+    dailyFees.push({ date: feeDays[0][0], fees: Math.max(0, feeDays[0][1].totalFeesUsdc) });
+  } else {
+    for (let i = 1; i < feeDays.length; i++) {
+      const delta = feeDays[i][1].totalFeesUsdc - feeDays[i - 1][1].totalFeesUsdc;
+      dailyFees.push({ date: feeDays[i][0], fees: Math.max(0, delta) });
+    }
   }
 
+  if (dailyFees.length === 0 || dailyFees.every(d => d.fees === 0)) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">No fee data yet...</div></div>';
+
   const maxFee = Math.max(...dailyFees.map(d => d.fees), 0.01);
-  const barW = Math.floor(500 / dailyFees.length) - 8;
+  const barW = Math.min(80, Math.floor(500 / dailyFees.length) - 8);
   const chartH = 80;
   const baseY = chartH + 25;
   const totalFees = dailyFees.reduce((s, d) => s + d.fees, 0);
