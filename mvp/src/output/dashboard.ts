@@ -305,6 +305,49 @@ export function startDashboard(port: number): DashboardServer {
     }
   });
 
+  // CSV download: daily portfolio breakdown (all history)
+  app.get('/api/daily-portfolio.csv', (_req, res) => {
+    if (!dbRef) { res.status(500).send('DB not ready'); return; }
+    const snaps = getLiveSnapshots(dbRef, 9999 * 24); // all history
+    const dailyMap = new Map<string, { wallet: number; position: number; total: number; price: number }>();
+    snaps.forEach(s => {
+      const date = new Date(s.timestamp).toISOString().slice(0, 10);
+      const total = (s as any).total_with_position ?? s.total_value_usdc;
+      const position = (s as any).position_value ?? 0;
+      dailyMap.set(date, { wallet: s.total_value_usdc, position, total, price: s.price });
+    });
+    const days = Array.from(dailyMap.entries()).sort();
+    let csv = 'date,wallet_usdc,position_usdc,total_usdc,sol_price\n';
+    days.forEach(([date, v]) => { csv += `${date},${v.wallet.toFixed(2)},${v.position.toFixed(2)},${v.total.toFixed(2)},${v.price.toFixed(2)}\n`; });
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="daily-portfolio.csv"');
+    res.send(csv);
+  });
+
+  // CSV download: daily fees (all history)
+  app.get('/api/daily-fees.csv', (_req, res) => {
+    if (!dbRef) { res.status(500).send('DB not ready'); return; }
+    const snaps = getLiveSnapshots(dbRef, 9999 * 24);
+    const feeDailyMap = new Map<string, { totalFeesUsdc: number; cumSol: number; cumUsdc: number; pendingSol: number; pendingUsdc: number; price: number }>();
+    snaps.forEach(s => {
+      const date = new Date(s.timestamp).toISOString().slice(0, 10);
+      const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
+      const pendingClean = rawPending > 1000 ? 0 : rawPending;
+      const cumUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
+      feeDailyMap.set(date, { totalFeesUsdc: cumUsdc + pendingClean, cumSol: s.cum_fees_sol ?? 0, cumUsdc: s.cum_fees_usdc ?? 0, pendingSol: s.pending_fees_sol ?? 0, pendingUsdc: s.pending_fees_usdc ?? 0, price: s.price });
+    });
+    const days = Array.from(feeDailyMap.entries()).sort();
+    let csv = 'date,daily_fees_usdc,cumulative_fees_usdc,cum_fees_sol,cum_fees_usdc,pending_fees_sol,pending_fees_usdc,sol_price\n';
+    for (let i = 0; i < days.length; i++) {
+      const [date, v] = days[i];
+      const dailyDelta = i > 0 ? Math.max(0, v.totalFeesUsdc - days[i - 1][1].totalFeesUsdc) : v.totalFeesUsdc;
+      csv += `${date},${dailyDelta.toFixed(6)},${v.totalFeesUsdc.toFixed(6)},${v.cumSol.toFixed(6)},${v.cumUsdc.toFixed(6)},${v.pendingSol.toFixed(6)},${v.pendingUsdc.toFixed(6)},${v.price.toFixed(2)}\n`;
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="daily-fees.csv"');
+    res.send(csv);
+  });
+
   // Health check state
   interface HealthCheck {
     name: string;
@@ -1715,6 +1758,27 @@ function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: numb
     <text x="592" y="${avgY + 4}" fill="#eab308" font-size="8">avg</text>
     ${bars}
   </svg>
+  <div style="overflow-x:auto;margin-top:8px">
+  <table style="width:100%;border-collapse:collapse;font-size:11px">
+    <tr style="border-bottom:1px solid #30363d">
+      <th style="text-align:left;padding:6px 8px;color:#8b949e">Date</th>
+      <th style="text-align:right;padding:6px 8px;color:#22c55e">Fees Earned</th>
+      <th style="text-align:right;padding:6px 8px;color:#8b949e">Cumulative</th>
+    </tr>
+    ${(() => {
+      let cum = 0;
+      return dailyFees.map(d => {
+        cum += d.fees;
+        return `<tr style="border-bottom:1px solid #21262d">
+          <td style="padding:5px 8px;color:#8b949e">${d.date}</td>
+          <td style="padding:5px 8px;text-align:right;color:#22c55e;font-weight:bold">$${fmt(d.fees, 4)}</td>
+          <td style="padding:5px 8px;text-align:right;color:#8b949e">$${fmt(cum, 4)}</td>
+        </tr>`;
+      }).join('');
+    })()}
+  </table>
+  </div>
+  <div style="margin-top:8px;text-align:right"><a href="/api/daily-fees.csv" style="color:#58a6ff;font-size:11px">Download full history (CSV)</a></div>
 </div>`;
 }
 
@@ -1994,6 +2058,32 @@ ${(() => {
     <circle cx="${lastPnlX}" cy="${lastPnlY}" r="3" fill="${pnlColor}"/>
     <text x="${lastPnlX + 6}" y="${lastPnlY + 4}" fill="${pnlColor}" font-size="9" font-weight="bold">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</text>
   </svg>
+  <div style="overflow-x:auto;margin-top:8px">
+  <table style="width:100%;border-collapse:collapse;font-size:11px">
+    <tr style="border-bottom:1px solid #30363d">
+      <th style="text-align:left;padding:6px 8px;color:#8b949e">Date</th>
+      <th style="text-align:right;padding:6px 8px;color:#22c55e">Wallet</th>
+      <th style="text-align:right;padding:6px 8px;color:#58a6ff">Position</th>
+      <th style="text-align:right;padding:6px 8px;color:#a855f7">Injected</th>
+      <th style="text-align:right;padding:6px 8px;color:#c9d1d9">Total</th>
+      <th style="text-align:right;padding:6px 8px;color:#eab308">Net PnL</th>
+    </tr>
+    ${days.map(([date, val], i) => {
+      const inj = dailyInjections.get(date) ?? 0;
+      const pnl = pnlPoints[i]?.pnl ?? 0;
+      const pnlCol = pnl >= 0 ? '#22c55e' : '#ef4444';
+      return `<tr style="border-bottom:1px solid #21262d">
+        <td style="padding:5px 8px;color:#8b949e">${date}</td>
+        <td style="padding:5px 8px;text-align:right;color:#22c55e">$${fmt(val.wallet, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#58a6ff">$${fmt(val.position, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#a855f7">${inj > 0 ? '$' + fmt(inj, 2) : '-'}</td>
+        <td style="padding:5px 8px;text-align:right;color:#c9d1d9;font-weight:bold">$${fmt(val.total, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:${pnlCol};font-weight:bold">${pnl >= 0 ? '+' : ''}$${fmt(pnl, 2)}</td>
+      </tr>`;
+    }).join('')}
+  </table>
+  </div>
+  <div style="margin-top:8px;text-align:right"><a href="/api/daily-portfolio.csv" style="color:#58a6ff;font-size:11px">Download full history (CSV)</a></div>
 </div>`;
 })()}
 
