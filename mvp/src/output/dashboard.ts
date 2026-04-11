@@ -988,7 +988,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
       <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:10px">
         <tbody>
           <tr style="border-bottom:1px solid #21262d">
-            <td style="padding:6px 8px;color:#8b949e">Current</td>
+            <td style="padding:6px 8px;color:#8b949e">Price</td>
             <td style="padding:6px 8px;color:#f0883e;font-weight:bold">$${fmt(live.solPrice)}</td>
             <td style="padding:6px 8px;color:#8b949e">Prox &#x25BC;</td>
             <td style="padding:6px 8px"><b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b><span style="color:#8b949e">/${downThreshPct}%</span></td>
@@ -1000,14 +1000,14 @@ ${pool ? `<div class="card" style="margin-top:12px">
             <td style="padding:6px 8px"><b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b><span style="color:#8b949e">/${upThreshPct}%</span></td>
           </tr>
           <tr style="border-bottom:1px solid #21262d">
-            <td style="padding:6px 8px;color:#8b949e">Down</td>
-            <td style="padding:6px 8px;color:#f97316">$${fmt(downsidePrice)}</td>
+            <td style="padding:6px 8px;color:#8b949e">Range</td>
+            <td style="padding:6px 8px;color:#8b949e">$${fmt(r.lower)}&#x2013;$${fmt(r.upper)}</td>
             <td style="padding:6px 8px;color:#8b949e">Now</td>
             <td style="padding:6px 8px;color:#f0883e">${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc)} USDC</td>
           </tr>
           <tr style="border-bottom:1px solid #21262d">
-            <td style="padding:6px 8px;color:#8b949e">Up</td>
-            <td style="padding:6px 8px;color:#58a6ff">$${fmt(upsidePrice)}</td>
+            <td style="padding:6px 8px;color:#8b949e">R2 Exit</td>
+            <td style="padding:6px 8px"><span style="color:#f97316">$${fmt(downsidePrice)}</span> <span style="color:#8b949e">/</span> <span style="color:#58a6ff">$${fmt(upsidePrice)}</span></td>
             <td style="padding:6px 8px;color:#8b949e">At entry</td>
             <td style="padding:6px 8px;color:#a855f7">${fmt(live.entrySol ?? 0, 4)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</td>
           </tr>
