@@ -1949,18 +1949,21 @@ function renderStrategyHtml(): string {
 .param-grid-inner{display:grid;grid-template-columns:repeat(5,1fr);gap:1px}
 .param-grid .cell{background:#161b22;padding:8px;font-size:11px;text-align:center}
 .param-grid .header{background:#0d1117;color:#8b949e;font-weight:bold;font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
-.param-grid .regime-col{font-weight:bold}
 .rule-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
 .rule-card h3{color:#58a6ff;font-size:14px;margin-bottom:8px}
-.rule-card .trigger{color:#f0883e;font-size:12px;font-style:italic;margin-top:8px}
+.rule-card .trigger{color:#f0883e;font-size:11px;font-style:italic;margin-top:8px;padding-top:8px;border-top:1px solid #21262d}
 .rule-num{display:inline-block;background:#58a6ff20;color:#58a6ff;width:24px;height:24px;border-radius:50%;text-align:center;line-height:24px;font-size:12px;font-weight:bold;margin-right:8px}
 .logic-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:12px;font-family:monospace;color:#c9d1d9;margin:8px 0;line-height:1.6;white-space:pre-wrap;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.example-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6}
+.example-title{color:#58a6ff;font-weight:bold;margin-bottom:4px}
+.example-text{color:#c9d1d9}
+.example-note{color:#8b949e;margin-top:4px}
 .tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin:0 2px}
 .tag-ranging{background:#4a9eff20;color:#4a9eff}
 .tag-bull{background:#22c55e20;color:#22c55e}
 .tag-bear{background:#ef444420;color:#ef4444}
 .tag-extreme{background:#a855f720;color:#a855f7}
-.adv-risks{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.section-title{font-size:14px;margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d}
 @media(max-width:700px){
   .param-grid{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .param-grid-inner{grid-template-columns:repeat(5,minmax(70px,1fr));min-width:400px}
@@ -1969,7 +1972,6 @@ function renderStrategyHtml(): string {
   .rule-card{padding:12px}
   .rule-card h3{font-size:13px}
   .logic-box{font-size:11px;padding:10px;overflow-x:auto}
-  .adv-risks{grid-template-columns:1fr}
 }
 </style>
 </head>
@@ -1977,72 +1979,75 @@ function renderStrategyHtml(): string {
 <div class="banner">
   <div class="mode" style="color:#58a6ff">Strategy &amp; Rules</div>
   <h1>SOL/USDC LP Bot</h1>
-  <div style="color:#8b949e;font-size:11px">How the bot detects market regimes and manages liquidity positions</div>
+  <div style="color:#8b949e;font-size:11px">Regime-adaptive concentrated liquidity on Orca Whirlpool</div>
 </div>
 ${NAV_HTML}
 <script>document.getElementById('nav-strategy').classList.add('active')</script>
 
+<!-- ── OVERVIEW ──────────────────────────────────────────────────────── -->
+
 <div class="card" style="margin-bottom:16px">
   <h2>Overview</h2>
   <p style="color:#c9d1d9;font-size:13px;line-height:1.6">
-    The bot runs a <b>1-minute decision loop</b> that reads live SOL/USD price data, detects the current market regime,
-    and manages a concentrated liquidity position on the <b>Orca SOL/USDC Whirlpool</b>. It uses 6 rules that adapt
-    their parameters based on market conditions. The goal: maximize fee yield while minimizing impermanent loss.
+    A <b>30-second decision loop</b> reads live SOL/USD prices, classifies the market into one of four regimes,
+    and manages a concentrated liquidity position on the <b>Orca SOL/USDC Whirlpool</b>.
+    Seven rules adapt range width, exit thresholds, capital sizing, fee harvesting and idle-fund deployment
+    to current conditions. The goal: maximize fee yield while minimizing impermanent loss.
   </p>
 </div>
 
+<!-- ── DECISION FLOW ────────────────────────────────────────────────── -->
+
 <div class="card" style="margin-bottom:16px">
-  <h2>Decision Flow (every 30 seconds)</h2>
+  <h2>Decision Flow</h2>
+  <p style="font-size:11px;color:#8b949e;margin-bottom:8px">Every 30 seconds. Sub-checks run on their own cadence (noted below).</p>
   <div class="flow">
-    <div class="flow-step"><h3>1. Fetch Price</h3><div style="font-size:12px;color:#8b949e">Get SOL/USD from Pyth Hermes oracle. Validate confidence &lt; 0.5% and staleness &lt; 60s. Skip cycle if invalid.</div></div>
+    <div class="flow-step"><h3>1. Fetch Price</h3><div style="font-size:12px;color:#8b949e">SOL/USD from Pyth Hermes. Reject if confidence &gt; 0.5% or stale &gt; 60s.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>2. Detect Regime (every 1 hour)</h3><div style="font-size:12px;color:#8b949e">Analyze last 2 days of daily closes. Compute directional ratio + realised volatility. Classify market state.</div></div>
+    <div class="flow-step"><h3>2. Regime Detection <span style="color:#8b949e;font-weight:normal;font-size:11px">(every 1h)</span></h3><div style="font-size:12px;color:#8b949e">Classify market from daily closes: RANGING / BULLISH / BEARISH / EXTREME.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>3. Check Safety</h3><div style="font-size:12px;color:#8b949e">Circuit breakers: daily loss &gt; 5% or IL &gt; 8% or &gt; 10 rebalances/hour &#x2192; HALT.</div></div>
+    <div class="flow-step"><h3>3. Safety Checks</h3><div style="font-size:12px;color:#8b949e">Circuit breakers: daily loss &gt; 5%, IL &gt; 8%, rebalances &gt; 10/hr &#x2192; HALT.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>4. Position Decision</h3><div style="font-size:12px;color:#8b949e">No position &#x2192; open one. Has position &#x2192; check proximity to edges. Out of range &#x2192; rebalance or pullback watch.</div></div>
+    <div class="flow-step"><h3>4. Position Decision</h3><div style="font-size:12px;color:#8b949e">No position &#x2192; open (Rules 1, 3&#x2013;5). In range &#x2192; monitor proximity (Rule 2). Out of range &#x2192; rebalance.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>5. Fee Harvest (check every 1 hour)</h3><div style="font-size:12px;color:#8b949e">If enough time since last harvest &#x2192; collect accrued trading fees from the on-chain position.</div></div>
+    <div class="flow-step"><h3>5. Fee Harvest <span style="color:#8b949e;font-weight:normal;font-size:11px">(check every 1h)</span></h3><div style="font-size:12px;color:#8b949e">If harvest interval elapsed (Rule 6) &#x2192; collect accrued fees from position.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>6. Record &amp; Report</h3><div style="font-size:12px;color:#8b949e">Log decision + reasoning to DB. Update dashboard. Record wallet snapshot. Telegram report hourly.</div></div>
+    <div class="flow-step"><h3>6. Auto Deploy <span style="color:#8b949e;font-weight:normal;font-size:11px">(check every 5min)</span></h3><div style="font-size:12px;color:#8b949e">If idle wallet funds exist and position is in range (Rule 7) &#x2192; add liquidity.</div></div>
+    <div class="flow-arrow">&#x25BC;</div>
+    <div class="flow-step"><h3>7. Record &amp; Report</h3><div style="font-size:12px;color:#8b949e">Log decision to DB (every 30min). Telegram report (every 1h). Dashboard snapshot.</div></div>
   </div>
 </div>
 
+<!-- ── REGIME DETECTION ─────────────────────────────────────────────── -->
+
 <div class="card" style="margin-bottom:16px">
   <h2>Regime Detection</h2>
-  <p style="font-size:12px;color:#8b949e;margin-bottom:12px">Uses 2 days of daily closing prices to classify the market.</p>
+  <p style="font-size:12px;color:#8b949e;margin-bottom:8px">Evaluated every 1 hour using 2 days of daily closing prices.</p>
   <div class="logic-box"><b>dirRatio</b> = |net move| / total path
   1.0 = straight line (strong trend)
   0.0 = oscillating (ranging)
 
 <b>realisedVol</b> = stddev of daily log returns
-  Normal SOL: 3-5%. Crisis: &gt; 8%
+  Normal SOL: 3&#x2013;5%. Crisis: &gt; 8%
 
 <b>Classification:</b>
-  if realisedVol &gt; 0.08        &#x2192; <span class="tag tag-extreme">EXTREME</span>
-  if dirRatio &gt; 0.35 &amp; up    &#x2192; <span class="tag tag-bull">BULLISH_TREND</span>
-  if dirRatio &gt; 0.35 &amp; down  &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
-  else                         &#x2192; <span class="tag tag-ranging">RANGING</span></div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: 3 daily closes over 2-day window</div>
-    <div style="color:#c9d1d9">Day 0: $80 &rarr; Day 1: $83 &rarr; Day 2: $82</div>
-    <div style="color:#c9d1d9;margin-top:6px"><b>dirRatio</b> = |net move| / total path</div>
-    <div style="color:#c9d1d9;padding-left:12px">net move = |$82 - $80| = $2</div>
-    <div style="color:#c9d1d9;padding-left:12px">total path = |$83 - $80| + |$82 - $83| = $3 + $1 = $4</div>
-    <div style="color:#c9d1d9;padding-left:12px">dirRatio = 2 / 4 = <b>0.50</b></div>
-    <div style="color:#c9d1d9;margin-top:6px"><b>realisedVol</b> = stddev of daily log returns</div>
-    <div style="color:#c9d1d9;padding-left:12px">log returns: ln(83/80) = 0.0368, ln(82/83) = -0.0121</div>
-    <div style="color:#c9d1d9;padding-left:12px">mean = 0.0123, stddev = <b>0.0245</b></div>
-    <div style="color:#c9d1d9;margin-top:6px"><b>Classification:</b></div>
-    <div style="color:#c9d1d9;padding-left:12px">realisedVol 0.0245 &lt; 0.08 &rarr; not EXTREME</div>
-    <div style="color:#c9d1d9;padding-left:12px">dirRatio 0.50 &gt; 0.35 &amp; price went up ($82 &gt; $80) &rarr; <span class="tag tag-bull">BULLISH_TREND</span></div>
-    <div style="color:#8b949e;margin-top:8px">If instead prices were $80 &rarr; $81 &rarr; $80: dirRatio = 0/2 = 0.0 &rarr; <span class="tag tag-ranging">RANGING</span> (oscillating, no net direction).</div>
-    <div style="color:#8b949e">If realisedVol exceeded 0.08 (e.g. $80 &rarr; $95 &rarr; $70): &rarr; <span class="tag tag-extreme">EXTREME</span> regardless of dirRatio.</div>
+  realisedVol &gt; 0.08            &#x2192; <span class="tag tag-extreme">EXTREME</span>
+  dirRatio &gt; 0.35 &amp; price up   &#x2192; <span class="tag tag-bull">BULLISH_TREND</span>
+  dirRatio &gt; 0.35 &amp; price down &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
+  otherwise                      &#x2192; <span class="tag tag-ranging">RANGING</span></div>
+  <div class="example-box">
+    <div class="example-title">Example: $80 &#x2192; $83 &#x2192; $82 over 2 days</div>
+    <div class="example-text">dirRatio = |$82-$80| / (|$83-$80|+|$82-$83|) = 2/4 = <b>0.50</b></div>
+    <div class="example-text">realisedVol = stddev(ln(83/80), ln(82/83)) = <b>0.025</b></div>
+    <div class="example-text">0.025 &lt; 0.08 &#x2192; not EXTREME. 0.50 &gt; 0.35 &amp; up &#x2192; <span class="tag tag-bull">BULLISH_TREND</span></div>
+    <div class="example-note">$80 &#x2192; $81 &#x2192; $80 would give dirRatio = 0.0 &#x2192; <span class="tag tag-ranging">RANGING</span>. A crash like $80 &#x2192; $95 &#x2192; $70 pushes vol past 0.08 &#x2192; <span class="tag tag-extreme">EXTREME</span>.</div>
   </div>
 </div>
 
+<!-- ── PARAMETERS GRID ──────────────────────────────────────────────── -->
+
 <div class="card" style="margin-bottom:16px">
-  <h2>Strategy Parameters by Regime</h2>
+  <h2>Parameters by Regime</h2>
   <div class="param-grid">
   <div class="param-grid-inner">
     <div class="cell header">Parameter</div>
@@ -2050,267 +2055,213 @@ ${NAV_HTML}
     <div class="cell header" style="color:#22c55e">Bullish</div>
     <div class="cell header" style="color:#ef4444">Bearish</div>
     <div class="cell header" style="color:#a855f7">Extreme</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Range Width</div><div class="cell" style="color:#4a9eff">1.5%</div><div class="cell" style="color:#22c55e">3%</div><div class="cell" style="color:#ef4444">4%</div><div class="cell" style="color:#a855f7">6%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Skew (down/up)</div><div class="cell">30/70%</div><div class="cell">20/80%</div><div class="cell">40/60%</div><div class="cell">50/50%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Downside Exit</div><div class="cell">65%</div><div class="cell">70%</div><div class="cell">55%</div><div class="cell">50%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Upside Exit</div><div class="cell">88%</div><div class="cell">92%</div><div class="cell">82%</div><div class="cell">80%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Capital Deployed</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">50%</div><div class="cell" style="color:#ef4444">25%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">SOL Re-entry Split</div><div class="cell">50%</div><div class="cell">50%</div><div class="cell">30%</div><div class="cell">20%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Harvest Interval</div><div class="cell">7 days</div><div class="cell">4 days</div><div class="cell">2 days</div><div class="cell">1 day</div>
-    <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC on Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Range Width (R1)</div><div class="cell" style="color:#4a9eff">1.5%</div><div class="cell" style="color:#22c55e">3%</div><div class="cell" style="color:#ef4444">4%</div><div class="cell" style="color:#a855f7">6%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Skew down/up (R1)</div><div class="cell">30/70</div><div class="cell">20/80</div><div class="cell">40/60</div><div class="cell">50/50</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Downside Exit (R2)</div><div class="cell">65%</div><div class="cell">70%</div><div class="cell">55%</div><div class="cell">50%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Upside Exit (R2)</div><div class="cell">88%</div><div class="cell">92%</div><div class="cell">82%</div><div class="cell">80%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">SOL Re-entry (R4)</div><div class="cell">50%</div><div class="cell">50%</div><div class="cell">30%</div><div class="cell">20%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Capital Deploy (R5)</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">50%</div><div class="cell" style="color:#ef4444">25%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Harvest (R6)</div><div class="cell">7d</div><div class="cell">4d</div><div class="cell">2d</div><div class="cell">1d</div>
+    <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Auto Deploy (R7)</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#ef4444">Blocked</div><div class="cell" style="color:#ef4444">Blocked</div>
   </div></div>
-  <div style="font-size:11px;color:#8b949e">Ranging = tight, max fees. Trending = wider, less risk. Extreme = widest, minimal exposure.</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">Ranging = tight range, max fees. Trending = wider, less risk. Extreme = widest, minimal exposure. (Rn) = which rule uses the parameter.</div>
 </div>
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">The 6 Rules</div>
+<!-- ── THE 7 RULES ──────────────────────────────────────────────────── -->
+
+<div class="section-title" style="color:#58a6ff">The 7 Rules</div>
 
 <div class="rule-card">
-  <h3><span class="rule-num">1</span> Asymmetric Range Calculator</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Calculates the price range for the position. Skewed based on regime to give more room in the expected direction.</p>
+  <h3><span class="rule-num">1</span> Asymmetric Range</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Sets the price range for the position. Skewed by regime to give more room in the expected direction.</p>
   <div class="logic-box">lower = price &#xD7; (1 - rangeWidth &#xD7; skewDown)
 upper = price &#xD7; (1 + rangeWidth &#xD7; skewUp)</div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: SOL at $85, RANGING regime</div>
-    <div style="color:#c9d1d9">rangeWidth = 1.5%, skewDown = 30%, skewUp = 70%</div>
-    <div style="color:#c9d1d9">lower = $85 &#xD7; (1 - 0.015 &#xD7; 0.30) = $85 &#xD7; 0.9955 = <b>$84.62</b></div>
-    <div style="color:#c9d1d9">upper = $85 &#xD7; (1 + 0.015 &#xD7; 0.70) = $85 &#xD7; 1.0105 = <b>$85.89</b></div>
-    <div style="color:#8b949e;margin-top:4px">Range: $84.62 &#x2014; $85.89. Width = $1.27. Room below: $0.38 (30%), room above: $0.89 (70%). The skew gives price more room to rise before going OOR, based on the assumption that ranging markets oscillate slightly upward.</div>
+  <div class="example-box">
+    <div class="example-title">SOL = $85, RANGING</div>
+    <div class="example-text">lower = $85 &#xD7; (1 - 0.015 &#xD7; 0.30) = <b>$84.62</b></div>
+    <div class="example-text">upper = $85 &#xD7; (1 + 0.015 &#xD7; 0.70) = <b>$85.89</b></div>
+    <div class="example-note">Total range $1.27. Room below $0.38 (30%), room above $0.89 (70%). The 30/70 skew gives price more room to rise before going OOR.</div>
   </div>
-  <div class="trigger">Triggers: Every position open</div>
+  <div class="trigger">Runs: on every position open</div>
 </div>
 
 <div class="rule-card">
   <h3><span class="rule-num">2</span> Proximity Monitor &amp; Early Exit</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Measures how close price is to range edges. Exit <b>before</b> going out of range to reduce IL.</p>
-  <div class="logic-box">proxToLower = (centre - price) / halfWidth    0%=safe, 100%=edge
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Measures how close price is to range edges. Exits <b>before</b> going out of range to reduce IL. Can be toggled on/off from the dashboard.</p>
+  <div class="logic-box">proxToLower = (centre - price) / halfWidth    0% = safe, 100% = edge
 proxToUpper = (price - centre) / halfWidth
 
 Downside: proxToLower &#x2265; threshold &#x2192; close + reopen at current price
-Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch</div>
-  <div class="table-wrap"><table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:12px">
-    <tr style="border-bottom:1px solid #21262d">
-      <th style="text-align:left;padding:6px 8px;color:#8b949e">Regime</th>
-      <th style="text-align:center;padding:6px 8px;color:#f97316">Downside Threshold</th>
-      <th style="text-align:center;padding:6px 8px;color:#58a6ff">Upside Threshold</th>
-    </tr>
-    <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:6px 8px;color:#c9d1d9">RANGING</td>
-      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">65%</td>
-      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">88%</td>
-    </tr>
-    <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:6px 8px;color:#c9d1d9">BULLISH</td>
-      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">70%</td>
-      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">92%</td>
-    </tr>
-    <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:6px 8px;color:#c9d1d9">BEARISH</td>
-      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">55%</td>
-      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">82%</td>
-    </tr>
-    <tr>
-      <td style="padding:6px 8px;color:#c9d1d9">EXTREME</td>
-      <td style="text-align:center;padding:6px 8px;color:#f97316;font-weight:bold">50%</td>
-      <td style="text-align:center;padding:6px 8px;color:#58a6ff;font-weight:bold">80%</td>
-    </tr>
-  </table></div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: T1_DOWNSIDE trigger</div>
-    <div style="color:#c9d1d9">Position range: $84.62 &#x2014; $85.89, centre = $85.26, halfWidth = $0.64</div>
-    <div style="color:#c9d1d9">Price drops to $84.84</div>
-    <div style="color:#c9d1d9">proxToLower = ($85.26 - $84.84) / $0.64 = <b>66%</b></div>
-    <div style="color:#c9d1d9">RANGING threshold = 65% &#x2192; 66% &#x2265; 65% &#x2192; <b style="color:#f97316">TRIGGER!</b></div>
-    <div style="color:#8b949e;margin-top:4px">Bot closes the position now at 66% proximity instead of waiting for full OOR at 100%. This avoids the worst IL that happens in the last 35% of drift. It then reopens a new position centered at $84.84.</div>
+Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch (Rule 3)</div>
+  <div class="example-box">
+    <div class="example-title">Downside exit in RANGING</div>
+    <div class="example-text">Range $84.62&#x2013;$85.89, centre = $85.26, halfWidth = $0.64</div>
+    <div class="example-text">Price drops to $84.84 &#x2192; proxToLower = ($85.26 - $84.84) / $0.64 = <b>66%</b></div>
+    <div class="example-text">RANGING threshold = 65% &#x2192; 66% &#x2265; 65% &#x2192; <b style="color:#f97316">EXIT</b></div>
+    <div class="example-note">Closes at 66% instead of waiting for 100% (full OOR). Avoids the worst IL in the last 35% of drift, then reopens centered at $84.84.</div>
   </div>
-  <div class="trigger">Triggers: Every 1-minute cycle when position is in range</div>
+  <div class="trigger">Runs: every 30s cycle when position is in range. Disabled = only close on full OOR.</div>
 </div>
 
 <div class="rule-card">
-  <h3><span class="rule-num">3</span> Pullback Re-entry Timing</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After upside exit, wait for a pullback or timeout. Avoids re-entering at a local peak.</p>
+  <h3><span class="rule-num">3</span> Pullback Re-entry</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After an upside exit or OOR above, waits for price to pull back before re-entering. Avoids opening at a local peak.</p>
   <div class="logic-box">After upside exit, track peak price.
 
-if pullback &#x2265; 2.5% from peak &#x2192; re-enter (PULLBACK)
-if waited &#x2265; 5 minutes        &#x2192; re-enter (TIMEOUT)
-if single drop &#x2265; 5%          &#x2192; flash crash, wait 15 min</div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: Pullback re-entry</div>
-    <div style="color:#c9d1d9">T1_UPSIDE fires at $85.89. Bot closes position, enters pullback watch.</div>
-    <div style="color:#c9d1d9">Price continues to $86.50 (new peak tracked).</div>
-    <div style="color:#c9d1d9">Price then drops to $84.34.</div>
-    <div style="color:#c9d1d9">Pullback = ($86.50 - $84.34) / $86.50 = <b>2.5%</b> &#x2192; <b style="color:#22c55e">RE-ENTER</b></div>
-    <div style="color:#8b949e;margin-top:4px">By waiting for the pullback, the bot avoids opening at $86.50 (local peak) and instead re-enters at $84.34 &#x2014; a better entry price. If no pullback happens within 5 minutes, it re-enters anyway to avoid missing fees.</div>
+pullback &#x2265; 2.5% from peak   &#x2192; re-enter immediately
+waited &#x2265; 4 hours            &#x2192; re-enter (timeout)
+single-candle drop &#x2265; 5%     &#x2192; flash crash, wait 15 min first</div>
+  <div class="example-box">
+    <div class="example-title">Pullback re-entry after upside exit</div>
+    <div class="example-text">Rule 2 upside exit fires at $85.89. Bot enters pullback watch.</div>
+    <div class="example-text">Price rallies to $86.50 (peak tracked), then drops to $84.34.</div>
+    <div class="example-text">Pullback = ($86.50 - $84.34) / $86.50 = <b>2.5%</b> &#x2192; <b style="color:#22c55e">RE-ENTER</b></div>
+    <div class="example-note">Re-enters at $84.34 instead of $86.50. If no 2.5% pullback within 4 hours, re-enters anyway to avoid missing fees indefinitely.</div>
   </div>
-  <div class="trigger">Triggers: Every cycle while WAITING_PULLBACK</div>
+  <div class="trigger">Runs: every 30s cycle while WAITING_PULLBACK</div>
 </div>
 
 <div class="rule-card">
   <h3><span class="rule-num">4</span> Re-entry SOL/USDC Split</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After downside exit, the SOL/USDC holding ratio depends on regime. Less SOL in bearish markets.</p>
-  <div class="logic-box"><span class="tag tag-ranging">RANGING</span>  50/50    <span class="tag tag-bull">BULLISH</span>  50/50
-<span class="tag tag-bear">BEARISH</span> 30/70    <span class="tag tag-extreme">EXTREME</span> 20/80</div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: BEARISH re-entry with $46 capital</div>
-    <div style="color:#c9d1d9">Price dropped and triggered OOR_BELOW. Regime is BEARISH.</div>
-    <div style="color:#c9d1d9">Split = 30% SOL / 70% USDC &#x2192; target: $13.80 in SOL + $32.20 in USDC</div>
-    <div style="color:#c9d1d9">At $85/SOL: hold 0.162 SOL + $32.20 USDC before depositing.</div>
-    <div style="color:#8b949e;margin-top:4px">In bearish markets, holding less SOL reduces exposure to further drops. The 30/70 split means more capital stays in stable USDC. Note: the actual deposited ratio into the position is determined by concentrated liquidity math, but the wallet balance targets this split.</div>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After a downside exit, determines the SOL/USDC wallet ratio before opening a new position. Less SOL in bearish markets to reduce exposure.</p>
+  <div class="logic-box"><span class="tag tag-ranging">RANGING</span>  50% SOL / 50% USDC    <span class="tag tag-bull">BULLISH</span>  50 / 50
+<span class="tag tag-bear">BEARISH</span> 30% SOL / 70% USDC    <span class="tag tag-extreme">EXTREME</span> 20 / 80</div>
+  <div class="example-box">
+    <div class="example-title">BEARISH re-entry with $46</div>
+    <div class="example-text">OOR_BELOW triggered. Regime is BEARISH &#x2192; target 30/70 split.</div>
+    <div class="example-text">$13.80 in SOL (0.162 SOL at $85) + $32.20 USDC.</div>
+    <div class="example-note">Holding less SOL limits losses if price keeps falling. The actual deposit ratio is determined by concentrated liquidity math; this split targets the wallet balance before deposit.</div>
   </div>
-  <div class="trigger">Triggers: After downside exit (OOR_BELOW, T1_DOWNSIDE)</div>
+  <div class="trigger">Runs: on position open after downside exit (OOR_BELOW, T1_DOWNSIDE)</div>
 </div>
 
 <div class="rule-card">
-  <h3><span class="rule-num">5</span> Position Sizing</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Controls what % of capital goes into the position vs held as reserve. More volatile = more reserve. The bot calculates total wallet value (SOL + USDC), then deploys the regime percentage.</p>
-  <div class="logic-box"><span class="tag tag-ranging">RANGING</span>  100% deployed, 0% reserve    (max fee earning)
-<span class="tag tag-bull">BULLISH</span>  85% deployed, 15% reserve
-<span class="tag tag-bear">BEARISH</span>  50% deployed, 50% reserve   (half safe)
-<span class="tag tag-extreme">EXTREME</span> 25% deployed, 75% reserve   (mostly safe)
+  <h3><span class="rule-num">5</span> Position Sizing &amp; Wallet Rebalancing</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Controls what % of capital goes into the position. More volatile = more reserve. Automatically swaps tokens to match the deposit ratio required by the position.</p>
+  <div class="logic-box"><b>Capital allocation:</b>
+<span class="tag tag-ranging">RANGING</span>  100% deployed   <span class="tag tag-bull">BULLISH</span>  85% deployed
+<span class="tag tag-bear">BEARISH</span>  50% deployed   <span class="tag tag-extreme">EXTREME</span> 25% deployed
 
-<b>Capital deployment steps:</b>
-1. Calculate total wallet value = SOL &#xD7; price + USDC
-2. Target deploy = total &#xD7; deployPct (regime-based)
-3. Determine ideal SOL:USDC ratio for the position
-   (ask SDK: "for 1 SOL, how much USDC is needed?")
-4. Calculate ideal wallet split to deploy maximum capital
-5. If wallet is imbalanced &#x2192; swap to match ideal ratio
-6. Open position with the balanced wallet
-7. Always reserve 0.05 SOL (gas) + $1 USDC
-
-<b>Pre-deposit swap (wallet rebalancing):</b>
-The position ratio depends on where price sits in the range:
-  &#x2022; Price near lower bound &#x2192; position is mostly SOL
-  &#x2022; Price at centre &#x2192; ~50/50
-  &#x2022; Price near upper bound &#x2192; position is mostly USDC
-
-If the wallet doesn't match the required ratio, most capital
-would sit idle. The bot fixes this automatically:
-
-  1. Compute ideal split for total available capital
-  2. Compare to actual wallet balances
-  3. SOL deficit &#x2192; swap USDC &#x2192; SOL via Orca pool
-     USDC deficit &#x2192; swap SOL &#x2192; USDC via Orca pool
-     Balanced &#x2192; no swap needed
-  4. Re-quote with new balances and open position
-
-Example: Wallet has 0.07 SOL ($6) + $35 USDC
-  Position needs ratio 1 SOL : 9 USDC at current price
-  Ideal: 0.44 SOL + $3.90 USDC
-  SOL deficit: 0.37 SOL &#x2192; swap $32 USDC &#x2192; 0.38 SOL
-  Result: deploys ~$31 instead of only ~$7
-
-Slippage tolerance: 2%. Swap uses the same Orca SOL/USDC pool.
-
-<b>Reserves:</b> Always keeps 0.05 SOL (gas) + $1 USDC.</div>
-  <div class="trigger">Triggers: Every position open</div>
+<b>Deposit process:</b>
+1. Total value = SOL &#xD7; price + USDC
+2. Deploy amount = total &#xD7; regime deployPct
+3. Query SDK for required SOL:USDC ratio at current tick
+4. If wallet is imbalanced &#x2192; swap via Orca pool (2% slippage max)
+5. Deposit into position
+6. Reserve: 0.05 SOL (gas) + $1 USDC always kept in wallet</div>
+  <div class="example-box">
+    <div class="example-title">Wallet rebalancing before deposit</div>
+    <div class="example-text">Wallet: 0.07 SOL ($6) + $35 USDC. Position needs ~1:9 SOL:USDC ratio.</div>
+    <div class="example-text">Ideal split: 0.44 SOL + $3.90 USDC. SOL deficit &#x2192; swap $32 USDC &#x2192; 0.38 SOL.</div>
+    <div class="example-text">Deploys ~$31 instead of only ~$7 without the swap.</div>
+    <div class="example-note">Without rebalancing, the constraining token (SOL) would limit the deposit. The swap ensures nearly all available capital goes to work.</div>
+  </div>
+  <div class="trigger">Runs: on every position open</div>
 </div>
 
 <div class="rule-card">
   <h3><span class="rule-num">6</span> Fee Harvest</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Collects accrued trading fees from the on-chain position. More frequent in volatile markets to lock gains before IL erases them.</p>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Collects accrued trading fees from the position. More frequent in volatile markets to lock gains before IL erases them.</p>
   <div class="logic-box"><span class="tag tag-ranging">RANGING</span>  every 7 days   (let fees accumulate)
 <span class="tag tag-bull">BULLISH</span>  every 4 days
 <span class="tag tag-bear">BEARISH</span>  every 2 days   (lock gains quickly)
 <span class="tag tag-extreme">EXTREME</span> every 1 day    (harvest ASAP)</div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: RANGING harvest cycle</div>
-    <div style="color:#c9d1d9">Position opened on Day 1 with $40 liquidity in range $84&#x2014;$86.</div>
-    <div style="color:#c9d1d9">Over 7 days, traders swap SOL/USDC through the pool. Your position earns a share of the 0.05% fee on every swap that crosses your range.</div>
-    <div style="color:#c9d1d9">Day 7: bot checks &#x2014; daysSinceHarvest = 7 &#x2265; 7 &#x2192; <b style="color:#22c55e">HARVEST</b></div>
-    <div style="color:#c9d1d9">Sends collectFees transaction &#x2192; receives 0.001 SOL + 0.08 USDC to wallet.</div>
-    <div style="color:#c9d1d9">Cumulative tracker updated. Timer resets for next harvest.</div>
-    <div style="color:#8b949e;margin-top:4px">Why not harvest every cycle? Each harvest is an on-chain transaction. While Solana fees are tiny (~$0.001), harvesting too often adds complexity. In EXTREME regime, fees are harvested daily to lock gains before a crash erases them via IL. In RANGING, fees accumulate safely for a week.</div>
+  <div class="example-box">
+    <div class="example-title">RANGING: 7-day harvest cycle</div>
+    <div class="example-text">Position earns a share of 0.05% pool fee on every swap through its range.</div>
+    <div class="example-text">Day 7: daysSinceHarvest = 7 &#x2265; 7 &#x2192; collectFees tx &#x2192; 0.001 SOL + 0.08 USDC to wallet.</div>
+    <div class="example-note">Harvesting too often wastes on-chain transactions. In EXTREME, daily harvest locks gains before a crash erases them via IL.</div>
   </div>
-  <div class="trigger">Triggers: Checked every 1 hour against last harvest time</div>
+  <div class="trigger">Runs: checked every 1 hour against last harvest time</div>
 </div>
 
 <div class="rule-card">
   <h3><span class="rule-num">7</span> Auto Capital Deployment</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Automatically deploys idle wallet funds (SOL + USDC above reserves) into an <b>existing in-range position</b>. Does NOT open new positions &#x2014; that is handled by Rules 1&#x2013;3. Only runs when the position is actively earning fees and no other rule has triggered an exit.</p>
-  <div class="logic-box"><b>Prerequisite:</b>  Position must exist AND be in range
-<b>Priority:</b>     Runs AFTER Rules 1&#x2013;6. If any exit rule fires, auto deploy is skipped.
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Deploys idle wallet funds into an <b>existing in-range position</b>. Does not open new positions &#x2014; Rules 1&#x2013;5 handle that. Only runs after all exit rules have been evaluated and none triggered.</p>
+  <div class="logic-box"><b>6 conditions must ALL pass:</b>
+  1. Feature enabled          (dashboard toggle)
+  2. Regime allows it         (blocked in BEARISH and EXTREME)
+  3. Idle funds &gt; threshold   (SOL &gt; 0.05 or USDC &gt; $5, after reserves)
+  4. Cooldown elapsed         (max 1 deploy per hour)
+  5. Capital cap headroom     (position below regime deploy % cap)
+  6. Price near ideal         (within 2% of geometric mean of range)
 
-<b>6 conditions must ALL pass:</b>
-  1. Feature enabled        (dashboard toggle)
-  2. Regime allows it       (blocked in BEARISH_TREND and EXTREME)
-  3. Idle funds exist       (SOL &gt; 0.05 or USDC &gt; $5, after reserves)
-  4. Cooldown elapsed       (max 1 deploy per hour)
-  5. Capital cap headroom   (position below regime deploy % cap)
-  6. Price near ideal       (within 2% of geometric mean of range)
-
-<b>Reserves kept:</b>  0.05 SOL (gas) + $1 USDC (always in wallet)
-<b>Check frequency:</b> Every 5 minutes (not every cycle)
-<b>Deploy cooldown:</b>  1 hour between deployments</div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: Manual add liquidity followed by auto deploy</div>
-    <div style="color:#c9d1d9">You manually add $150 USDC to the wallet. Position range is $83.65&#x2013;$84.97, current price $84.25.</div>
-    <div style="color:#c9d1d9">Bot detects $149 idle (after $1 USDC reserve). Price $84.25 is within 2% of ideal $84.31 (geometric mean). Regime is RANGING (100% cap).</div>
-    <div style="color:#c9d1d9">Bot swaps ~$75 USDC &#x2192; SOL to match the position ratio, then deposits both tokens into the existing position.</div>
-    <div style="color:#c9d1d9">Wallet after: ~0.065 SOL + ~$1.00 USDC (reserves). All excess capital is now earning fees.</div>
-    <div style="color:#c9d1d9">Next deploy possible: 1 hour later (cooldown).</div>
+<b>Reserves:</b>  0.05 SOL (gas) + $1 USDC always kept
+<b>Cooldown:</b>  1 hour between deployments</div>
+  <div class="example-box">
+    <div class="example-title">Auto deploy after manual wallet top-up</div>
+    <div class="example-text">You send $150 USDC to the wallet. Position range $83.65&#x2013;$84.97, price $84.25.</div>
+    <div class="example-text">$149 idle (after $1 reserve). Price within 2% of ideal $84.31. RANGING = 100% cap.</div>
+    <div class="example-text">Bot swaps ~$75 USDC &#x2192; SOL to match ratio, deposits both &#x2192; $148 deployed.</div>
+    <div class="example-text">Wallet after: 0.065 SOL + $1.00 USDC (reserves only).</div>
   </div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: Auto deploy skipped &#x2014; price too far from ideal</div>
-    <div style="color:#c9d1d9">Position range $83.65&#x2013;$84.97. Geometric mean (ideal) = $84.31. Current price = $83.70.</div>
-    <div style="color:#c9d1d9">Deviation = 0.7% &#x2014; but price is near lower bound, so the SOL/USDC deposit ratio would be very skewed.</div>
-    <div style="color:#8b949e">If deviation exceeds 2% tolerance, deploy is skipped to avoid an imbalanced deposit that wastes swap fees.</div>
+  <div class="example-box">
+    <div class="example-title">Skipped: price near range edge</div>
+    <div class="example-text">Range $83.65&#x2013;$84.97. Ideal (geometric mean) = $84.31. Price = $83.72.</div>
+    <div class="example-text">Deviation = |$83.72/$84.31 - 1| = 0.7%. Within 2% tolerance, but...</div>
+    <div class="example-text">If price drops further to $83.50 &#x2192; deviation 1.0%. Still passes.</div>
+    <div class="example-text">At $82.60 &#x2192; deviation 2.03% &#x2192; <b style="color:#f97316">SKIPPED</b>. Deposit ratio would be too SOL-heavy.</div>
+    <div class="example-note">The 2% tolerance prevents deploying when the required token ratio is heavily skewed, which would waste swap fees.</div>
   </div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: No position &#x2014; auto deploy does NOT run</div>
-    <div style="color:#c9d1d9">Bot is idle (no open position) after a Rule 2 exit or pullback watch. Wallet has $50 idle.</div>
-    <div style="color:#c9d1d9">Auto deploy does NOT open a new position. Rules 1&#x2013;3 handle position opening (new position, pullback re-entry, timeout re-entry).</div>
-    <div style="color:#8b949e">Once a new position is opened by Rules 1&#x2013;3, auto deploy will activate on the next 5-minute check if conditions are met.</div>
+  <div class="example-box">
+    <div class="example-title">Bot is idle (no position) &#x2014; auto deploy does NOT run</div>
+    <div class="example-text">After a Rule 2 exit or during pullback watch, no position exists.</div>
+    <div class="example-text">Auto deploy requires an existing position. Rules 1&#x2013;5 handle opening.</div>
+    <div class="example-note">Once a new position is opened, auto deploy activates on the next 5-minute check.</div>
   </div>
-  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
-    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Rule interaction: why no conflicts</div>
-    <div style="color:#c9d1d9">The decision loop evaluates rules in strict order: <b>OOR check &#x2192; Rule 2 proximity exit &#x2192; Fee harvest &#x2192; Auto deploy</b>.</div>
-    <div style="color:#c9d1d9">If any earlier rule triggers an action (close, reopen, pullback), the cycle returns immediately. Auto deploy only runs when the position is safely in range and holding.</div>
-    <div style="color:#8b949e">Additionally, BEARISH_TREND and EXTREME regimes block auto deploy at the rule level, matching the conservative capital allocation of Rules 1 and 5.</div>
-  </div>
-  <div class="trigger">Triggers: Checked every 5 minutes when position is in range</div>
+  <div class="trigger">Runs: checked every 5 minutes when position is in range</div>
 </div>
 
-<div style="font-size:14px;color:#ef4444;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Circuit Breakers</div>
+<!-- ── RULE EXECUTION ORDER ─────────────────────────────────────────── -->
+
 <div class="card" style="margin-bottom:16px">
-  <div class="logic-box"><b>Daily Loss:</b>        portfolio drops &gt; 5%         &#x2192; HALT
-<b>Weekly Drawdown:</b>   drops &gt; 15% from peak      &#x2192; HALT
-<b>Max IL:</b>            impermanent loss &gt; 8%       &#x2192; force rebalance
-<b>Rebalance Limit:</b>  &gt; 10 per hour               &#x2192; pause 30 min
-<b>Min Position:</b>     &lt; $100 USDC                  &#x2192; skip
-<b>Flash Crash:</b>      &gt; 5% single drop             &#x2192; wait 15 min</div>
+  <h2>Rule Execution Order</h2>
+  <p style="font-size:12px;color:#8b949e;margin-bottom:8px">Rules are evaluated in strict order each cycle. If any rule triggers an action, the cycle returns immediately &#x2014; later rules are skipped.</p>
+  <div class="logic-box">1. No position?  &#x2192; Open (R1, R4, R5) or pullback watch (R3)    <b style="color:#f97316">return</b>
+2. Out of range? &#x2192; Close + reopen (below) or pullback (above)  <b style="color:#f97316">return</b>
+3. Rule 2 exit?  &#x2192; Proximity triggered &#x2192; close + act           <b style="color:#f97316">return</b>
+4. Rule 6        &#x2192; Harvest if due (no return, continues)
+5. Rule 7        &#x2192; Auto deploy if conditions met
+6. Log HOLD      &#x2192; Record state to DB</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">This ordering ensures auto deploy (R7) never conflicts with exit rules (R2, OOR). It only runs when the position is safely in range and holding.</div>
 </div>
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">How Concentrated Liquidity Works</div>
+<!-- ── CIRCUIT BREAKERS ─────────────────────────────────────────────── -->
+
+<div class="section-title" style="color:#ef4444">Circuit Breakers</div>
 <div class="card" style="margin-bottom:16px">
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.6;margin-bottom:12px">
-    Unlike traditional AMMs (liquidity spread $0 to &#x221E;), concentrated liquidity focuses your capital in a <b>specific price range</b>.
-    Higher fee yield per $, but you must actively manage the range.
+  <div class="logic-box"><b>Daily Loss</b>        portfolio drops &gt; 5%         &#x2192; HALT
+<b>Weekly Drawdown</b>   drops &gt; 15% from peak      &#x2192; HALT
+<b>Max IL</b>            impermanent loss &gt; 8%       &#x2192; force rebalance
+<b>Rebalance Limit</b>  &gt; 10 per hour               &#x2192; pause
+<b>Min Position</b>     &lt; $100 USDC                  &#x2192; skip open
+<b>Flash Crash</b>      &gt; 5% single drop             &#x2192; wait 15 min</div>
+</div>
+
+<!-- ── CONCENTRATED LIQUIDITY PRIMER ────────────────────────────────── -->
+
+<div class="section-title" style="color:#58a6ff">How Concentrated Liquidity Works</div>
+<div class="card" style="margin-bottom:16px">
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.6;margin-bottom:8px">
+    Unlike traditional AMMs (liquidity from $0 to &#x221E;), concentrated liquidity focuses capital in a <b>specific price range</b>.
+    Higher fee yield per $, but the range must be actively managed.
   </p>
-  <div class="adv-risks">
-    <div style="background:#0d1117;border-radius:6px;padding:12px">
-      <div style="color:#22c55e;font-weight:bold;font-size:12px;margin-bottom:4px">Advantages</div>
-      <ul style="font-size:11px;color:#c9d1d9;padding-left:16px;line-height:1.6">
-        <li>Much higher fee yield per $ of liquidity</li>
-        <li>Capital efficient</li>
-        <li>Earn proportional to your share in the active range</li>
-      </ul>
-    </div>
-    <div style="background:#0d1117;border-radius:6px;padding:12px">
-      <div style="color:#ef4444;font-weight:bold;font-size:12px;margin-bottom:4px">Risks</div>
-      <ul style="font-size:11px;color:#c9d1d9;padding-left:16px;line-height:1.6">
-        <li><b>Impermanent loss</b> if price moves</li>
-        <li><b>Out of range</b> = zero fees</li>
-        <li>Narrower range = more fees but more IL risk</li>
-      </ul>
-    </div>
-  </div>
-  <div class="logic-box" style="margin-top:12px">Token composition changes with price:
-
-At lower bound  &#x2192; 100% SOL,  0% USDC  (bought the dip)
+  <div class="logic-box">At lower bound  &#x2192; 100% SOL,  0% USDC  (bought the dip)
 At centre       &#x2192; ~50% SOL, ~50% USDC
 At upper bound  &#x2192;  0% SOL, 100% USDC  (sold the top)
 
-This is why the deposited ratio isn't 50/50.</div>
+This is why deposit ratio isn't 50/50 and why Rule 5 swaps to match.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+    <div style="background:#0d1117;border-radius:6px;padding:10px;font-size:11px">
+      <div style="color:#22c55e;font-weight:bold;margin-bottom:4px">Advantages</div>
+      <div style="color:#c9d1d9;line-height:1.5">Higher fee yield per $. Capital efficient. Earn on every swap through your range.</div>
+    </div>
+    <div style="background:#0d1117;border-radius:6px;padding:10px;font-size:11px">
+      <div style="color:#ef4444;font-weight:bold;margin-bottom:4px">Risks</div>
+      <div style="color:#c9d1d9;line-height:1.5">Impermanent loss on price moves. Out of range = zero fees. Narrower range = more fees but more IL.</div>
+    </div>
+  </div>
 </div>
 
 </body>
