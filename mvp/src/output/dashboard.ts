@@ -2752,6 +2752,80 @@ exists and is earning fees.</div>
   <div style="font-size:11px;color:#8b949e;margin-top:4px">This ordering ensures auto deploy (R7) never conflicts with exit rules (R2, OOR). It only runs when the position is safely in range and holding.</div>
 </div>
 
+<!-- ── STATE MACHINE ───────────────────────────────────────────────── -->
+
+<div class="section-title" style="color:#a855f7">Bot State Machine</div>
+<div class="card" style="margin-bottom:16px">
+  <p style="font-size:12px;color:#8b949e;margin-bottom:12px">The bot operates in 3 states. Each state determines which rules are evaluated and what actions are possible. State is persisted to DB — survives restarts.</p>
+  <svg width="100%" height="280" viewBox="0 0 600 280" preserveAspectRatio="xMidYMid meet" style="margin-bottom:12px">
+    <!-- State boxes -->
+    <rect x="30" y="110" width="130" height="50" rx="10" fill="#21262d" stroke="#8b949e" stroke-width="2"/>
+    <text x="95" y="140" text-anchor="middle" fill="#8b949e" font-size="14" font-weight="bold">IDLE</text>
+    <rect x="235" y="20" width="130" height="50" rx="10" fill="#21262d" stroke="#22c55e" stroke-width="2"/>
+    <text x="300" y="50" text-anchor="middle" fill="#22c55e" font-size="14" font-weight="bold">ACTIVE</text>
+    <rect x="440" y="110" width="130" height="50" rx="10" fill="#21262d" stroke="#eab308" stroke-width="2"/>
+    <text x="505" y="130" text-anchor="middle" fill="#eab308" font-size="13" font-weight="bold">WAITING</text>
+    <text x="505" y="148" text-anchor="middle" fill="#eab308" font-size="13" font-weight="bold">PULLBACK</text>
+    <!-- IDLE → ACTIVE -->
+    <path d="M 130 110 Q 180 50 235 45" fill="none" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowG)"/>
+    <text x="155" y="65" fill="#22c55e" font-size="9">Open position</text>
+    <text x="155" y="75" fill="#22c55e" font-size="9">or Resume</text>
+    <!-- ACTIVE → IDLE -->
+    <path d="M 235 60 Q 180 100 160 110" fill="none" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowW)"/>
+    <text x="175" y="105" fill="#8b949e" font-size="9">Pause / Close</text>
+    <!-- ACTIVE → WAITING_PULLBACK -->
+    <path d="M 365 50 Q 420 70 450 110" fill="none" stroke="#eab308" stroke-width="1.5" marker-end="url(#arrowY)"/>
+    <text x="395" y="65" fill="#eab308" font-size="9">Upside exit</text>
+    <text x="395" y="75" fill="#eab308" font-size="9">OOR above</text>
+    <!-- WAITING_PULLBACK → ACTIVE -->
+    <path d="M 440 120 Q 390 60 365 40" fill="none" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowG)"/>
+    <text x="410" y="38" fill="#22c55e" font-size="9">Pullback or</text>
+    <text x="410" y="48" fill="#22c55e" font-size="9">Timeout</text>
+    <!-- ACTIVE self-loop (close+reopen) -->
+    <path d="M 300 20 C 330 -10 370 -10 350 20" fill="none" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowB)"/>
+    <text x="340" y="5" fill="#58a6ff" font-size="9">OOR below / R2 down</text>
+    <text x="340" y="-5" fill="#58a6ff" font-size="8">(close + reopen)</text>
+    <!-- Flash crash loop -->
+    <path d="M 570 135 C 590 160 590 180 570 155" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="3,3"/>
+    <text x="545" y="180" fill="#ef4444" font-size="8">Flash crash</text>
+    <text x="545" y="190" fill="#ef4444" font-size="8">cooldown</text>
+    <!-- Arrow markers -->
+    <defs>
+      <marker id="arrowG" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#22c55e"/></marker>
+      <marker id="arrowW" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#8b949e"/></marker>
+      <marker id="arrowY" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#eab308"/></marker>
+      <marker id="arrowB" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#58a6ff"/></marker>
+    </defs>
+    <!-- Descriptions below -->
+    <rect x="20" y="200" width="170" height="70" rx="6" fill="#0d1117" stroke="#21262d"/>
+    <text x="105" y="218" text-anchor="middle" fill="#8b949e" font-size="10" font-weight="bold">IDLE</text>
+    <text x="30" y="232" fill="#8b949e" font-size="9">No active management.</text>
+    <text x="30" y="244" fill="#8b949e" font-size="9">Position may exist (paused)</text>
+    <text x="30" y="256" fill="#8b949e" font-size="9">or be closed (stopped).</text>
+    <rect x="215" y="200" width="170" height="70" rx="6" fill="#0d1117" stroke="#21262d"/>
+    <text x="300" y="218" text-anchor="middle" fill="#22c55e" font-size="10" font-weight="bold">ACTIVE</text>
+    <text x="225" y="232" fill="#8b949e" font-size="9">Full decision loop running.</text>
+    <text x="225" y="244" fill="#8b949e" font-size="9">Monitors proximity, OOR,</text>
+    <text x="225" y="256" fill="#8b949e" font-size="9">harvest, auto-deploy.</text>
+    <rect x="410" y="200" width="170" height="70" rx="6" fill="#0d1117" stroke="#21262d"/>
+    <text x="495" y="218" text-anchor="middle" fill="#eab308" font-size="10" font-weight="bold">WAITING PULLBACK</text>
+    <text x="420" y="232" fill="#8b949e" font-size="9">Position closed. Watching</text>
+    <text x="420" y="244" fill="#8b949e" font-size="9">for pullback or timeout</text>
+    <text x="420" y="256" fill="#8b949e" font-size="9">before re-entering (R3).</text>
+  </svg>
+  <div style="font-size:12px;color:#c9d1d9;line-height:1.8">
+    <div style="margin-bottom:8px"><b style="color:#8b949e">IDLE &#x2192; ACTIVE:</b> Bot opens a position (startup, resume from pause, or first run). Rules 1, 4, 5 calculate range and deploy capital.</div>
+    <div style="margin-bottom:8px"><b style="color:#22c55e">ACTIVE &#x2192; ACTIVE (self-loop):</b> OOR below or Rule 2 downside exit. Bot closes position and immediately reopens at current price (close+reopen). No pullback wait needed for downside moves.</div>
+    <div style="margin-bottom:8px"><b style="color:#eab308">ACTIVE &#x2192; WAITING_PULLBACK:</b> Rule 2 upside exit or OOR above. Price rose past the range. Bot closes position and waits for a pullback before re-entering (Rule 3). Avoids buying at a local top.</div>
+    <div style="margin-bottom:8px"><b style="color:#22c55e">WAITING_PULLBACK &#x2192; ACTIVE:</b> Either price pulls back enough (configurable %, default 1%) or timeout expires (configurable, default 15 min). Bot opens new position. If flash crash detected during wait, cooldown enforced (configurable, default 15 min) and peak/timeout reset.</div>
+    <div style="margin-bottom:8px"><b style="color:#8b949e">ACTIVE &#x2192; IDLE:</b> User pauses bot or closes position from dashboard. Position may stay open (paused) or be closed (manual close).</div>
+    <div><b style="color:#ef4444">Emergency Stop:</b> From any state &#x2192; IDLE. Closes position if open, saves state, exits process.</div>
+  </div>
+  <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;font-size:11px;color:#8b949e;line-height:1.6">
+    <b style="color:#a855f7">Crash recovery:</b> All state (including pullback watch status, peak price, and timeout start) is persisted to DB every cycle and on shutdown. On restart, the bot resumes in the correct state &#x2014; if it was waiting for a pullback, it continues waiting rather than opening a new position immediately.
+  </div>
+</div>
+
 <!-- ── CIRCUIT BREAKERS ─────────────────────────────────────────────── -->
 
 <div class="section-title" style="color:#ef4444">Circuit Breakers</div>

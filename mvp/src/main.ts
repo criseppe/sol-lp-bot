@@ -104,6 +104,20 @@ dashboard.setRule2Enabled(rule2Enabled);
 autoDeployEnabled = getRuleEnabled(db, 'autoDeploy');
 dashboard.setAutoDeployEnabled(autoDeployEnabled);
 
+// Restore pullback state from DB
+if (savedState?.pullback_active) {
+  livePullbackActive = true;
+  livePullbackPeak = savedState.pullback_peak ?? 0;
+  livePullbackStart = savedState.pullback_start ?? 0;
+  liveBotState = 'WAITING_PULLBACK';
+  console.log(JSON.stringify({ level: 'info', msg: `Pullback state restored: peak=$${livePullbackPeak.toFixed(2)}, waiting since ${new Date(livePullbackStart).toISOString()}`, timestamp: Date.now() }));
+}
+
+// Helper: pullback fields for every state save
+function pullbackFields() {
+  return { pullback_active: livePullbackActive ? 1 : 0, pullback_peak: livePullbackPeak, pullback_start: livePullbackStart };
+}
+
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
 function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1], overridePositionId?: string) {
   const posId = overridePositionId ?? liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
@@ -473,7 +487,7 @@ async function main() {
           ? JSON.stringify({ ...livePos2, positionMint: livePos2.positionMint.toBase58(), positionAddress: livePos2.positionAddress.toBase58() })
           : 'null',
         updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
       });
 
       checkAndWriteDailyPnl(price.price);
@@ -618,7 +632,7 @@ async function main() {
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
         position_json: 'null', updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
       });
 
       console.log(JSON.stringify({ level: 'info', msg: 'Position closed. Bot paused in IDLE.', timestamp: Date.now() }));
@@ -658,7 +672,7 @@ async function main() {
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
         position_json: 'null', updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
       });
 
       console.log(JSON.stringify({ level: 'info', msg: 'Emergency stop complete. Exiting in 3s...', timestamp: Date.now() }));
@@ -698,7 +712,7 @@ async function main() {
         : 'null',
       updated_at: Date.now(),
       cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
     });
 
     console.log(JSON.stringify({ level: 'info', msg: 'State saved. Bye.', timestamp: Date.now() }));
@@ -957,7 +971,7 @@ async function runLiveCycle(price: number): Promise<void> {
             position_json: JSON.stringify({ ...updatedPos, positionMint: updatedPos.positionMint.toBase58(), positionAddress: updatedPos.positionAddress.toBase58() }),
             updated_at: Date.now(),
             cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-            tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+            tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
           });
         }
         }
@@ -1081,6 +1095,19 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
   await liveClosePosition(price, eventType, triggerReason);
   await new Promise(r => setTimeout(r, 2000));
   await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after ${eventType}. Previous position closed due to: ${triggerReason ?? eventType}.`);
+
+  // Save position to DB immediately — prevents orphan recovery from killing
+  // a legitimate position if bot crashes before the next cycle save
+  const newPos = liveExecutor?.getCurrentPosition();
+  if (newPos) {
+    upsertBotState(db, {
+      state: liveBotState, regime: liveRegime,
+      position_json: JSON.stringify({ ...newPos, positionMint: newPos.positionMint.toBase58(), positionAddress: newPos.positionAddress.toBase58() }),
+      updated_at: Date.now(),
+      cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+    });
+  }
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────
