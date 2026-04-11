@@ -120,141 +120,54 @@ export class LiveExecutor {
       await this.execTx(initTx);
     }
 
-    // Get actual balances
-    let solBal = await this.getSolBalance();
-    let usdcBal = await this.getUsdcBalance();
-    const solReserve = SOL_RESERVE;
-    const usdcReserve = USDC_RESERVE;
+    // Get actual balances — no swap here; auto-deploy (Rule 7) will top up later
+    const solBal = await this.getSolBalance();
+    const usdcBal = await this.getUsdcBalance();
+    const solAvailable = Math.max(0, solBal - SOL_RESERVE);
+    const usdcAvailable = Math.max(0, usdcBal - USDC_RESERVE);
 
     const usdcMint = new PublicKey(MINTS.USDC);
     const solMint = new PublicKey(MINTS.SOL);
 
-    // First, try a USDC quote to see the ideal SOL/USDC ratio
-    let solAvailable = Math.max(0, solBal - solReserve);
-    let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-
     console.log(JSON.stringify({
       level: 'info',
-      msg: `Wallet: ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail). Deploy target: $${usdcToDeposit.toFixed(2)}`,
+      msg: `Open position: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail). Deploy target: $${usdcToDeposit.toFixed(2)}. No pre-swap — auto-deploy will top up.`,
       timestamp: Date.now(),
     }));
 
-    // Determine the ideal ratio by quoting with 1 SOL to find SOL:USDC ratio
-    const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1),
-      range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
-    );
-    const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
-    // ratio: for every 1 SOL deposited, need usdcPer1Sol USDC
-    // Total value per unit: 1 SOL * price + usdcPer1Sol USDC
-    const valuePerSolUnit = currentPrice + usdcPer1Sol;
-
-    // Calculate ideal split of capital to deploy (capped at usdcToDeposit target)
-    const totalAvailableUsdc = solAvailable * currentPrice + usdcAvailable;
-    const deployTargetUsdc = Math.min(totalAvailableUsdc, usdcToDeposit);
-    const idealSolUnits = deployTargetUsdc / valuePerSolUnit;
-    const idealSol = idealSolUnits;
-    const idealUsdc = idealSol * usdcPer1Sol;
-
-    console.log(JSON.stringify({
-      level: 'info',
-      msg: `Ratio: 1 SOL needs ${usdcPer1Sol.toFixed(2)} USDC. Deploy target: $${deployTargetUsdc.toFixed(2)} of $${totalAvailableUsdc.toFixed(2)} available. Ideal split: ${idealSol.toFixed(4)} SOL + ${idealUsdc.toFixed(2)} USDC`,
-      timestamp: Date.now(),
-    }));
-
-    // Check if we need to swap to reach the ideal ratio
-    const solDeficit = idealSol - solAvailable;
-    const usdcDeficit = idealUsdc - usdcAvailable;
-
-    if (solDeficit > 0.01) {
-      // Need more SOL — swap USDC → SOL
-      const usdcToSwap = Math.min(solDeficit * currentPrice * SWAP_BUFFER, usdcAvailable - 2); // keep $2 buffer
-      if (usdcToSwap > 1) {
-        console.log(JSON.stringify({
-          level: 'info',
-          msg: `Pre-deposit swap: need ${solDeficit.toFixed(4)} more SOL. Swapping ~$${usdcToSwap.toFixed(2)} USDC → SOL`,
-          timestamp: Date.now(),
-        }));
-        try {
-          const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
-          const swapQuote = await swapQuoteByInputToken(
-            whirlpool, usdcMint, new BN(Math.floor(usdcToSwap * 1e6)),
-            SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
-          );
-          const solBeforeSwap = solBal;
-          const usdcBeforeSwap = usdcBal;
-          const swapTx = await whirlpool.swap(swapQuote);
-          await this.execTx(swapTx);
-          await new Promise(r => setTimeout(r, 2000));
-          solBal = await this.getSolBalance();
-          usdcBal = await this.getUsdcBalance();
-          solAvailable = Math.max(0, solBal - solReserve);
-          usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-          const solReceived = solBal - solBeforeSwap;
-          const usdcSpent = usdcBeforeSwap - usdcBal;
-          console.log(JSON.stringify({ level: 'info', msg: `Swap done: ${usdcSpent.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL. Now: ${solBal.toFixed(4)} SOL, ${usdcBal.toFixed(2)} USDC`, timestamp: Date.now() }));
-          if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Pre-deposit: wallet had ${solBeforeSwap.toFixed(4)} SOL, needed ~${idealSol.toFixed(4)}. Swapped ${usdcSpent.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL.` });
-        } catch (err) {
-          console.log(JSON.stringify({ level: 'warn', msg: `Swap failed: ${String(err)}`, timestamp: Date.now() }));
-        }
-      }
-    } else if (usdcDeficit > 1) {
-      // Need more USDC — swap SOL → USDC
-      const solToSwap = Math.min(usdcDeficit / currentPrice * SWAP_BUFFER, solAvailable - 0.02);
-      if (solToSwap > 0.005) {
-        console.log(JSON.stringify({
-          level: 'info',
-          msg: `Pre-deposit swap: need ${usdcDeficit.toFixed(2)} more USDC. Swapping ~${solToSwap.toFixed(4)} SOL → USDC`,
-          timestamp: Date.now(),
-        }));
-        try {
-          const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
-          const swapQuote = await swapQuoteByInputToken(
-            whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
-            SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
-          );
-          const solBeforeSwap = solBal;
-          const usdcBeforeSwap = usdcBal;
-          const swapTx = await whirlpool.swap(swapQuote);
-          await this.execTx(swapTx);
-          await new Promise(r => setTimeout(r, 2000));
-          solBal = await this.getSolBalance();
-          usdcBal = await this.getUsdcBalance();
-          solAvailable = Math.max(0, solBal - solReserve);
-          usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-          const usdcReceived = usdcBal - usdcBeforeSwap;
-          const solSpent = solBeforeSwap - solBal;
-          console.log(JSON.stringify({ level: 'info', msg: `Swap done: ${solSpent.toFixed(4)} SOL → ${usdcReceived.toFixed(2)} USDC. Now: ${solBal.toFixed(4)} SOL, ${usdcBal.toFixed(2)} USDC`, timestamp: Date.now() }));
-          if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSpent, toAmount: usdcReceived, reason: `Pre-deposit: wallet had ${usdcBeforeSwap.toFixed(2)} USDC, needed ~${idealUsdc.toFixed(2)}. Swapped ${solSpent.toFixed(4)} SOL → ${usdcReceived.toFixed(2)} USDC.` });
-        } catch (err) {
-          console.log(JSON.stringify({ level: 'warn', msg: `Swap failed: ${String(err)}`, timestamp: Date.now() }));
-        }
-      }
-    }
-
-    // Refresh pool data after potential swap
-    await whirlpool.refreshData();
-
-    // Quote with updated balances — cap at ideal split to respect deploy target
-    const quoteSol = Math.min(solAvailable, idealSol);
-    const quoteUsdc = Math.min(usdcAvailable, idealUsdc);
-    let quote = quoteSol > 0.01 ? increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(quoteSol),
+    // Quote with the constraining token — deposit what we can without swapping
+    // Try SOL first, then USDC. The position opens with partial capital;
+    // Rule 7 auto-deploy will add the remaining idle funds within 5 minutes.
+    let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(solAvailable),
       range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
     let quotedBy = 'SOL';
 
     if (quote) {
       const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
-      if (usdcNeeded > quoteUsdc) {
-        // Try USDC quote instead
-        quote = increaseLiquidityQuoteByInputToken(
-          usdcMint, new Decimal(quoteUsdc),
+      if (usdcNeeded > usdcAvailable) {
+        // SOL quote needs more USDC than available — try USDC quote instead
+        quote = usdcAvailable > 0.5 ? increaseLiquidityQuoteByInputToken(
+          usdcMint, new Decimal(usdcAvailable),
           range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
-        );
+        ) : null;
         quotedBy = 'USDC';
+        if (quote) {
+          const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
+          if (solNeeded > solAvailable) quote = null;
+        }
+      }
+    } else if (usdcAvailable > 0.5) {
+      // No SOL available — try USDC-only quote
+      quote = increaseLiquidityQuoteByInputToken(
+        usdcMint, new Decimal(usdcAvailable),
+        range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      );
+      quotedBy = 'USDC';
+      if (quote) {
         const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
-        if (solNeeded > quoteSol) quote = null;
+        if (solNeeded > solAvailable) quote = null;
       }
     }
 

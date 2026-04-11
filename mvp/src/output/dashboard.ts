@@ -2146,25 +2146,34 @@ the timeout from firing immediately after cooldown.</div>
 </div>
 
 <div class="rule-card">
-  <h3><span class="rule-num">5</span> Position Sizing &amp; Wallet Rebalancing</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Controls what % of capital goes into the position. More volatile = more reserve. Automatically swaps tokens to match the deposit ratio required by the position.</p>
+  <h3><span class="rule-num">5</span> Position Sizing</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Controls what % of capital goes into the position. More volatile = more reserve. Opens with the constraining token (no swap); Rule 7 auto-deploy tops up the rest.</p>
   <div class="logic-box"><b>Capital allocation:</b>
 <span class="tag tag-ranging">RANGING</span>  100% deployed   <span class="tag tag-bull">BULLISH</span>  85% deployed
 <span class="tag tag-bear">BEARISH</span>  50% deployed   <span class="tag tag-extreme">EXTREME</span> 25% deployed
 
-<b>Deposit process:</b>
+<b>Position open process:</b>
 1. Total value = SOL &#xD7; price + USDC
-2. Deploy amount = total &#xD7; regime deployPct
-3. Query SDK for required SOL:USDC ratio at current tick
-4. If wallet is imbalanced &#x2192; swap via Orca pool (2% slippage max)
-5. Deposit into position
-6. Reserve: 0.05 SOL (gas) + $1 USDC always kept in wallet</div>
+2. Deploy target = total &#xD7; regime deployPct
+3. Quote with constraining token (SOL or USDC &#x2014; whichever limits)
+4. Open position with available capital (NO pre-swap)
+5. Reserve: 0.1 SOL (gas + rent) + $1 USDC always kept
+
+<b>Why no swap on open?</b>
+Swapping before position open is risky: if the swap succeeds
+but the position TX fails (rent, slippage), the wallet is left
+imbalanced with no position. Instead, the position opens with
+partial capital, and Rule 7 (auto-deploy) adds the remaining
+idle funds within 5 minutes &#x2014; including any needed swap.
+The swap inside auto-deploy is safe because the position already
+exists and is earning fees.</div>
   <div class="example-box">
-    <div class="example-title">Wallet rebalancing before deposit</div>
-    <div class="example-text">Wallet: 0.07 SOL ($6) + $35 USDC. Position needs ~1:9 SOL:USDC ratio.</div>
-    <div class="example-text">Ideal split: 0.44 SOL + $3.90 USDC. SOL deficit &#x2192; swap $32 USDC &#x2192; 0.38 SOL.</div>
-    <div class="example-text">Deploys ~$31 instead of only ~$7 without the swap.</div>
-    <div class="example-note">Without rebalancing, the constraining token (SOL) would limit the deposit. The swap ensures nearly all available capital goes to work.</div>
+    <div class="example-title">Open with partial capital, auto-deploy tops up</div>
+    <div class="example-text">Wallet: 0.5 SOL ($42) + $3,000 USDC. Position needs SOL:USDC ratio ~1:36.</div>
+    <div class="example-text">Constraining token is SOL &#x2192; deposits 0.4 SOL + ~$14 USDC = $48.</div>
+    <div class="example-text">~$2,985 USDC sits idle. Rule 7 detects idle funds in 5 min.</div>
+    <div class="example-text">Auto-deploy swaps ~$1,500 USDC &#x2192; SOL, deposits both &#x2192; full capital deployed.</div>
+    <div class="example-note">Total time to full deployment: ~5 min. Missed fees on idle portion: ~$0.01. But no risk of failed-swap + no-position deadlock.</div>
   </div>
   <div class="trigger">Runs: on every position open</div>
 </div>
