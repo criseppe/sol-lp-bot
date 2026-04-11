@@ -550,6 +550,47 @@ async function main() {
       return fees;
     });
 
+    dashboard.onClosePosition(async () => {
+      console.log(JSON.stringify({ level: 'warn', msg: 'CLOSE POSITION triggered from dashboard', timestamp: Date.now() }));
+
+      if (!executor.getCurrentPosition()) {
+        throw new Error('No position open to close.');
+      }
+
+      const currentPrice = currentLiveData?.solPrice ?? 0;
+      const balBefore = await getWalletBalances(conn, liveWallet.publicKey);
+      console.log(JSON.stringify({ level: 'info', msg: 'Closing live position (keep bot running)...', timestamp: Date.now() }));
+      const result = await executor.closePosition();
+      const balAfter = await getWalletBalances(conn, liveWallet.publicKey);
+
+      liveCumFeesSol += result.feeSolCollected;
+      liveCumFeesUsdc += result.feeUsdcCollected;
+      liveRealizedIl += result.ilAtClose;
+
+      insertRebalanceEvent(db, {
+        timestamp: Date.now(), eventType: 'POSITION_CLOSED', price: result.closePrice, regime: liveRegime,
+        note: `WHY: Close Position triggered from dashboard. Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}.\nEXECUTED: Fees collected: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC ($${result.feeTotalUsdc.toFixed(4)}). Received ${result.solReceived.toFixed(4)} SOL + ${result.usdcReceived.toFixed(2)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Wallet: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC.`,
+        solBefore: balBefore.sol, usdcBefore: balBefore.usdc,
+        solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
+        feeSol: result.feeSolCollected, feeUsdc: result.feeUsdcCollected, ilAtClose: result.ilAtClose,
+      });
+      insertDecisionLog(db, { timestamp: Date.now(), price: result.closePrice, regime: liveRegime, bot_state: 'IDLE',
+        prox_lower: null, prox_upper: null, in_range: null,
+        decision: 'CLOSE_POSITION', reasoning: `Position closed from dashboard. Bot paused in IDLE. Fees: ${result.feeSolCollected.toFixed(6)} SOL + ${result.feeUsdcCollected.toFixed(4)} USDC. IL: $${result.ilAtClose.toFixed(4)}. Click Resume to restart.`,
+        params_json: null });
+
+      botPaused = true;
+      liveBotState = 'IDLE';
+      upsertBotState(db, {
+        state: 'IDLE', regime: liveRegime,
+        position_json: 'null', ledger_json: JSON.stringify(engine.getBotLedger()),
+        naive_json: JSON.stringify(engine.getNaiveLedger()), updated_at: Date.now(),
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+      });
+
+      console.log(JSON.stringify({ level: 'info', msg: 'Position closed. Bot paused in IDLE.', timestamp: Date.now() }));
+    });
+
     dashboard.onEmergencyStop(async () => {
       console.log(JSON.stringify({ level: 'warn', msg: 'EMERGENCY STOP triggered from dashboard', timestamp: Date.now() }));
       clearInterval(decisionLoop);

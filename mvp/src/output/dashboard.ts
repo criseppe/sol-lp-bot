@@ -109,6 +109,7 @@ export interface DashboardServer {
   onPause(handler: () => void): void;
   onResume(handler: () => void): void;
   onHarvest(handler: () => Promise<{ feeSol: number; feeUsdc: number }>): void;
+  onClosePosition(handler: () => Promise<void>): void;
   setDb(db: any): void;
   stop(): void;
 }
@@ -483,6 +484,21 @@ export function startDashboard(port: number): DashboardServer {
     }
   });
 
+  let onClosePosition: (() => Promise<void>) | null = null;
+
+  app.post('/api/close-position', async (_req, res) => {
+    if (onClosePosition) {
+      try {
+        await onClosePosition();
+        res.json({ success: true, msg: 'Position closed. Bot paused in IDLE state. Click Resume to restart.' });
+      } catch (err) {
+        res.status(500).json({ success: false, msg: String(err) });
+      }
+    } else {
+      res.status(400).json({ success: false, msg: 'No close-position handler registered.' });
+    }
+  });
+
   let onHarvest: (() => Promise<{ feeSol: number; feeUsdc: number }>) | null = null;
 
   app.post('/api/harvest', async (_req, res) => {
@@ -531,6 +547,9 @@ export function startDashboard(port: number): DashboardServer {
     },
     onHarvest(handler) {
       onHarvest = handler;
+    },
+    onClosePosition(handler) {
+      onClosePosition = handler;
     },
     setDb(d) {
       dbRef = d;
@@ -929,7 +948,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="refresh" content="30">
+<meta id="auto-refresh" http-equiv="refresh" content="30">
 <title>SOL/USDC LP Bot - Live Wallet</title>
 <style>${SHARED_STYLES}
 .wallet-addr{font-size:11px;color:#58a6ff;text-decoration:none}
@@ -946,7 +965,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
 .ctrl-green{background:#16a34a;color:white}.ctrl-green:hover{background:#15803d}
 .ctrl-blue{background:#2563eb;color:white}.ctrl-blue:hover{background:#1d4ed8}
 .stop-confirm{display:none;background:#1c1917;border:2px solid #dc2626;border-radius:8px;padding:16px;margin-top:12px;text-align:center}
-.ctrl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+.ctrl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
 .fees-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 .fees-cell{text-align:center;padding:12px 0}
 .fees-cell:not(:last-child){border-right:1px solid #21262d}
@@ -1156,13 +1175,30 @@ ${NAV_HTML}
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Restarts decision loop and rebalancing.</div>
       </div>
       <div>
-        <button id="estop-btn" class="ctrl-btn ctrl-red" onclick="document.getElementById('stop-confirm').style.display='block'">
+        <button id="close-pos-btn" class="ctrl-btn ctrl-amber" onclick="stopAutoRefresh();document.getElementById('close-pos-confirm').style.display='block'">
+          Close Position
+        </button>
+        <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Closes position, bot stays running in IDLE.</div>
+      </div>
+      <div>
+        <button id="estop-btn" class="ctrl-btn ctrl-red" onclick="stopAutoRefresh();document.getElementById('stop-confirm').style.display='block'">
           Close &amp; Stop
         </button>
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Closes position, withdraws all, shuts down.</div>
       </div>
     </div>
     <div id="ctrl-result" style="font-size:12px;text-align:center;min-height:20px"></div>
+    <div class="stop-confirm" id="close-pos-confirm">
+      <p style="color:#d97706;font-weight:bold;margin-bottom:8px">Close position?</p>
+      <p style="color:#8b949e;font-size:12px;margin-bottom:12px">This will close your liquidity position on-chain. The bot stays running in IDLE. Click Resume to open a new position.</p>
+      <button class="ctrl-btn ctrl-amber" id="confirm-close-pos-btn" onclick="executeClosePosition()">
+        Yes, Close Position
+      </button>
+      <button style="background:#30363d;color:#c9d1d9;border:none;padding:10px 24px;border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;width:100%;margin-top:8px" onclick="document.getElementById('close-pos-confirm').style.display='none'">
+        Cancel
+      </button>
+      <div id="close-pos-result" style="margin-top:12px;font-size:12px"></div>
+    </div>
     <div class="stop-confirm" id="stop-confirm">
       <p style="color:#ef4444;font-weight:bold;margin-bottom:8px">Are you sure?</p>
       <p style="color:#8b949e;font-size:12px;margin-bottom:12px">This will close your liquidity position on-chain and shut down the bot process.</p>
@@ -1182,7 +1218,13 @@ ${NAV_HTML}
 <script>
 window.__LIVE_DATA__ = ${JSON.stringify(live)};
 
+function stopAutoRefresh() {
+  var meta = document.getElementById('auto-refresh');
+  if (meta) meta.remove();
+}
+
 function harvestFees() {
+  stopAutoRefresh();
   var btn = document.getElementById('harvest-btn');
   var result = document.getElementById('ctrl-result');
   btn.disabled = true;
@@ -1208,6 +1250,7 @@ function harvestFees() {
 }
 
 function controlBot(action) {
+  stopAutoRefresh();
   var result = document.getElementById('ctrl-result');
   var btn = document.getElementById(action === 'pause' ? 'pause-btn' : 'resume-btn');
   btn.disabled = true;
@@ -1233,6 +1276,31 @@ function controlBot(action) {
     .catch(function(err) {
       result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
       btn.disabled = false;
+    });
+}
+
+function executeClosePosition() {
+  var btn = document.getElementById('confirm-close-pos-btn');
+  var result = document.getElementById('close-pos-result');
+  btn.disabled = true;
+  btn.textContent = 'Closing position...';
+  result.innerHTML = '<span style="color:#eab308">Sending close transaction to Solana...</span>';
+
+  fetch('/api/close-position', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        result.innerHTML = '<span style="color:#22c55e">' + data.msg + '</span>';
+      } else {
+        result.innerHTML = '<span style="color:#ef4444">Error: ' + data.msg + '</span>';
+        btn.disabled = false;
+        btn.textContent = 'Retry Close Position';
+      }
+    })
+    .catch(function(err) {
+      result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+      btn.disabled = false;
+      btn.textContent = 'Retry Close Position';
     });
 }
 
@@ -1619,6 +1687,22 @@ ${NAV_HTML}
   if dirRatio &gt; 0.35 &amp; up    &#x2192; <span class="tag tag-bull">BULLISH_TREND</span>
   if dirRatio &gt; 0.35 &amp; down  &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
   else                         &#x2192; <span class="tag tag-ranging">RANGING</span></div>
+  <div style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;margin:8px 0;font-size:12px;line-height:1.6">
+    <div style="color:#58a6ff;font-weight:bold;margin-bottom:4px">Example: 3 daily closes over 2-day window</div>
+    <div style="color:#c9d1d9">Day 0: $80 &rarr; Day 1: $83 &rarr; Day 2: $82</div>
+    <div style="color:#c9d1d9;margin-top:6px"><b>dirRatio</b> = |net move| / total path</div>
+    <div style="color:#c9d1d9;padding-left:12px">net move = |$82 - $80| = $2</div>
+    <div style="color:#c9d1d9;padding-left:12px">total path = |$83 - $80| + |$82 - $83| = $3 + $1 = $4</div>
+    <div style="color:#c9d1d9;padding-left:12px">dirRatio = 2 / 4 = <b>0.50</b></div>
+    <div style="color:#c9d1d9;margin-top:6px"><b>realisedVol</b> = stddev of daily log returns</div>
+    <div style="color:#c9d1d9;padding-left:12px">log returns: ln(83/80) = 0.0368, ln(82/83) = -0.0121</div>
+    <div style="color:#c9d1d9;padding-left:12px">mean = 0.0123, stddev = <b>0.0245</b></div>
+    <div style="color:#c9d1d9;margin-top:6px"><b>Classification:</b></div>
+    <div style="color:#c9d1d9;padding-left:12px">realisedVol 0.0245 &lt; 0.08 &rarr; not EXTREME</div>
+    <div style="color:#c9d1d9;padding-left:12px">dirRatio 0.50 &gt; 0.35 &amp; price went up ($82 &gt; $80) &rarr; <span class="tag tag-bull">BULLISH_TREND</span></div>
+    <div style="color:#8b949e;margin-top:8px">If instead prices were $80 &rarr; $81 &rarr; $80: dirRatio = 0/2 = 0.0 &rarr; <span class="tag tag-ranging">RANGING</span> (oscillating, no net direction).</div>
+    <div style="color:#8b949e">If realisedVol exceeded 0.08 (e.g. $80 &rarr; $95 &rarr; $70): &rarr; <span class="tag tag-extreme">EXTREME</span> regardless of dirRatio.</div>
+  </div>
 </div>
 
 <div class="card" style="margin-bottom:16px">
