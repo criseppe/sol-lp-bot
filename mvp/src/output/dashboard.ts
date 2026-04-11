@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import { type DailyPnlRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch } from '../db/sqlite.js';
+import { type DailyPnlRow, type LiveSnapshotRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
@@ -1643,7 +1643,7 @@ function executeStop() {
 
 interface InsightsData {
   snapshots: Array<{ timestamp: number; price: number; total_value_usdc: number; pending_fees_sol: number; pending_fees_usdc: number; cum_fees_sol: number; cum_fees_usdc: number; il_usdc: number; in_range: number; regime: string }>;
-  snapshots7d: Array<{ timestamp: number; total_value_usdc: number; total_with_position: number; position_value: number }>;
+  snapshots7d: Array<{ timestamp: number; price: number; total_value_usdc: number; total_with_position: number; position_value: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number }>;
   inRangePct1h: number;
   inRangePct24h: number;
   inRangePctAll: number;
@@ -1653,6 +1653,60 @@ interface InsightsData {
   events: RebalanceEvent[];
   recentTxs: OnChainTx[];
   uptime: number;
+}
+
+function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number }>): string {
+  const feeDailyMap = new Map<string, { totalFeesUsdc: number }>();
+  snapshots7d.forEach(s => {
+    const date = new Date(s.timestamp).toISOString().slice(0, 10);
+    const cumFeesUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
+    const pendingFeesUsdc = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
+    feeDailyMap.set(date, { totalFeesUsdc: cumFeesUsdc + pendingFeesUsdc });
+  });
+  const feeDays = Array.from(feeDailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-7);
+
+  if (feeDays.length < 2) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">Need at least 2 days of data...</div></div>';
+
+  const dailyFees: Array<{ date: string; fees: number }> = [];
+  for (let i = 1; i < feeDays.length; i++) {
+    const delta = feeDays[i][1].totalFeesUsdc - feeDays[i - 1][1].totalFeesUsdc;
+    dailyFees.push({ date: feeDays[i][0], fees: Math.max(0, delta) });
+  }
+
+  const maxFee = Math.max(...dailyFees.map(d => d.fees), 0.01);
+  const barW = Math.floor(500 / dailyFees.length) - 8;
+  const chartH = 80;
+  const baseY = chartH + 25;
+  const totalFees = dailyFees.reduce((s, d) => s + d.fees, 0);
+  const avgFee = dailyFees.length > 0 ? totalFees / dailyFees.length : 0;
+  const avgY = baseY - (avgFee / maxFee) * chartH * 0.85;
+
+  const bars = dailyFees.map((d, i) => {
+    const x = i * (barW + 8) + 50;
+    const barH = Math.max(2, (d.fees / maxFee) * chartH * 0.85);
+    const y = baseY - barH;
+    const dayLabel = d.date.slice(5);
+    const dayName = new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+    const feeLabel = d.fees < 0.01 ? d.fees.toFixed(4) : fmt(d.fees, 2);
+    return `
+      <rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="#22c55e" rx="2"/>
+      <text x="${x + barW / 2}" y="${Math.max(15, y - 4)}" text-anchor="middle" fill="#c9d1d9" font-size="9">$${feeLabel}</text>
+      <text x="${x + barW / 2}" y="${baseY + 12}" text-anchor="middle" fill="#8b949e" font-size="9">${dayLabel}</text>
+      <text x="${x + barW / 2}" y="${baseY + 22}" text-anchor="middle" fill="#8b949e" font-size="8">${dayName}</text>`;
+  }).join('');
+
+  return `<div class="card" style="margin-bottom:16px">
+  <h2>Total Fees Earned Per Day <span style="color:#8b949e;font-size:12px;font-weight:normal">| Total: $${fmt(totalFees, 2)} | Avg: $${fmt(avgFee, 2)}/day</span></h2>
+  <svg width="100%" height="135" viewBox="0 0 600 135" preserveAspectRatio="xMidYMid meet">
+    <line x1="45" y1="25" x2="45" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
+    <line x1="45" y1="${baseY}" x2="590" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
+    <text x="5" y="30" fill="#8b949e" font-size="9">$${fmt(maxFee, 2)}</text>
+    <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$0</text>
+    <line x1="45" y1="${avgY}" x2="590" y2="${avgY}" stroke="#eab308" stroke-width="1" stroke-dasharray="4,4"/>
+    <text x="592" y="${avgY + 4}" fill="#eab308" font-size="8">avg</text>
+    ${bars}
+  </svg>
+</div>`;
 }
 
 function renderInsightsHtml(data: InsightsData): string {
@@ -1878,6 +1932,8 @@ ${(() => {
   </svg>
 </div>`;
 })()}
+
+${buildDailyFeesChart(data.snapshots7d)}
 
 <div class="section-title">In-Range Performance</div>
 <div class="gauge-row">
