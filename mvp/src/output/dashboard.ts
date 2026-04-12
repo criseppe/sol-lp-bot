@@ -375,7 +375,8 @@ export function startDashboard(port: number): DashboardServer {
     const walletAddr = currentLive?.walletAddress ?? '';
     const solPrice = currentLive?.solPrice ?? 82;
     const recentTxs = (rpcUrl && walletAddr) ? await fetchRecentTransactions(rpcUrl, walletAddr, 10, solPrice) : [];
-    res.type('html').send(renderInsightsHtml({ snapshots, snapshots7d, inRangePct1h, inRangePct24h, inRangePctAll, decisions, regimeEvals, regimeHist, events, recentTxs, uptime }));
+    const dailySummaries = getAllDailySummaries(dbRef);
+    res.type('html').send(renderInsightsHtml({ snapshots, snapshots7d, inRangePct1h, inRangePct24h, inRangePctAll, decisions, regimeEvals, regimeHist, events, recentTxs, uptime, dailySummaries }));
   });
 
   // Strategy page
@@ -1836,6 +1837,7 @@ interface InsightsData {
   events: RebalanceEvent[];
   recentTxs: OnChainTx[];
   uptime: number;
+  dailySummaries?: Array<{ date: string; wallet_usdc: number; position_usdc: number; total_usdc: number; injected_usdc: number; fees_earned_usdc: number; cum_fees_usdc: number; portfolio_change: number; sol_price: number; regime: string | null }>;
 }
 
 function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number }>): string {
@@ -2155,27 +2157,31 @@ ${(() => {
     dailySolImpact.set(date, (dailySolImpact.get(date) ?? 0) + solHeld * priceDelta);
   }
 
-  // Compute per-day: portfolio change, SOL price impact, organic growth
-  // Organic = fees earned that day (not portfolio change minus SOL impact,
-  // because LP composition shift inflates the SOL impact calculation)
+  // Use daily_summary as source of truth for Change (consistent with live wallet page)
+  // Falls back to snapshot-derived values if daily_summary not available
+  const summaryMap = new Map<string, { total: number; change: number; injected: number; fees: number; solPrice: number }>();
+  if (data.dailySummaries) {
+    data.dailySummaries.forEach(s => {
+      summaryMap.set(s.date, { total: s.total_usdc, change: s.portfolio_change, injected: s.injected_usdc, fees: s.fees_earned_usdc, solPrice: s.sol_price });
+    });
+  }
+
   const pnlPoints: Array<{ date: string; pnl: number; solImpact: number; organic: number }> = [];
-  const sortedFeeDates = Array.from(feeDailyMap2.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   days.forEach(([date, val], i) => {
-    const injToday = dailyInjections.get(date) ?? 0;
     const solImpact = dailySolImpact.get(date) ?? 0;
+    const summary = summaryMap.get(date);
 
-    // Daily fees = cumulative fees today - cumulative fees yesterday
-    const todayFees = feeDailyMap2.get(date) ?? 0;
-    const prevDayDate = i > 0 ? days[i - 1][0] : null;
-    const prevDayFees = prevDayDate ? (feeDailyMap2.get(prevDayDate) ?? 0) : 0;
-    const dailyFees = i === 0 ? todayFees : Math.max(0, todayFees - prevDayFees);
-
-    if (i === 0) {
-      const change = val.total - injToday;
-      pnlPoints.push({ date, pnl: change, solImpact, organic: dailyFees });
+    if (summary) {
+      // Use daily_summary: change = today - yesterday - injections (already computed in main.ts)
+      pnlPoints.push({ date, pnl: summary.change, solImpact, organic: summary.fees });
     } else {
-      const prev = days[i - 1][1];
-      const change = val.total - prev.total - injToday;
+      // Fallback to snapshot-derived
+      const injToday = dailyInjections.get(date) ?? 0;
+      const todayFees = feeDailyMap2.get(date) ?? 0;
+      const prevDayDate = i > 0 ? days[i - 1][0] : null;
+      const prevDayFees = prevDayDate ? (feeDailyMap2.get(prevDayDate) ?? 0) : 0;
+      const dailyFees = i === 0 ? todayFees : Math.max(0, todayFees - prevDayFees);
+      const change = i === 0 ? 0 : val.total - days[i - 1][1].total - injToday;
       pnlPoints.push({ date, pnl: change, solImpact, organic: dailyFees });
     }
   });
@@ -2276,7 +2282,12 @@ ${(() => {
       <th style="text-align:right;padding:6px 8px;color:#eab308">Change</th>
     </tr>
     ${days.map(([date, val], i) => {
-      const inj = dailyInjections.get(date) ?? 0;
+      const ds = data.dailySummaries?.find(s => s.date === date);
+      const inj = ds?.injected_usdc ?? (dailyInjections.get(date) ?? 0);
+      const walletVal = ds?.wallet_usdc ?? val.wallet;
+      const posVal = ds?.position_usdc ?? val.position;
+      const total = ds?.total_usdc ?? val.total;
+      const solPrice = ds?.sol_price ?? val.solPrice;
       const p = pnlPoints[i];
       const pnl = p?.pnl ?? 0;
       const solImpact = p?.solImpact ?? 0;
@@ -2286,11 +2297,11 @@ ${(() => {
       const orgCol = organic >= 0 ? '#22c55e' : '#ef4444';
       return `<tr style="border-bottom:1px solid #21262d">
         <td style="padding:5px 8px;color:#8b949e">${date}</td>
-        <td style="padding:5px 8px;text-align:right;color:#22c55e">$${fmt(val.wallet, 2)}</td>
-        <td style="padding:5px 8px;text-align:right;color:#58a6ff">$${fmt(val.position, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#22c55e">$${fmt(walletVal, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#58a6ff">$${fmt(posVal, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:#a855f7">${inj > 0 ? '$' + fmt(inj, 2) : '-'}</td>
-        <td style="padding:5px 8px;text-align:right;color:#c9d1d9;font-weight:bold">$${fmt(val.total, 2)}</td>
-        <td style="padding:5px 8px;text-align:right;color:#8b949e">$${fmt(val.solPrice, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#c9d1d9;font-weight:bold">$${fmt(total, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#8b949e">$${fmt(solPrice, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:${solCol}">${solImpact >= 0 ? '+' : ''}$${fmt(solImpact, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:${orgCol}">${organic >= 0 ? '+' : ''}$${fmt(organic, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:${pnlCol};font-weight:bold">${pnl >= 0 ? '+' : ''}$${fmt(pnl, 2)}</td>
