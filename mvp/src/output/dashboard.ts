@@ -2317,7 +2317,7 @@ ${buildDailyFeesChart(data.snapshots7d)}
     <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:2px;vertical-align:middle"></span> $0.50-$2/hr</span>
     <span><span style="display:inline-block;width:10px;height:10px;background:#8b949e;border-radius:2px;vertical-align:middle"></span> &lt;$0.50/hr</span>
     <span>|</span>
-    <span>IR%: <span style="color:#22c55e">&#9679;</span> &gt;90% <span style="color:#eab308">&#9679;</span> 50-90% <span style="color:#ef4444">&#9679;</span> &lt;50%</span>
+    <span>In-Range %: <span style="color:#22c55e">&#9679;</span> &gt;90% <span style="color:#eab308">&#9679;</span> 50-90% <span style="color:#ef4444">&#9679;</span> &lt;50%</span>
   </div>
   <div id="fee-hourly-table" style="overflow-x:auto;-webkit-overflow-scrolling:touch">
     <div style="color:#8b949e;text-align:center;padding:16px">Loading...</div>
@@ -2370,7 +2370,7 @@ ${buildDailyFeesChart(data.snapshots7d)}
       html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Hour</th>';
       html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Fees</th>';
       html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Cumul</th>';
-      html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">IR%</th>';
+      html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">In-Range %</th>';
       html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;min-width:100px"></th>';
       html += '</tr></thead><tbody>';
 
