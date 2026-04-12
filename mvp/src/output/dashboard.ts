@@ -2932,6 +2932,56 @@ ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
     </div>`;
   }).join('') : '<div class="card" style="text-align:center;color:#8b949e;padding:20px">No events yet</div>'}
 
+${(() => {
+  // Detect capital injections from 7d snapshots
+  const injections: Array<{ timestamp: number; amount: number; solDelta: number; usdcDelta: number; price: number }> = [];
+  for (let i = 1; i < data.snapshots7d.length; i++) {
+    const prev = data.snapshots7d[i - 1];
+    const curr = data.snapshots7d[i];
+    const p = curr.price;
+    const prevVal = ((prev.sol_balance ?? 0) + (prev.position_sol ?? 0)) * p + (prev.usdc_balance ?? 0) + (prev.position_usdc ?? 0);
+    const currVal = ((curr.sol_balance ?? 0) + (curr.position_sol ?? 0)) * p + (curr.usdc_balance ?? 0) + (curr.position_usdc ?? 0);
+    const increase = currVal - prevVal;
+    if (increase > 20) {
+      const solDelta = ((curr.sol_balance ?? 0) + (curr.position_sol ?? 0)) - ((prev.sol_balance ?? 0) + (prev.position_sol ?? 0));
+      const usdcDelta = ((curr.usdc_balance ?? 0) + (curr.position_usdc ?? 0)) - ((prev.usdc_balance ?? 0) + (prev.position_usdc ?? 0));
+      injections.push({ timestamp: curr.timestamp, amount: increase, solDelta, usdcDelta, price: p });
+    }
+  }
+  const totalInjected = injections.reduce((s, inj) => s + inj.amount, 0);
+
+  if (injections.length === 0) return '';
+
+  const rows = injections.map(inj => {
+    const t = new Date(inj.timestamp).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    const details: string[] = [];
+    if (inj.solDelta > 0.01) details.push(`${fmt(inj.solDelta, 4)} SOL ($${fmt(inj.solDelta * inj.price)})`);
+    if (inj.usdcDelta > 0.5) details.push(`$${fmt(inj.usdcDelta)} USDC`);
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:5px 6px;white-space:nowrap;font-size:11px;color:#8b949e">${t}</td>
+      <td style="padding:5px 6px;text-align:right;color:#a855f7;font-weight:bold">$${fmt(inj.amount, 2)}</td>
+      <td style="padding:5px 6px;font-size:11px;color:#8b949e">${details.join(' + ')}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+<div style="font-size:14px;color:#a855f7;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Capital Injections</div>
+<div class="card" style="margin-bottom:16px">
+  <div style="display:flex;gap:16px;margin-bottom:10px;font-size:12px">
+    <span><span style="color:#8b949e">Total injected:</span> <b style="color:#a855f7">$${fmt(totalInjected, 2)}</b></span>
+    <span><span style="color:#8b949e">Transfers:</span> <b>${injections.length}</b></span>
+  </div>
+  <div class="table-wrap"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr>
+      <th style="text-align:left;padding:5px 6px;color:#8b949e;border-bottom:1px solid #30363d">Time</th>
+      <th style="text-align:right;padding:5px 6px;color:#8b949e;border-bottom:1px solid #30363d">Amount</th>
+      <th style="text-align:left;padding:5px 6px;color:#8b949e;border-bottom:1px solid #30363d">Details</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>
+</div>`;
+})()}
+
 <div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">On-Chain Transactions (last 10)</div>
 <div class="card" style="margin-bottom:16px">
 ${data.recentTxs.length > 0 ? `
