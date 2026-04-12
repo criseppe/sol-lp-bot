@@ -49,6 +49,9 @@ export const runtime = {
   swapBufferPct: 3,                                                       // 3% over-request
   swapProvider: 'jupiter-fallback' as 'jupiter' | 'orca' | 'jupiter-fallback',
 
+  // Position max age (hours) — rebalance to reset IL baseline. 0 = disabled.
+  positionMaxAgeHours: 0,
+
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
@@ -135,6 +138,9 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vBuf = nv('swapBufferPct', 0, 10); if (vBuf != null) runtime.swapBufferPct = vBuf;
   const vProv = g('swapProvider'); if (vProv === 'jupiter' || vProv === 'orca' || vProv === 'jupiter-fallback') runtime.swapProvider = vProv;
 
+  // Position max age
+  const vMaxAge = nv('positionMaxAgeHours', 0, 168); if (vMaxAge != null) runtime.positionMaxAgeHours = vMaxAge;
+
   // Enhanced regime
   const vUseEnh = g('useEnhancedRegime'); if (vUseEnh === 'true' || vUseEnh === 'false') runtime.useEnhancedRegime = vUseEnh === 'true';
   const vV1h = nv('vol1hExtremeThreshold', 0.01, 0.5); if (vV1h != null) runtime.vol1hExtremeThreshold = vV1h;
@@ -197,6 +203,7 @@ export function exportConfig(): Record<string, string> {
   out['swapSlippageBps'] = String(runtime.swapSlippageBps);
   out['swapBufferPct'] = String(runtime.swapBufferPct);
   out['swapProvider'] = runtime.swapProvider;
+  out['positionMaxAgeHours'] = String(runtime.positionMaxAgeHours);
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
   out['useEnhancedRegime'] = String(runtime.useEnhancedRegime);
   out['vol1hExtremeThreshold'] = String(runtime.vol1hExtremeThreshold);

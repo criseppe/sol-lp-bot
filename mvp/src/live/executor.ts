@@ -425,12 +425,26 @@ export class LiveExecutor {
     const solToSwap = solAmount * convertPct;
     if (solToSwap < 0.0005) return null; // dust threshold
 
+    // Ensure wallet retains enough SOL for gas after conversion
+    const solBal = await this.getSolBalance();
+    const minSolForGas = getSolReserve() + 0.01; // reserve + gas buffer
+    if (solBal - solToSwap < minSolForGas) {
+      const maxSwap = Math.max(0, solBal - minSolForGas);
+      if (maxSwap < 0.0005) {
+        console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion skipped: wallet ${solBal.toFixed(4)} SOL, need ${minSolForGas.toFixed(4)} for gas+reserve`, timestamp: Date.now() }));
+        return null;
+      }
+      console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion capped: ${solToSwap.toFixed(4)} → ${maxSwap.toFixed(4)} SOL (keeping ${minSolForGas.toFixed(4)} for gas)`, timestamp: Date.now() }));
+      // Fall through with reduced amount — solToSwap is let-reassigned below
+    }
+
     try {
+      const actualSwap = Math.min(solToSwap, Math.max(0, solBal - minSolForGas));
       const solBefore = await this.getSolBalance();
       const usdcBefore = await this.getUsdcBalance();
       const swapResult = await this.doSwap(
-        MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
-        `Harvest SOL→USDC conversion: ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.`,
+        MINTS.SOL, MINTS.USDC, Math.floor(actualSwap * 1e9),
+        `Harvest SOL→USDC conversion: ${actualSwap.toFixed(6)} SOL (${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} harvested, capped by gas reserve).`,
       );
       if (!swapResult) {
         console.log(JSON.stringify({ level: 'warn', msg: 'Harvest SOL conversion: swap failed (all providers)', timestamp: Date.now() }));

@@ -58,11 +58,10 @@ export function calcProximity(currentPrice: number, position: PaperPosition): Pr
 export function shouldFireDownside(
   prox: ProximityState,
   threshold: number,
-  dailyILRate: number,
-  gasCost: number,
+  _dailyILRate?: number,
+  _gasCost?: number,
 ): boolean {
-  const projectedIL = Math.abs(dailyILRate) * 4;
-  return prox.proxToLower >= threshold || projectedIL > gasCost;
+  return prox.proxToLower >= threshold;
 }
 
 export function shouldFireUpside(prox: ProximityState, threshold: number): boolean {
@@ -89,11 +88,23 @@ export function shouldReenterAfterUpside(
   return { should: false, reason: 'WAITING' };
 }
 
+/**
+ * Detect flash crash using max drawdown within the price window,
+ * not just endpoint-to-endpoint. A 5% drop followed by 3% recovery
+ * still registers as a 5% crash (peak-to-trough), not a 2% drop.
+ */
 export function isFlashCrash(prices: number[]): boolean {
   if (prices.length < 2) return false;
-  if (prices[0] <= 0) return false;
-  const drop = ((prices[0] - prices[prices.length - 1]) / prices[0]) * 100;
-  return drop >= runtime.flashCrashPct;
+  let peak = prices[0];
+  let maxDrawdownPct = 0;
+  for (const p of prices) {
+    if (p > peak) peak = p;
+    if (peak > 0) {
+      const drawdown = ((peak - p) / peak) * 100;
+      if (drawdown > maxDrawdownPct) maxDrawdownPct = drawdown;
+    }
+  }
+  return maxDrawdownPct >= runtime.flashCrashPct;
 }
 
 // ─── RULE 4: Re-entry Split ───────────────────────────────────────────────
@@ -221,12 +232,19 @@ export function checkAutoDeploy(opts: {
     return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_DUST: deployable $${deployableUsdc.toFixed(2)} < min $${minDeployUsdc}`, ...base };
   }
 
-  // BR-2: Price must be near geometric mean (optimal capital split)
-  const priceRatio = currentPrice / idealPrice;
-  const deviation = Math.abs(priceRatio - 1);
-  if (deviation > deployRatioTolerance) {
-    const dir = currentPrice > idealPrice ? 'above' : 'below';
-    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_RATIO: price $${currentPrice.toFixed(2)} is ${(deviation * 100).toFixed(1)}% ${dir} ideal $${idealPrice.toFixed(2)} (tolerance: ${(deployRatioTolerance * 100).toFixed(1)}%)`, ...base };
+  // BR-2: Price must be within the position range (can deposit both tokens)
+  // Use range midpoint as reference instead of geometric mean — works correctly for skewed ranges
+  const rangeMid = (priceLower + priceUpper) / 2;
+  const halfRange = (priceUpper - priceLower) / 2;
+  const deviation = halfRange > 0 ? Math.abs(currentPrice - rangeMid) / halfRange : 1;
+  if (deviation > 1) {
+    const dir = currentPrice > rangeMid ? 'above' : 'below';
+    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_OOR: price $${currentPrice.toFixed(2)} is out of range $${priceLower.toFixed(2)}-$${priceUpper.toFixed(2)}`, ...base };
+  }
+  // Additionally check price is not too close to edges (need reasonable token split for deposit)
+  if (deviation > (1 - deployRatioTolerance)) {
+    const dir = currentPrice > rangeMid ? 'near upper' : 'near lower';
+    return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_RATIO: price $${currentPrice.toFixed(2)} is ${dir} edge of range (${(deviation * 100).toFixed(0)}% from center, need <${((1 - deployRatioTolerance) * 100).toFixed(0)}%)`, ...base };
   }
 
   return {
@@ -238,14 +256,22 @@ export function checkAutoDeploy(opts: {
 
 // ── IL Calculator ─────────────────────────────────────────────────────────
 
+/**
+ * Calculate impermanent loss for a concentrated liquidity position.
+ * Uses the concentrated LP IL formula: IL% = 2*sqrt(r)/(1+r) - 1
+ * where r = currentPrice / entryPrice.
+ * Returns USD value of IL (negative = loss vs holding).
+ */
 export function calcIL(
   entryPrice: number,
   currentPrice: number,
   initialSol: number,
   initialUsdc: number,
 ): number {
-  const k = initialSol * initialUsdc;
-  const lpValue = 2 * Math.sqrt(k * currentPrice);
+  if (entryPrice <= 0 || currentPrice <= 0) return 0;
   const holdValue = initialSol * currentPrice + initialUsdc;
-  return lpValue - holdValue; // negative = loss vs hold
+  if (holdValue <= 0) return 0;
+  const r = currentPrice / entryPrice;
+  const ilPct = 2 * Math.sqrt(r) / (1 + r) - 1; // always <= 0
+  return ilPct * holdValue; // negative = loss vs hold
 }

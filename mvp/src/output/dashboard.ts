@@ -2506,6 +2506,7 @@ ${NAV_HTML}
       <td style="padding:8px;color:#8b949e;font-size:11px">Force fixed range width regardless of regime. OFF = adaptive.</td>
       <td style="padding:8px;color:#58a6ff;font-size:11px">ON at 1.5%: always tight range. OFF: adapts 1.5-6% by regime.</td>
     </tr>
+    ${field('positionMaxAgeHours', c.positionMaxAgeHours, 0, 'Max position age (h)', 'Rebalance after this many hours to reset IL baseline and collect fees. 0 = disabled.', 'At 24: daily rebalance. At 0: only rebalance on OOR/proximity exit.')}
   </table>
   <div style="color:#8b949e;font-size:11px;margin-bottom:8px">Per-regime parameters (hover <span style="color:#30363d">&#x2753;</span> for description + example):</div>
   <div style="overflow-x:auto">
@@ -2910,19 +2911,28 @@ Upside:   proxToUpper &#x2265; threshold &#x2192; close + enter pullback watch (
 
 <div class="rule-card">
   <h3><span class="rule-num">3</span> Pullback Re-entry</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After an upside exit or OOR above, waits for price to pull back before re-entering. Avoids opening at a local peak. Includes flash crash protection.</p>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">After an upside exit or OOR above, waits for price to pull back before re-entering. Avoids opening at a local peak. Flash crash protection on both upside and downside.</p>
   <div class="logic-box">After upside exit, track peak price.
 
 pullback &#x2265; 2.5% from peak   &#x2192; re-enter immediately
 waited &#x2265; 4 hours            &#x2192; re-enter (timeout)
 
-<b>Flash crash guard:</b>
-If price drops &#x2265; 5% in last ~5 min (10 candles):
+<b>Flash crash guard (upside + downside):</b>
+Detection: max drawdown &#x2265; 5% within the last 10 price readings
+(peak-to-trough, not just endpoint-to-endpoint).
+
+During pullback watch:
   1. Block re-entry for 15 minutes
   2. Reset peak to current price (forget old peak)
   3. Reset 4h timeout from now (full new window)
-This prevents re-entering during a crash AND prevents
-the timeout from firing immediately after cooldown.</div>
+
+During OOR below:
+  1. Close position but do NOT reopen
+  2. Enter cooldown (same 15 min)
+  3. Bot goes IDLE until cooldown expires, then opens fresh
+
+This prevents chasing a falling knife on both upside
+pullbacks and downside free-falls.</div>
   <div class="example-box">
     <div class="example-title">Normal pullback re-entry</div>
     <div class="example-text">OOR above at $85.15. Peak tracks to $86.50, then drops to $84.34.</div>
@@ -3006,7 +3016,7 @@ exists and is earning fees.</div>
     <div class="example-text">Result: all harvested value in USDC, protected from further SOL decline.</div>
     <div class="example-note">In RANGING, harvested SOL stays as SOL (0% conversion). In trending/volatile markets, converting to USDC locks gains and reduces exposure.</div>
   </div>
-  <div class="trigger">Runs: checked every 1 hour against last harvest time</div>
+  <div class="trigger">Runs: checked every 1 hour against last harvest time. Minimum $0.50 pending fees required to justify gas cost. SOL conversion capped to preserve gas reserve.</div>
 </div>
 
 <div class="rule-card">
@@ -3123,9 +3133,10 @@ exists and is earning fees.</div>
   </svg>
   <div style="font-size:12px;color:#c9d1d9;line-height:1.8">
     <div style="margin-bottom:8px"><b style="color:#8b949e">IDLE &#x2192; ACTIVE:</b> Bot opens a position (startup, resume from pause, or first run). Rules 1, 4, 5 calculate range and deploy capital.</div>
-    <div style="margin-bottom:8px"><b style="color:#22c55e">ACTIVE &#x2192; ACTIVE (self-loop):</b> OOR below or Rule 2 downside exit. Bot closes position and immediately reopens at current price (close+reopen). No pullback wait needed for downside moves.</div>
+    <div style="margin-bottom:8px"><b style="color:#22c55e">ACTIVE &#x2192; ACTIVE (self-loop):</b> OOR below or Rule 2 downside exit. Bot closes position, re-checks regime (may update parameters), and reopens at current price. If flash crash detected during OOR below, enters cooldown instead of reopening (free-fall protection).</div>
     <div style="margin-bottom:8px"><b style="color:#eab308">ACTIVE &#x2192; WAITING_PULLBACK:</b> Rule 2 upside exit or OOR above. Price rose past the range. Bot closes position and waits for a pullback before re-entering (Rule 3). Avoids buying at a local top.</div>
     <div style="margin-bottom:8px"><b style="color:#22c55e">WAITING_PULLBACK &#x2192; ACTIVE:</b> Either price pulls back enough (configurable %, default 1%) or timeout expires (configurable, default 15 min). Bot opens new position. If flash crash detected during wait, cooldown enforced (configurable, default 15 min) and peak/timeout reset.</div>
+    <div style="margin-bottom:8px"><b style="color:#a855f7">TX Backoff:</b> If position open/close fails repeatedly (RPC errors), the bot backs off exponentially: 60s &#x2192; 120s &#x2192; 240s &#x2192; 300s cap. Resets on first successful TX.</div>
     <div style="margin-bottom:8px"><b style="color:#8b949e">ACTIVE &#x2192; IDLE:</b> User pauses bot or closes position from dashboard. Position may stay open (paused) or be closed (manual close).</div>
     <div><b style="color:#ef4444">Emergency Stop:</b> From any state &#x2192; IDLE. Closes position if open, saves state, exits process.</div>
   </div>

@@ -70,22 +70,14 @@ describe('Rule 2: calcProximity', () => {
     expect(shouldFireDownside(prox, 0.65, 0, 0)).toBe(true);
   });
 
-  it('shouldFireDownside: IL projection triggers even below proximity threshold', () => {
+  it('shouldFireDownside: does not fire when below proximity threshold', () => {
     const pos = makePosition(140, 160);
     // proxToLower = 0.3 (well below 0.65 threshold)
     const prox = calcProximity(147, pos);
     expect(prox.proxToLower).toBeCloseTo(0.3, 1);
-    // Proximity alone won't trigger
-    expect(shouldFireDownside(prox, 0.65, 0, 0)).toBe(false);
-    // But high dailyILRate with low gasCost does: projectedIL = |5| * 4 = 20 > 0.001
-    expect(shouldFireDownside(prox, 0.65, -5, 0.001)).toBe(true);
-  });
-
-  it('shouldFireDownside: IL projection does NOT trigger when gasCost exceeds projection', () => {
-    const pos = makePosition(140, 160);
-    const prox = calcProximity(147, pos);
-    // projectedIL = |0.001| * 4 = 0.004, gasCost = 1 → 0.004 < 1 → no trigger
-    expect(shouldFireDownside(prox, 0.65, -0.001, 1)).toBe(false);
+    // Proximity alone won't trigger — IL params are ignored (proximity-only logic)
+    expect(shouldFireDownside(prox, 0.65)).toBe(false);
+    expect(shouldFireDownside(prox, 0.65, -5, 0.001)).toBe(false);
   });
 
   it('shouldFireUpside when proxToUpper exceeds threshold', () => {
@@ -297,23 +289,24 @@ describe('Rule 7: checkAutoDeploy', () => {
     expect(result.reason).toContain('DEPLOY_SKIPPED');
   });
 
-  it('skips when price too far from ideal (ratio)', () => {
-    // Ideal = sqrt(83.65 * 84.97) ≈ 84.31, price at 82.0 → deviation ~2.7% > 2%
+  it('skips when price out of range', () => {
+    // Price $82.00 is below range $83.65-$84.97 → DEPLOY_SKIPPED_OOR
     const result = checkAutoDeploy({ ...baseOpts, currentPrice: 82.0 });
+    expect(result.shouldDeploy).toBe(false);
+    expect(result.reason).toContain('DEPLOY_SKIPPED_OOR');
+  });
+
+  it('skips when price near edge of range', () => {
+    // Price $84.96 is within 0.01 of upper bound $84.97 → deviation ~0.99 > (1-0.02)=0.98
+    const result = checkAutoDeploy({ ...baseOpts, currentPrice: 84.96 });
     expect(result.shouldDeploy).toBe(false);
     expect(result.reason).toContain('DEPLOY_SKIPPED_RATIO');
   });
 
-  it('deploys when price within ratio tolerance', () => {
-    // Ideal ≈ 84.31, price at 84.25 → deviation < 0.1%
+  it('deploys when price within range center', () => {
+    // Price at 84.25 is near center of $83.65-$84.97
     const result = checkAutoDeploy({ ...baseOpts, currentPrice: 84.25 });
     expect(result.shouldDeploy).toBe(true);
-  });
-
-  it('reports correct idealPrice (geometric mean)', () => {
-    const result = checkAutoDeploy(baseOpts);
-    const expected = Math.sqrt(83.65 * 84.97);
-    expect(result.idealPrice).toBeCloseTo(expected, 1);
   });
 });
 

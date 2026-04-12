@@ -67,7 +67,7 @@ let liveBotState: BotState = 'IDLE';
 let livePullbackActive = false;
 let livePullbackPeak = 0;
 let livePullbackStart = 0;
-let liveLastHarvestTime = savedState?.last_harvest_time ?? 0;
+let liveLastHarvestTime = savedState?.last_harvest_time || Date.now(); // default to now, not epoch 0
 let liveLastRegimeCheck = 0;
 let liveLastRegimeEvalLog = 0;
 let liveRebalancesThisHour = 0;
@@ -90,6 +90,8 @@ let liveLastHarvestCheck = 0;
 let autoDeployEnabled = true; // will be loaded from DB
 let liveFlashCrashCooldownUntil = 0; // timestamp: block re-entry until this time
 let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detection
+let consecutiveTxFailures = 0; // exponential backoff on repeated TX failures
+let txBackoffUntil = 0; // timestamp: skip position operations until this time
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
@@ -909,8 +911,20 @@ async function runLiveCycle(price: number): Promise<void> {
     }
   } else {
     if (price < currentPos.priceLower) {
-      const reason = `Out of range below: price $${price.toFixed(2)} < lower bound $${currentPos.priceLower.toFixed(2)}. Position is now 100% SOL (all USDC converted). Earning zero fees. Must close and reopen at current price to resume fee earning.`;
-      await liveCloseAndReopen(price, 'OOR_BELOW', reason);
+      const reason = `Out of range below: price $${price.toFixed(2)} < lower bound $${currentPos.priceLower.toFixed(2)}. Position is now 100% SOL (all USDC converted). Earning zero fees.`;
+      // Flash crash check: if price is in free-fall, close but don't reopen — enter cooldown
+      if (isFlashCrash(liveRecentPrices)) {
+        await liveClosePosition(price, 'OOR_BELOW', reason + ' Flash crash detected — closing without reopen, entering cooldown.');
+        liveFlashCrashCooldownUntil = now + runtime.flashCrashWaitMinutes * 60_000;
+        liveBotState = 'IDLE';
+        console.log(JSON.stringify({ level: 'warn', msg: `OOR_BELOW + flash crash: closed position, cooldown ${runtime.flashCrashWaitMinutes}min`, timestamp: now }));
+        insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+          prox_lower: null, prox_upper: null, in_range: 0,
+          decision: 'FLASH_CRASH_COOLDOWN', reasoning: `OOR below with flash crash (>=${runtime.flashCrashPct}% drop in recent candles). Closed position but NOT reopening — waiting ${runtime.flashCrashWaitMinutes}min for stabilization.`,
+          params_json: null });
+        return;
+      }
+      await liveCloseAndReopen(price, 'OOR_BELOW', reason + ' Closing and reopening at current price.');
       return;
     }
     if (price > currentPos.priceUpper) {
@@ -928,11 +942,31 @@ async function runLiveCycle(price: number): Promise<void> {
     }
   }
 
+  // Position max age check — rebalance to reset IL baseline
+  if (runtime.positionMaxAgeHours > 0 && currentPos.entryTime > 0) {
+    const ageHours = (now - currentPos.entryTime) / 3_600_000;
+    if (ageHours >= runtime.positionMaxAgeHours) {
+      const reason = `Position age ${ageHours.toFixed(1)}h >= max ${runtime.positionMaxAgeHours}h. Rebalancing to reset IL baseline and collect accumulated fees.`;
+      console.log(JSON.stringify({ level: 'info', msg: `Position max age reached: ${ageHours.toFixed(1)}h`, timestamp: now }));
+      await liveCloseAndReopen(price, 'POSITION_CLOSED', reason);
+      return;
+    }
+  }
+
   // Fee harvest (check every 1 hour)
   if (now - liveLastHarvestCheck >= 3_600_000) {
     liveLastHarvestCheck = now;
     if (isHarvestDue(liveLastHarvestTime, params, now)) {
       try {
+        // Check if pending fees are worth the gas cost (~$0.10) before harvesting
+        const pendingCheck = await liveExecutor.getPendingFees();
+        const pendingTotal = pendingCheck?.feeTotalUsdc ?? 0;
+        if (pendingTotal < 0.50) {
+          // Not enough fees to justify gas — skip this harvest, check again next hour
+          console.log(JSON.stringify({ level: 'info', msg: `Harvest skipped: pending fees $${pendingTotal.toFixed(4)} < $0.50 minimum`, timestamp: now }));
+          // Don't update liveLastHarvestTime — will re-check next hour
+          return;
+        }
         const daysSinceHarvest = ((now - liveLastHarvestTime) / 86400_000).toFixed(1);
         const fees = await liveExecutor.collectFees();
         liveCumFeesSol += fees.feeSol;
@@ -1041,6 +1075,11 @@ async function runLiveCycle(price: number): Promise<void> {
 
 async function liveOpenPosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
   if (!liveExecutor) return;
+  // Exponential backoff on repeated TX failures
+  if (Date.now() < txBackoffUntil) {
+    console.log(JSON.stringify({ level: 'info', msg: `TX backoff: skipping open, ${((txBackoffUntil - Date.now()) / 1000).toFixed(0)}s remaining (${consecutiveTxFailures} consecutive failures)`, timestamp: Date.now() }));
+    return;
+  }
   const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
   const effectiveParams = runtime.rangeWidthOverride !== null
     ? { ...params, rangeWidthPct: runtime.rangeWidthOverride }
@@ -1064,6 +1103,8 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   try {
     const pos = await liveExecutor.openPosition(range, price, liveRegime, deployUsdc);
     if (!pos) return;
+    consecutiveTxFailures = 0; // reset backoff on success
+    txBackoffUntil = 0;
     liveRebalancesThisHour++;
     dailyRebalanceCount++;
     liveBotState = 'ACTIVE';
@@ -1100,7 +1141,10 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
       params_json: JSON.stringify(params) });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
-    console.log(JSON.stringify({ level: 'error', msg: 'LIVE open position failed', error: errMsg, timestamp: Date.now() }));
+    consecutiveTxFailures++;
+    const backoffSec = Math.min(300, 60 * Math.pow(2, consecutiveTxFailures - 1)); // 60s, 120s, 240s, 300s cap
+    txBackoffUntil = Date.now() + backoffSec * 1000;
+    console.log(JSON.stringify({ level: 'error', msg: 'LIVE open position failed', error: errMsg, failures: consecutiveTxFailures, backoffSec, timestamp: Date.now() }));
   }
 }
 
@@ -1114,6 +1158,8 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     const balancesAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
 
     // Track fees and IL from the enriched close result
+    consecutiveTxFailures = 0; // reset backoff on success
+    txBackoffUntil = 0;
     liveCumFeesSol += result.feeSolCollected;
     liveCumFeesUsdc += result.feeUsdcCollected;
     liveRealizedIl += result.ilAtClose;
@@ -1139,7 +1185,10 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     return true;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
-    console.log(JSON.stringify({ level: 'error', msg: 'LIVE close position failed', error: errMsg, timestamp: Date.now() }));
+    consecutiveTxFailures++;
+    const backoffSec = Math.min(300, 60 * Math.pow(2, consecutiveTxFailures - 1));
+    txBackoffUntil = Date.now() + backoffSec * 1000;
+    console.log(JSON.stringify({ level: 'error', msg: 'LIVE close position failed', error: errMsg, failures: consecutiveTxFailures, backoffSec, timestamp: Date.now() }));
     return false;
   }
 }
@@ -1151,6 +1200,23 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
     return;
   }
   await new Promise(r => setTimeout(r, 2000));
+
+  // Re-check regime before reopening — conditions may have changed during the close
+  const mktSignals = runtime.useEnhancedRegime ? marketData.getSignals() : null;
+  const freshRegime = detectRegimeEnhanced(getDailyCloses(db, runtime.regimeWindowDays), runtime.trendThreshold, mktSignals, {
+    vol1hExtremeThreshold: runtime.vol1hExtremeThreshold, vol4hExtremeThreshold: runtime.vol4hExtremeThreshold,
+    volumeSpikeMultiple: runtime.volumeSpikeMultiple, trendDeltaThreshold: runtime.trendDeltaThreshold,
+    btcCorrelationThreshold: runtime.btcCorrelationThreshold, fearGreedExtremeLow: runtime.fearGreedExtremeLow,
+    fearGreedExtremeHigh: runtime.fearGreedExtremeHigh,
+  });
+  if (freshRegime.regime !== liveRegime) {
+    const oldRegime = liveRegime;
+    liveRegime = freshRegime.regime;
+    console.log(JSON.stringify({ level: 'info', msg: `Regime re-check on reopen: ${oldRegime} → ${freshRegime.regime}`, override: freshRegime.overrideReason ?? 'none', timestamp: Date.now() }));
+    insertRegimeChange(db, { timestamp: Date.now(), old_regime: oldRegime, new_regime: freshRegime.regime, price, dir_ratio: freshRegime.dirRatio, realised_vol: freshRegime.realisedVol, price_count: freshRegime.priceCount });
+    liveLastRegimeCheck = Date.now(); // reset timer since we just checked
+  }
+
   await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after ${eventType}. Previous position closed due to: ${triggerReason ?? eventType}.`);
 
   // Save position to DB immediately — prevents orphan recovery from killing
