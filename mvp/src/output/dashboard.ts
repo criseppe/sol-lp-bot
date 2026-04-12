@@ -408,7 +408,7 @@ export function startDashboard(port: number): DashboardServer {
     res.json({ investors, totalInvested, totalPortfolio, totalFees });
   });
 
-  app.post('/api/investors', (req, res) => {
+  app.post('/api/investors', express.json(), (req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
     const { name, amount, date } = req.body;
     if (!name || !amount || !date) { res.status(400).json({ error: 'name, amount, date required' }); return; }
