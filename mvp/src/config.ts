@@ -56,7 +56,7 @@ export const runtime = {
   idleRebalanceEnabled: true,
   idleRebalanceMinUsdc: 100,                 // min idle value to trigger ($)
   idleRebalanceSolKeep: 0.15,                // always keep this much SOL for gas
-  idleRebalanceDeviationPct: 0.20,           // only rebalance if >20% off target
+  idleRebalanceDeviationPct: 0.15,           // only rebalance if >15% off target
   // Target idle SOL % per regime (rest is USDC)
   idleTargetSolPctRanging: 0.50,             // 50% SOL — balanced for deposits
   idleTargetSolPctBullish: 0.60,             // 60% SOL — ride the upside
