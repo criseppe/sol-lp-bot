@@ -414,6 +414,138 @@ export function startDashboard(port: number): DashboardServer {
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
 
+  // Projection page
+  app.get('/projection', async (_req, res) => {
+    const { renderProjectionPageHtml } = await import('./projection-page.js');
+    res.type('html').send(renderProjectionPageHtml());
+  });
+
+  // Projection data API
+  app.get('/api/projection-data', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const snaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range, regime, position_value, sol_balance, usdc_balance, position_sol, position_usdc, total_with_position FROM live_snapshots ORDER BY timestamp ASC').all() as any[];
+      const events = dbRef.prepare('SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, sol_before, usdc_before, sol_after, usdc_after, regime FROM rebalance_events ORDER BY timestamp ASC').all() as any[];
+      const summaries = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date ASC').all() as any[];
+      const state = dbRef.prepare('SELECT * FROM bot_state WHERE id=1').get() as any;
+
+      if (snaps.length < 10) { res.json({ error: 'Not enough data yet', snaps: snaps.length }); return; }
+
+      const TZ = 'Europe/Berlin';
+      const totalHours = (snaps[snaps.length-1].timestamp - snaps[0].timestamp) / 3600000;
+
+      // Fee rate by regime
+      const regimeFees: Record<string, { fees: number; hours: number; inRange: number; total: number }> = {};
+      for (let i = 1; i < snaps.length; i++) {
+        const prev = snaps[i-1], curr = snaps[i];
+        const r = curr.regime || 'RANGING';
+        if (!regimeFees[r]) regimeFees[r] = { fees: 0, hours: 0, inRange: 0, total: 0 };
+        const elapsed = (curr.timestamp - prev.timestamp) / 3600000;
+        const pPrev = (prev.pending_fees_sol||0)*prev.price + (prev.pending_fees_usdc||0);
+        const pCurr = (curr.pending_fees_sol||0)*curr.price + (curr.pending_fees_usdc||0);
+        const prevT = (prev.cum_fees_sol||0)*prev.price + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
+        const currT = (curr.cum_fees_sol||0)*curr.price + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
+        const delta = currT - prevT;
+        if (delta > 0 && delta < 50) regimeFees[r].fees += delta;
+        regimeFees[r].hours += elapsed;
+        regimeFees[r].total++;
+        if (curr.in_range) regimeFees[r].inRange++;
+      }
+
+      // Fee rate by day-of-week
+      const dowFees: Record<string, { fees: number; hours: number }> = {};
+      for (let i = 1; i < snaps.length; i++) {
+        const curr = snaps[i], prev = snaps[i-1];
+        const day = new Date(curr.timestamp).toLocaleDateString('en-US', { timeZone: TZ, weekday: 'short' });
+        if (!dowFees[day]) dowFees[day] = { fees: 0, hours: 0 };
+        const elapsed = (curr.timestamp - prev.timestamp) / 3600000;
+        const pPrev = (prev.pending_fees_sol||0)*prev.price + (prev.pending_fees_usdc||0);
+        const pCurr = (curr.pending_fees_sol||0)*curr.price + (curr.pending_fees_usdc||0);
+        const prevT = (prev.cum_fees_sol||0)*prev.price + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
+        const currT = (curr.cum_fees_sol||0)*curr.price + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
+        const delta = currT - prevT;
+        if (delta > 0 && delta < 50) dowFees[day].fees += delta;
+        dowFees[day].hours += elapsed;
+      }
+
+      // Positions
+      const positions: any[] = [];
+      let lastOpen: any = null;
+      events.forEach((e: any) => {
+        if (e.event_type === 'POSITION_OPENED') {
+          const capB = (e.sol_before||0)*e.price + (e.usdc_before||0);
+          const capA = (e.sol_after||0)*e.price + (e.usdc_after||0);
+          lastOpen = { ts: e.timestamp, capital: Math.max(0, capB - capA) };
+        } else if (['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type) && lastOpen) {
+          positions.push({
+            duration: (e.timestamp - lastOpen.ts) / 60000,
+            capital: lastOpen.capital,
+            fees: (e.fee_sol||0)*e.price + (e.fee_usdc||0),
+            il: e.il_at_close || 0,
+          });
+          lastOpen = null;
+        }
+      });
+
+      // Costs
+      const totalGasUsdc = (state.cum_gas_lamports||0) / 1e9 * snaps[snaps.length-1].price;
+      const totalRebalances = positions.length;
+      const costPerRebalance = totalRebalances > 0 ? totalGasUsdc / totalRebalances : 0.01;
+      const rebalancesPerDay = totalHours > 0 ? totalRebalances / (totalHours / 24) : 10;
+      const totalIL = positions.reduce((s: number, p: any) => s + Math.abs(p.il), 0);
+      const ilPerRebalance = totalRebalances > 0 ? totalIL / totalRebalances : 0.01;
+      const swapCount = events.filter((e: any) => (e.note||'').includes('SWAP')).length;
+
+      // In-range
+      const inRangePct = snaps.filter((s: any) => s.in_range).length / snaps.length * 100;
+
+      // Regime distribution
+      const regimeDist: Record<string, number> = {};
+      Object.entries(regimeFees).forEach(([r, d]) => { regimeDist[r] = d.hours / totalHours; });
+
+      // Current capital
+      const latestSnap = snaps[snaps.length-1];
+      const currentCapital = latestSnap.total_with_position || (latestSnap.sol_balance * latestSnap.price + latestSnap.usdc_balance);
+
+      // Weekday vs weekend rate
+      const weekdayDays = ['Mon','Tue','Wed','Thu','Fri'];
+      const weekendDays = ['Sat','Sun'];
+      let wdFees = 0, wdHours = 0, weFees = 0, weHours = 0;
+      Object.entries(dowFees).forEach(([day, d]) => {
+        if (weekdayDays.includes(day)) { wdFees += d.fees; wdHours += d.hours; }
+        else { weFees += d.fees; weHours += d.hours; }
+      });
+      const weekdayRate = wdHours > 0 ? wdFees / wdHours : 0;
+      const weekendRate = weHours > 0 ? weFees / weHours : 0;
+      const blendedRate = totalHours > 0 ? (summaries.reduce((s: number, d: any) => s + (d.fees_earned_usdc || 0), 0)) / (totalHours / 24) / 24 : 1;
+
+      // Daily summaries for trend
+      const dailyFeesArr = summaries.map((s: any) => ({ date: s.date, fees: s.fees_earned_usdc || 0, total: s.total_usdc, regime: s.regime }));
+
+      res.json({
+        totalHours,
+        currentCapital: Math.round(currentCapital),
+        currentPrice: latestSnap.price,
+        inRangePct: Math.round(inRangePct * 10) / 10,
+        regimeFeeRates: Object.fromEntries(Object.entries(regimeFees).map(([r, d]) => [r, { rate: d.hours > 0 ? d.fees / d.hours : 0, hours: d.hours, irPct: d.total > 0 ? d.inRange / d.total * 100 : 0 }])),
+        regimeDistribution: regimeDist,
+        weekdayRate,
+        weekendRate,
+        blendedRate,
+        rebalancesPerDay: Math.round(rebalancesPerDay * 10) / 10,
+        costPerRebalance: Math.round(costPerRebalance * 10000) / 10000,
+        ilPerRebalance: Math.round(ilPerRebalance * 10000) / 10000,
+        avgPositionDurationMin: positions.length > 0 ? Math.round(positions.reduce((s: number, p: any) => s + p.duration, 0) / positions.length) : 60,
+        totalPositions: positions.length,
+        totalGasUsdc: Math.round(totalGasUsdc * 10000) / 10000,
+        swapCount,
+        dailyFees: dailyFeesArr,
+        dataStartDate: new Date(snaps[0].timestamp).toLocaleDateString('en-CA', { timeZone: TZ }),
+        dataEndDate: new Date(snaps[snaps.length-1].timestamp).toLocaleDateString('en-CA', { timeZone: TZ }),
+      });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+
   // Analysis agent page + API
   app.get('/analysis', (_req, res) => {
     if (!dbRef) { res.type('html').send('<h1>DB not ready</h1>'); return; }
@@ -968,6 +1100,7 @@ const NAV_HTML = `
   <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
   <a href="/analytics" id="nav-analytics">Analytics</a>
+  <a href="/projection" id="nav-projection">Projection</a>
   <a href="/analysis" id="nav-analysis">Agent</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
