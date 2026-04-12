@@ -228,10 +228,10 @@ describe('Rule 7: checkAutoDeploy', () => {
     expect(result.reason).toBe('DEPLOY_SKIPPED_DISABLED');
   });
 
-  it('blocks in BEARISH_TREND regime', () => {
+  it('allows in BEARISH_TREND regime (deploy cap limits exposure)', () => {
     const result = checkAutoDeploy({ ...baseOpts, regime: 'BEARISH_TREND', params: REGIME_PARAMS.BEARISH_TREND });
-    expect(result.shouldDeploy).toBe(false);
-    expect(result.reason).toContain('DEPLOY_SKIPPED_REGIME');
+    // BEARISH allows auto-deploy — the deployPct cap (75%) limits exposure
+    expect(result.shouldDeploy).toBe(true);
   });
 
   it('blocks in EXTREME regime', () => {

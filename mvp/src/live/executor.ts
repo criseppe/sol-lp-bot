@@ -159,12 +159,13 @@ export class LiveExecutor {
 
     // Pre-open swap: if wallet is heavily imbalanced (one side < $5), swap to match
     // the ideal ratio for the LP range. This prevents "no valid quote" after downside exits.
+    // Cap the swap to the deploy target so we don't swap more than needed.
     const ratioQuote = increaseLiquidityQuoteByInputToken(
       solMint, new Decimal(1), range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
-    const totalValueUsdc = solAvailable * currentPrice + usdcAvailable;
-    const idealSol = totalValueUsdc / (currentPrice + usdcPer1Sol);
+    const swapTargetUsdc = usdcToDeposit > 0 ? Math.min(solAvailable * currentPrice + usdcAvailable, usdcToDeposit) : (solAvailable * currentPrice + usdcAvailable);
+    const idealSol = swapTargetUsdc / (currentPrice + usdcPer1Sol);
     const idealUsdc = idealSol * usdcPer1Sol;
 
     if (usdcAvailable < 5 && solAvailable > 0.1 && idealUsdc > 10) {
@@ -191,6 +192,20 @@ export class LiveExecutor {
         solAvailable = Math.max(0, solBal - getSolReserve());
         usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
       }
+    }
+
+    // Cap available capital at usdcToDeposit (regime deploy cap)
+    // Without this, the executor ignores the deploy % and deposits everything available.
+    const availableValueUsdc = solAvailable * currentPrice + usdcAvailable;
+    if (usdcToDeposit > 0 && availableValueUsdc > usdcToDeposit) {
+      const capRatio = usdcToDeposit / availableValueUsdc;
+      solAvailable = solAvailable * capRatio;
+      usdcAvailable = usdcAvailable * capRatio;
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: `Deploy cap applied: available $${availableValueUsdc.toFixed(2)} capped to $${usdcToDeposit.toFixed(2)} (${(capRatio * 100).toFixed(0)}%). SOL: ${solAvailable.toFixed(4)}, USDC: ${usdcAvailable.toFixed(2)}.`,
+        timestamp: Date.now(),
+      }));
     }
 
     console.log(JSON.stringify({
