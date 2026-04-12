@@ -139,6 +139,22 @@ export function detectRegimeEnhanced(
   let overrideReason: string | null = null;
   let confidence = 0;
 
+  // Step 1b: Refine base EXTREME using vol4h (42 data points) instead of daily close vol (2-3 points)
+  // vol4h is statistically more robust — use it to correct false EXTREME or detect missed EXTREME
+  if (vol4h != null) {
+    if (base.regime === 'EXTREME' && vol4h < config.vol4hExtremeThreshold * 0.8) {
+      // Base said EXTREME from sparse daily data, but 4h vol disagrees — downgrade to trend or ranging
+      const prices_up = base.priceCount >= 2 && base.dirRatio > trendThreshold;
+      regime = prices_up ? (solDelta24h != null && solDelta24h > 0 ? 'BULLISH_TREND' : 'BEARISH_TREND') : 'RANGING';
+      overrideReason = `Base EXTREME downgraded to ${regime}: vol4h ${vol4h.toFixed(4)} < ${(config.vol4hExtremeThreshold * 0.8).toFixed(4)} — daily close vol was misleading with only ${base.priceCount} data points`;
+    } else if (base.regime !== 'EXTREME' && vol4h > config.vol4hExtremeThreshold) {
+      // 4h vol says EXTREME but base missed it (sparse daily data)
+      regime = 'EXTREME';
+      overrideReason = `vol4h ${vol4h.toFixed(4)} > ${config.vol4hExtremeThreshold} threshold (base missed with ${base.priceCount} daily closes)`;
+      confidence++;
+    }
+  }
+
   // Step 2: EXTREME override — short-term vol spike
   if (vol1h != null && vol1h > config.vol1hExtremeThreshold) {
     if (regime !== 'EXTREME') {
