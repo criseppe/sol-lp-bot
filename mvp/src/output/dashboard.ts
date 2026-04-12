@@ -8,7 +8,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
 
-const TZ = 'Europe/Rome';
+const TZ = 'Europe/Berlin';
 
 interface OnChainTx {
   signature: string;

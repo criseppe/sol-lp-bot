@@ -1179,7 +1179,7 @@ let prevPositionSol = -1;
 let prevPositionUsdc = -1;
 
 function checkAndWriteDailyPnl(currentPrice: number) {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' });
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
   const totalValue = currentLiveData?.totalValueWithPosition ?? 0;
   const walletValue = currentLiveData?.totalValueUsdc ?? 0;
   const positionValue = currentLiveData?.positionValueUsdc ?? 0;
