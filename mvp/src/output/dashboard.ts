@@ -95,6 +95,8 @@ export interface LiveData {
   txCount: number;
   estDailyFeesUsdc: number;
   estAprPct: number;
+  actual24hFeesUsdc: number;
+  actual24hAprPct: number;
   regime: string;
   botState: BotState;
   liveEvents: RebalanceEvent[];
@@ -1239,8 +1241,10 @@ ${NAV_HTML}
     <div class="row"><span class="label">USDC in Position</span><span class="value">${fmt(live.positionUsdc, 6)}</span></div>
     <div class="row"><span class="label">Position Value</span><span class="value" style="color:#58a6ff">$${fmt(live.positionValueUsdc)}</span></div>
     <div class="row"><span class="label">Entry Price</span><span class="value">$${fmt(live.entryPrice ?? 0)}</span></div>
-    <div class="row"><span class="label">Est. Yield 24h</span><span class="value" style="color:#eab308">$${fmt(live.estDailyFeesUsdc, 4)}</span></div>
-    <div class="row"><span class="label">Est. APR</span><span class="value" style="color:#eab308">${fmt(live.estAprPct, 1)}%</span></div>
+    <div class="row"><span class="label">Actual Yield 24h</span><span class="value" style="color:#22c55e">$${fmt(live.actual24hFeesUsdc, 4)}</span></div>
+    <div class="row"><span class="label">Actual APR</span><span class="value" style="color:#22c55e">${fmt(live.actual24hAprPct, 1)}%</span></div>
+    <div class="row"><span class="label">Est. Max Yield 24h</span><span class="value" style="color:#8b949e">$${fmt(live.estDailyFeesUsdc, 4)} <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
+    <div class="row"><span class="label">Est. Max APR</span><span class="value" style="color:#8b949e">${fmt(live.estAprPct, 1)}% <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
     ${(() => {
       const idleSol = Math.max(0, live.solBalance - runtime.solReserve);
       const idleUsdcRaw = Math.max(0, live.usdcBalance - runtime.usdcReserve);
@@ -3669,10 +3673,10 @@ async function refresh() {
     document.getElementById('pf').textContent='$'+fmt(live.pendingFeesTotal||0);
     document.getElementById('hf').textContent='$'+fmt(fees-(live.pendingFeesTotal||0));
     document.getElementById('tf').textContent='$'+fmt(fees);
-    const daily = live.estDailyFeesUsdc||0;
-    document.getElementById('df').textContent='$'+fmt(daily)+'/d';
-    document.getElementById('fh').textContent='$'+fmt(daily/24,4)+'/h';
-    document.getElementById('ap').textContent=fmt(live.estAprPct||0,1)+'%';
+    const actual = live.actual24hFeesUsdc||0;
+    document.getElementById('df').textContent='$'+fmt(actual)+'/d';
+    document.getElementById('fh').textContent='$'+fmt(actual/24,4)+'/h';
+    document.getElementById('ap').textContent=fmt(live.actual24hAprPct||0,1)+'%';
 
     // Battle
     document.getElementById('il').textContent='-$'+fmt(Math.abs(totalIL));
