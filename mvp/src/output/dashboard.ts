@@ -2349,8 +2349,86 @@ ${(() => {
         <div><span style="color:#8b949e">Fear & Greed</span><br><span style="font-size:16px;font-weight:bold;color:\${fgCol(s.fearGreedIndex)}">\${s.fearGreedIndex != null ? s.fearGreedIndex + ' (' + (s.fearGreedLabel || '') + ')' : 'n/a'}</span></div>
       </div>
       <div style="margin-top:8px;font-size:10px;color:#8b949e">Updated \${age}m ago\${s.errors && s.errors.length > 0 ? ' · Errors: ' + s.errors.join(', ') : ''}</div>
+      <div id="mkt-commentary" style="margin-top:12px;padding:10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:12px;line-height:1.6;color:#c9d1d9"></div>
     \`;
+
+    // Build commentary
+    var c = document.getElementById('mkt-commentary');
+    if (!c) return;
+    var parts = [];
+
+    // Volatility
+    if (s.vol1h != null && s.vol4h != null) {
+      if (s.vol1h > 0.06) parts.push('⚡ <b style="color:#ef4444">High short-term volatility</b> — 1h vol ' + fmt(s.vol1h, 4) + ' exceeds the 0.06 EXTREME threshold. Market is very active. Expect frequent position exits and rebalancing. Fee income should be high but IL risk is elevated.');
+      else if (s.vol1h > 0.04) parts.push('🟡 <b style="color:#eab308">Elevated volatility</b> — 1h vol ' + fmt(s.vol1h, 4) + ' approaching the 0.06 threshold. Market is active but not extreme. Good fee conditions with moderate risk.');
+      else if (s.vol4h > 0.03) parts.push('📊 <b>Moderate medium-term volatility</b> — 4h vol ' + fmt(s.vol4h, 4) + ' suggests sustained price movement over the past week. Positions may need wider ranges.');
+      else parts.push('😴 <b style="color:#22c55e">Low volatility</b> — both 1h (' + fmt(s.vol1h, 4) + ') and 4h (' + fmt(s.vol4h, 4) + ') vol are calm. Market is quiet — fee income will be low but positions are stable. Good conditions for tight ranges.');
+    }
+
+    // SOL direction
+    if (s.solDelta24h != null) {
+      var solD = Number(s.solDelta24h);
+      if (solD < -4) parts.push('📉 <b style="color:#ef4444">SOL in strong downtrend</b> (' + pct(solD) + ' in 24h). The bot should be in BEARISH regime with wider range and fast fee harvesting. Idle capital converting to USDC for protection.');
+      else if (solD < -2) parts.push('📉 <b style="color:#eab308">SOL drifting lower</b> (' + pct(solD) + ' in 24h). Mild bearish pressure — current position may drift toward lower bound. Watch proximity.');
+      else if (solD > 4) parts.push('📈 <b style="color:#22c55e">SOL in strong uptrend</b> (' + pct(solD) + ' in 24h). High trading volume generating fees. Position may need upward rebalancing.');
+      else if (solD > 2) parts.push('📈 <b style="color:#22c55e">SOL pushing higher</b> (' + pct(solD) + ' in 24h). Moderate bullish momentum — good fee conditions with upward price pressure.');
+      else parts.push('↔️ <b>SOL flat</b> (' + pct(solD) + ' in 24h). Ranging market — fee income depends on trading volume, not price direction.');
+    }
+
+    // BTC correlation
+    if (s.btcDelta24h != null && s.solDelta24h != null) {
+      var btcD = Number(s.btcDelta24h);
+      var solD2 = Number(s.solDelta24h);
+      if (Math.abs(btcD) > 3) {
+        var same = (btcD > 0) === (solD2 > 0);
+        if (same) parts.push('🔗 <b>BTC macro move confirmed</b> — BTC ' + pct(btcD) + ' in same direction as SOL. This is a crypto-wide move, not SOL-specific. Higher conviction in the current trend.');
+        else parts.push('🔀 <b>SOL diverging from BTC</b> — BTC ' + pct(btcD) + ' but SOL going the other way. SOL-specific dynamics at play. Be cautious — divergences can reverse.');
+      } else if (Math.abs(btcD) > 1) {
+        parts.push('🪙 BTC ' + pct(btcD) + ' — moderate move, not a macro event (needs >±3% to trigger). SOL broadly following crypto market.');
+      }
+    }
+
+    // Volume
+    if (s.volumeRatio4h != null) {
+      var vr = Number(s.volumeRatio4h);
+      if (vr > 3) parts.push('🔊 <b style="color:#ef4444">Volume spike!</b> ' + fmt(vr, 1) + 'x above 7-day average. High trading activity = high fee potential. Volume spikes often accompany trending moves.');
+      else if (vr > 2) parts.push('📊 <b style="color:#eab308">Elevated volume</b> — ' + fmt(vr, 1) + 'x above average. Above-normal trading activity supporting fee generation.');
+      else if (vr < 0.5) parts.push('🔇 <b>Very low volume</b> — ' + fmt(vr, 1) + 'x (half of average). Fee income will be significantly reduced. Typical for weekends or low-interest periods.');
+      else if (vr < 0.8) parts.push('📉 <b>Below-average volume</b> — ' + fmt(vr, 1) + 'x of 7-day average. Fee income lower than usual.');
+      else parts.push('📊 Volume is near average (' + fmt(vr, 1) + 'x). Normal trading conditions.');
+    }
+
+    // Fear & Greed
+    if (s.fearGreedIndex != null) {
+      var fg = Number(s.fearGreedIndex);
+      if (fg < 15) parts.push('😱 <b style="color:#ef4444">Extreme fear</b> (F&G ' + fg + '/100). Markets are panicking. Historical pattern: extreme fear often precedes bottoms, but can persist for days. Bot should be in defensive mode — USDC-heavy wallet, fast harvesting.');
+      else if (fg < 25) parts.push('😨 <b style="color:#ef4444">Strong fear</b> (F&G ' + fg + '/100). Bearish sentiment dominates. Traders are selling. SOL likely under pressure. Defensive positioning is correct.');
+      else if (fg < 40) parts.push('😟 <b style="color:#eab308">Fear</b> (F&G ' + fg + '/100). Cautious market. Not panic but not confident. Watch for sentiment shift.');
+      else if (fg > 85) parts.push('🤑 <b style="color:#22c55e">Extreme greed</b> (F&G ' + fg + '/100). Euphoria in the market. Historically signals a top. Consider tightening stops.');
+      else if (fg > 75) parts.push('😊 <b style="color:#22c55e">Strong greed</b> (F&G ' + fg + '/100). Bullish sentiment. Market is confident. Good for fee generation but watch for reversals.');
+      else if (fg > 60) parts.push('🙂 <b>Moderate optimism</b> (F&G ' + fg + '/100). Healthy sentiment. Market is neither fearful nor euphoric.');
+      else parts.push('😐 <b>Neutral sentiment</b> (F&G ' + fg + '/100). Market is balanced — no strong directional bias from sentiment.');
+    }
+
+    // Overall assessment
+    var overall = '';
+    var vol = s.vol1h != null ? Number(s.vol1h) : 0;
+    var sol = s.solDelta24h != null ? Number(s.solDelta24h) : 0;
+    var fg2 = s.fearGreedIndex != null ? Number(s.fearGreedIndex) : 50;
+    var vr2 = s.volumeRatio4h != null ? Number(s.volumeRatio4h) : 1;
+
+    if (vol > 0.06 && Math.abs(sol) > 4) overall = '🔴 <b style="color:#ef4444">DANGER</b> — High volatility + strong directional move. Maximum defensive positioning. Expect frequent rebalancing and IL.';
+    else if (fg2 < 20 && sol < -2) overall = '🟠 <b style="color:#f97316">CAUTIOUS</b> — Fear + SOL dropping. Bearish regime is protecting capital. Harvest frequently, keep USDC-heavy.';
+    else if (vol < 0.003 && vr2 < 0.7 && Math.abs(sol) < 1) overall = '💤 <b style="color:#8b949e">QUIET</b> — Very low volatility + low volume + flat price. Minimal fee income. Position is safe but not earning much. Wait for volume to return.';
+    else if (vol < 0.005 && Math.abs(sol) < 2) overall = '🟢 <b style="color:#22c55e">STABLE</b> — Low vol, mild price movement. Good for steady fee accumulation. Position should stay in range.';
+    else if (sol > 3 && vr2 > 1.5) overall = '🟢 <b style="color:#22c55e">BULLISH MOMENTUM</b> — SOL rising with above-average volume. Strong fee conditions. Watch for regime shift to BULLISH if it persists.';
+    else overall = '🔵 <b style="color:#58a6ff">NORMAL</b> — Mixed signals, no extreme conditions. Bot is operating in standard mode.';
+
+    c.innerHTML = '<div style="margin-bottom:10px;padding:8px;background:#161b2280;border-radius:4px;font-size:13px">' + overall + '</div>' + parts.map(function(p) { return '<div style="margin-bottom:6px">' + p + '</div>'; }).join('');
   }).catch(() => {});
+
+  // No auto-refresh for insights page (server-rendered, would need full rebuild)
+  // User can refresh manually. Telegram reports every 20min with live commentary.
 })();
 </script>
 
