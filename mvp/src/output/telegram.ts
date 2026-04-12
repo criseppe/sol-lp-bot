@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
-import { getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents } from '../db/sqlite.js';
+import { getLiveSnapshots, getLiveInRangePct, getRebalanceEvents, getRegimeHistory, getBotState } from '../db/sqlite.js';
 import type { LiveData } from './dashboard.js';
+import type { MarketSignals } from '../data/market.js';
 
 export interface TelegramConfig {
   botToken: string;
@@ -12,12 +13,13 @@ export function startTelegramReporter(
   config: TelegramConfig,
   db: Database.Database,
   getLiveData: () => LiveData | null,
+  getMarketSignals: () => MarketSignals | null,
 ): { stop: () => void; sendNow: () => Promise<void> } {
   let timer: ReturnType<typeof setTimeout>;
 
   const send = async () => {
     try {
-      const text = buildReport(db, getLiveData);
+      const text = buildReport(db, getLiveData, getMarketSignals);
       await sendTelegram(config.botToken, config.chatId, text);
       console.log(JSON.stringify({ level: 'info', msg: 'telegram report sent', timestamp: Date.now() }));
     } catch (err) {
@@ -31,8 +33,8 @@ export function startTelegramReporter(
     }, delayMs);
   };
 
-  // First report after 3 min
-  scheduleNext(3 * 60_000);
+  // First report after 2 min
+  scheduleNext(2 * 60_000);
   console.log(JSON.stringify({ level: 'info', msg: `telegram reporter started, every ${config.intervalMs / 60_000}min`, timestamp: Date.now() }));
 
   return { stop: () => clearTimeout(timer), sendNow: send };
@@ -51,153 +53,153 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
   }
 }
 
-function fmt(n: number, d = 2): string {
-  return Math.abs(n).toFixed(d);
-}
+function fmt(n: number, d = 2): string { return n.toFixed(d); }
+function sign(n: number): string { return n >= 0 ? '+' : ''; }
 
-function sign(n: number): string {
-  return n >= 0 ? '+' : '-';
-}
-
-function buildReport(db: Database.Database, getLiveData: () => LiveData | null): string {
+function buildReport(
+  db: Database.Database,
+  getLiveData: () => LiveData | null,
+  getMarketSignals: () => MarketSignals | null,
+): string {
   const now = Date.now();
   const live = getLiveData();
+  const mkt = getMarketSignals();
+  const state = getBotState(db);
   const snapshots1h = getLiveSnapshots(db, 1);
   const inRange1h = getLiveInRangePct(db, 1);
   const inRange24h = getLiveInRangePct(db, 24);
-  const inRangeAll = getLiveInRangePct(db, 9999);
-  const decisions = getDecisionLogs(db, 20);
   const regimeHist = getRegimeHistory(db, 5);
-  const recentEvents = getRebalanceEvents(db, 10);
+  const events = getRebalanceEvents(db, 20);
+  const lastHourEvents = events.filter(e => e.timestamp > now - 3_600_000);
 
-  const lastHourEvents = recentEvents.filter(e => e.timestamp > now - 3600_000);
-  // Count only real rebalances (not regime evals, restores, price updates)
-  const realRebalances = lastHourEvents.filter(e => ['POSITION_OPENED', 'T1_DOWNSIDE', 'T1_UPSIDE', 'OOR_BELOW', 'OOR_ABOVE', 'PULLBACK_REENTRY', 'PULLBACK_TIMEOUT'].includes(e.eventType));
-
-  let valueChange1h = 0;
+  // Value change 10min
+  let change10m = 0;
   if (snapshots1h.length >= 2) {
-    const first = (snapshots1h[0] as any).total_with_position ?? snapshots1h[0].total_value_usdc;
-    const last = (snapshots1h[snapshots1h.length - 1] as any).total_with_position ?? snapshots1h[snapshots1h.length - 1].total_value_usdc;
-    valueChange1h = last - first;
+    const recent = snapshots1h[snapshots1h.length - 1];
+    const tenMinAgo = snapshots1h.find((_, i) => i >= snapshots1h.length - 11);
+    if (tenMinAgo) change10m = (recent.total_with_position ?? recent.total_value_usdc) - (tenMinAgo.total_with_position ?? tenMinAgo.total_value_usdc);
   }
-
-  // Issues
-  const issues: string[] = [];
-  if (live?.botState === 'HALTED') issues.push('🔴 BOT HALTED — circuit breaker triggered');
-  if (inRange1h < 30) issues.push(`🟡 Low in-range: ${fmt(inRange1h, 0)}% (1h)`);
-  if (live && !live.positionMint) issues.push('🟡 No open position');
-  if (realRebalances.length > 5) issues.push(`🟡 High activity: ${realRebalances.length} rebalances/hour`);
-  if (live && live.ilUsdc < -5) issues.push(`🔴 IL: -$${fmt(Math.abs(live.ilUsdc))}`);
 
   const lines: string[] = [];
 
-  // Header
-  lines.push(`<b>🤖 SOL/USDC LP Bot Report</b>`);
-  lines.push(`${new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}`);
+  // ── Header ──
+  const alertIcon = !live ? '🔴' : live.botState === 'HALTED' ? '🔴' : !live.positionMint ? '🟡' : '🟢';
+  lines.push(`${alertIcon} <b>LP Bot</b> | ${live?.botState ?? 'UNKNOWN'} | ${live?.regime ?? '--'}`);
   lines.push('');
 
-  // Issues
-  if (issues.length > 0) {
-    lines.push(`<b>⚠️ Issues (${issues.length})</b>`);
-    issues.forEach(i => lines.push(i));
-    lines.push('');
-  } else {
-    lines.push('✅ <b>All clear</b> — no issues');
+  // ── Alerts ──
+  const alerts: string[] = [];
+  if (live?.botState === 'HALTED') alerts.push('BOT HALTED — circuit breaker');
+  if (live && !live.positionMint) alerts.push('No open position');
+  if (inRange1h < 30) alerts.push(`Low in-range: ${fmt(inRange1h, 0)}%`);
+  if (live && live.ilUsdc < -5) alerts.push(`IL: -$${fmt(Math.abs(live.ilUsdc))}`);
+
+  if (alerts.length > 0) {
+    alerts.forEach(a => lines.push(`⚠️ ${a}`));
     lines.push('');
   }
 
-  // Portfolio
-  lines.push('<b>💰 Portfolio</b>');
+  // ── Price & Portfolio ──
   if (live) {
-    lines.push(`Total: <b>$${fmt(live.totalValueWithPosition)}</b>`);
-    lines.push(`Wallet: ${fmt(live.solBalance, 4)} SOL + ${fmt(live.usdcBalance, 2)} USDC ($${fmt(live.totalValueUsdc)})`);
-    if (live.positionMint) {
-      lines.push(`Position: ${fmt(live.positionSol, 4)} SOL + ${fmt(live.positionUsdc, 2)} USDC ($${fmt(live.positionValueUsdc)})`);
-    }
-    lines.push(`SOL Price: $${fmt(live.solPrice)}`);
-    lines.push(`1h change: ${sign(valueChange1h)}$${fmt(Math.abs(valueChange1h))}`);
-  } else {
-    lines.push('No live data yet');
+    lines.push(`<b>SOL</b> $${fmt(live.solPrice)} (${sign(change10m)}$${fmt(Math.abs(change10m))} 10m)`);
+    lines.push(`<b>Total</b> $${fmt(live.totalValueWithPosition)} | Pos $${fmt(live.positionValueUsdc)} | Wallet $${fmt(live.totalValueUsdc)}`);
+    lines.push('');
   }
-  lines.push('');
 
-  // Position
-  lines.push('<b>📊 Position</b>');
+  // ── Position ──
   if (live?.positionRange) {
-    lines.push(`Range: $${fmt(live.positionRange.lower)} — $${fmt(live.positionRange.upper)}`);
-    lines.push(`Entry: $${fmt(live.entryPrice ?? 0)} → Now: $${fmt(live.solPrice)}`);
-    const pctChange = live.entryPrice ? ((live.solPrice - live.entryPrice) / live.entryPrice * 100) : 0;
-    lines.push(`Price change: ${sign(pctChange)}${fmt(Math.abs(pctChange), 2)}%`);
-    lines.push(`Pending fees: $${fmt(live.pendingFeesTotal)} (${fmt(live.pendingFeesSol, 6)} SOL + ${fmt(live.pendingFeesUsdc, 4)} USDC)`);
-    lines.push(`Harvested fees: $${fmt(live.cumHarvestedFeesSol * live.solPrice + live.cumHarvestedFeesUsdc)}`);
-    lines.push(`Total fees: $${fmt(live.totalFeesUsdc)}`);
-    lines.push(`IL: ${sign(live.ilUsdc)}$${fmt(Math.abs(live.ilUsdc))}`);
-    lines.push(`Gas: -$${fmt(live.gasUsdc, 4)} (${fmt(live.gasSol, 6)} SOL, ${live.txCount} txs)`);
-    const totalIl = live.ilUsdc + live.realizedIlUsdc;
-    const net = live.totalFeesUsdc + totalIl - live.gasUsdc;
-    lines.push(`Net PnL: ${sign(net)}$${fmt(Math.abs(net))} ${net >= 0 ? '✅' : '❌'} (fees - IL - gas)`);
+    const lower = live.positionRange.lower;
+    const upper = live.positionRange.upper;
+    const centre = (lower + upper) / 2;
+    const hw = (upper - lower) / 2;
+    const proxDown = hw > 0 ? Math.max(0, (centre - live.solPrice) / hw) : 0;
+    const proxUp = hw > 0 ? Math.max(0, (live.solPrice - centre) / hw) : 0;
+    const distDown = ((live.solPrice - lower) / live.solPrice * 100);
+    const distUp = ((upper - live.solPrice) / live.solPrice * 100);
+    const age = live.entryTime ? ((now - live.entryTime) / 3_600_000) : 0;
+
+    lines.push(`<b>Range</b> $${fmt(lower)}-$${fmt(upper)} (${fmt((upper - lower) / centre * 100, 1)}%)`);
+    lines.push(`<b>Prox</b> ↓${fmt(proxDown * 100, 0)}% ↑${fmt(proxUp * 100, 0)}% | Dist ↓$${fmt(live.solPrice - lower)} ↑$${fmt(upper - live.solPrice)}`);
+    if (live.entryPrice) {
+      lines.push(`<b>Entry</b> $${fmt(live.entryPrice)} (${sign(live.solPrice - live.entryPrice)}${fmt(Math.abs((live.solPrice - live.entryPrice) / live.entryPrice * 100), 1)}%) | Age ${fmt(age, 1)}h`);
+    }
+
+    // Proximity warning
+    if (proxDown > 0.5 || proxUp > 0.5) {
+      const dir = proxDown > proxUp ? 'LOWER' : 'UPPER';
+      const pct = Math.max(proxDown, proxUp) * 100;
+      lines.push(`⚠️ <b>Drifting toward ${dir} bound (${fmt(pct, 0)}%)</b>`);
+    }
+    lines.push('');
+
+    // In-range
+    lines.push(`<b>In-range</b> 1h: ${fmt(inRange1h, 0)}% | 24h: ${fmt(inRange24h, 0)}%`);
+    lines.push('');
   } else {
-    lines.push('No open position');
+    lines.push('No position open');
+    if (state?.pullback_active) {
+      const waitH = state.pullback_start ? ((now - state.pullback_start) / 3_600_000) : 0;
+      lines.push(`Pullback watch: peak $${fmt(state.pullback_peak ?? 0)}, waiting ${fmt(waitH, 1)}h`);
+    }
+    lines.push('');
   }
-  lines.push('');
 
-  // In-range
-  lines.push('<b>📏 In-Range</b>');
-  const emojiRange = (pct: number) => pct > 80 ? '🟢' : pct > 50 ? '🟡' : '🔴';
-  lines.push(`1h: ${emojiRange(inRange1h)} ${fmt(inRange1h, 0)}% | 24h: ${emojiRange(inRange24h)} ${fmt(inRange24h, 0)}% | All: ${emojiRange(inRangeAll)} ${fmt(inRangeAll, 0)}%`);
-  lines.push('');
+  // ── Fees & PnL ──
+  if (live) {
+    const pendingTotal = live.pendingFeesTotal;
+    const harvestedTotal = live.totalFeesUsdc - pendingTotal;
+    const totalIL = live.ilUsdc + live.realizedIlUsdc;
+    const net = live.totalFeesUsdc + totalIL - live.gasUsdc;
 
-  // Regime
-  lines.push(`<b>🌊 Regime:</b> ${live?.regime ?? '--'} | State: ${live?.botState ?? '--'}`);
+    lines.push(`<b>Fees</b> pending $${fmt(pendingTotal)} | harvested $${fmt(harvestedTotal)} | total $${fmt(live.totalFeesUsdc)}`);
+    lines.push(`<b>IL</b> $${fmt(totalIL)} | <b>Gas</b> $${fmt(live.gasUsdc)} (${live.txCount} txs)`);
+    lines.push(`<b>Net</b> ${sign(net)}$${fmt(Math.abs(net))} ${net >= 0 ? '✅' : '❌'}`);
+    lines.push('');
+  }
+
+  // ── Market Signals ──
+  if (mkt) {
+    const parts: string[] = [];
+    if (mkt.vol1h != null) parts.push(`v1h=${fmt(mkt.vol1h, 4)}`);
+    if (mkt.vol4h != null) parts.push(`v4h=${fmt(mkt.vol4h, 4)}`);
+    if (mkt.solDelta24h != null) parts.push(`SOL${sign(mkt.solDelta24h)}${fmt(mkt.solDelta24h, 1)}%`);
+    if (mkt.btcDelta24h != null) parts.push(`BTC${sign(mkt.btcDelta24h)}${fmt(mkt.btcDelta24h, 1)}%`);
+    if (mkt.volumeRatio4h != null) parts.push(`vol${fmt(mkt.volumeRatio4h, 1)}x`);
+    if (mkt.fearGreedIndex != null) parts.push(`F&G=${mkt.fearGreedIndex}`);
+    if (parts.length > 0) {
+      lines.push(`<b>Mkt</b> ${parts.join(' | ')}`);
+    }
+    if (mkt.fearGreedLabel) {
+      lines.push(`Sentiment: ${mkt.fearGreedLabel}`);
+    }
+    if (mkt.errors.length > 0) {
+      lines.push(`<i>API errors: ${mkt.errors.length}</i>`);
+    }
+    lines.push('');
+  }
+
+  // ── Regime ──
+  lines.push(`<b>Regime</b> ${live?.regime ?? '--'}`);
   if (regimeHist.length > 0) {
-    const latest = regimeHist[0];
-    const t = new Date(latest.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-    lines.push(`Last change: ${latest.old_regime} → ${latest.new_regime} at ${t}`);
+    const last = regimeHist[0];
+    const ago = ((now - last.timestamp) / 3_600_000);
+    lines.push(`Last change: ${last.old_regime} → ${last.new_regime} (${fmt(ago, 1)}h ago)`);
   }
   lines.push('');
 
-  // Events (last hour) — includes rebalances, swaps, regime changes
-  lines.push(`<b>📋 Events (last hour: ${lastHourEvents.length})</b>`);
-  if (lastHourEvents.length > 0) {
-    lastHourEvents.slice(0, 8).forEach(e => {
+  // ── Activity ──
+  const realActions = lastHourEvents.filter(e =>
+    ['POSITION_OPENED', 'POSITION_CLOSED', 'T1_DOWNSIDE', 'T1_UPSIDE', 'OOR_BELOW', 'OOR_ABOVE', 'PULLBACK_REENTRY', 'PULLBACK_TIMEOUT', 'FEE_HARVEST', 'AUTO_DEPLOY', 'LIQUIDITY_ADDED'].includes(e.eventType)
+  );
+  if (realActions.length > 0) {
+    lines.push(`<b>Events</b> (${realActions.length} last hour)`);
+    realActions.slice(0, 5).forEach(e => {
       const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-      lines.push(`${t} <b>${e.eventType}</b> $${fmt(e.price)}`);
-      if (e.note) lines.push(`  └ ${e.note.slice(0, 150)}`);
+      const note = e.note ? e.note.split('\n')[0].slice(0, 80) : '';
+      lines.push(`${t} <b>${e.eventType}</b> $${fmt(e.price)} ${note}`);
     });
   } else {
-    lines.push('No events — holding position');
-  }
-  // Regime changes
-  if (regimeHist.length > 0) {
-    const recentRegimeChanges = regimeHist.filter(r => r.timestamp > now - 3600_000);
-    if (recentRegimeChanges.length > 0) {
-      lines.push('');
-      lines.push('<b>🔄 Regime Changes</b>');
-      recentRegimeChanges.forEach(r => {
-        const t = new Date(r.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-        lines.push(`${t} ${r.old_regime} → <b>${r.new_regime}</b> at $${fmt(r.price)}`);
-        lines.push(`  └ dirRatio=${r.dir_ratio?.toFixed(3)}, vol=${r.realised_vol?.toFixed(4)}, ${r.price_count} closes`);
-      });
-    }
-  }
-  lines.push('');
-
-  // Suggestions
-  lines.push('<b>💡 Suggestions</b>');
-  if (inRange24h < 50) {
-    lines.push('• Consider widening range (increase rangeWidthPct)');
-  }
-  if (realRebalances.length > 5) {
-    lines.push('• Too many rebalances — increase proximity thresholds');
-  }
-  if (live && live.ilUsdc < -3) {
-    lines.push('• Significant IL detected — price has moved from entry');
-  }
-  if (live?.botState === 'HALTED') {
-    lines.push('• Bot halted — check dashboard and consider resuming');
-  }
-  if (!issues.length && realRebalances.length <= 5 && inRange24h >= 50) {
-    lines.push('• No changes needed — continue monitoring');
+    lines.push('No events last hour — holding');
   }
 
   return lines.join('\n');

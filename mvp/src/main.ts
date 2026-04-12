@@ -690,12 +690,13 @@ async function main() {
   let reporter: { stop: () => void } | null = null;
   const tgToken = process.env.TELEGRAM_BOT_TOKEN;
   const tgChatId = process.env.TELEGRAM_CHAT_ID;
-  const reportIntervalMin = parseInt(process.env.REPORT_INTERVAL_MINUTES ?? '60');
+  const reportIntervalMin = parseInt(process.env.REPORT_INTERVAL_MINUTES ?? '20');
   if (tgToken && tgChatId) {
     reporter = startTelegramReporter(
       { botToken: tgToken, chatId: tgChatId, intervalMs: reportIntervalMin * 60_000 },
       db,
       () => currentLiveData,
+      () => marketData.getSignals(),
     );
   } else {
     console.log(JSON.stringify({ level: 'info', msg: 'telegram reporter disabled (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable)', timestamp: Date.now() }));
