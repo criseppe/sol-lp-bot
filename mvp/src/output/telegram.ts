@@ -159,21 +159,35 @@ function buildReport(
 
   // ── Market Signals ──
   if (mkt) {
-    const parts: string[] = [];
-    if (mkt.vol1h != null) parts.push(`v1h=${fmt(mkt.vol1h, 4)}`);
-    if (mkt.vol4h != null) parts.push(`v4h=${fmt(mkt.vol4h, 4)}`);
-    if (mkt.solDelta24h != null) parts.push(`SOL${sign(mkt.solDelta24h)}${fmt(mkt.solDelta24h, 1)}%`);
-    if (mkt.btcDelta24h != null) parts.push(`BTC${sign(mkt.btcDelta24h)}${fmt(mkt.btcDelta24h, 1)}%`);
-    if (mkt.volumeRatio4h != null) parts.push(`vol${fmt(mkt.volumeRatio4h, 1)}x`);
-    if (mkt.fearGreedIndex != null) parts.push(`F&G=${mkt.fearGreedIndex}`);
-    if (parts.length > 0) {
-      lines.push(`<b>Mkt</b> ${parts.join(' | ')}`);
+    lines.push('<b>📡 Market Signals</b>');
+    if (mkt.vol1h != null) {
+      const status = mkt.vol1h > 0.06 ? '🔴 HIGH' : mkt.vol1h > 0.04 ? '🟡' : '🟢 calm';
+      lines.push(`Vol 1h: ${fmt(mkt.vol1h, 4)} ${status} (EXTREME if &gt;0.06)`);
     }
-    if (mkt.fearGreedLabel) {
-      lines.push(`Sentiment: ${mkt.fearGreedLabel}`);
+    if (mkt.vol4h != null) {
+      const status = mkt.vol4h > 0.05 ? '🔴 HIGH' : mkt.vol4h > 0.035 ? '🟡' : '🟢 calm';
+      lines.push(`Vol 4h: ${fmt(mkt.vol4h, 4)} ${status} (EXTREME if &gt;0.05+spike)`);
+    }
+    if (mkt.solDelta24h != null) {
+      const status = Math.abs(mkt.solDelta24h) > 4 ? '🔴 strong move' : '🟢 mild';
+      lines.push(`SOL 24h: ${sign(mkt.solDelta24h)}${fmt(mkt.solDelta24h, 1)}% ${status} (trend if &gt;±4%)`);
+    }
+    if (mkt.btcDelta24h != null) {
+      const macro = Math.abs(mkt.btcDelta24h) > 3 ? '⚡ macro event' : '';
+      lines.push(`BTC 24h: ${sign(mkt.btcDelta24h)}${fmt(mkt.btcDelta24h, 1)}% ${macro} (macro if &gt;±3%)`);
+    }
+    if (mkt.volumeRatio4h != null) {
+      const status = mkt.volumeRatio4h > 3 ? '🔴 SPIKE' : mkt.volumeRatio4h > 2 ? '🟡 elevated' : '🟢 normal';
+      lines.push(`Vol ratio: ${fmt(mkt.volumeRatio4h, 1)}x ${status} (spike if &gt;3x)`);
+    } else {
+      lines.push('Vol ratio: building... (needs ~1h of data)');
+    }
+    if (mkt.fearGreedIndex != null) {
+      const emoji = mkt.fearGreedIndex < 25 ? '😨' : mkt.fearGreedIndex < 40 ? '😟' : mkt.fearGreedIndex > 75 ? '🤑' : mkt.fearGreedIndex > 60 ? '😊' : '😐';
+      lines.push(`F&amp;G: ${mkt.fearGreedIndex}/100 ${emoji} ${mkt.fearGreedLabel ?? ''}`);
     }
     if (mkt.errors.length > 0) {
-      lines.push(`<i>API errors: ${mkt.errors.length}</i>`);
+      lines.push(`<i>API errors: ${mkt.errors.join(', ').slice(0, 100)}</i>`);
     }
     lines.push('');
   }
@@ -186,6 +200,49 @@ function buildReport(
     lines.push(`Last change: ${last.old_regime} → ${last.new_regime} (${fmt(ago, 1)}h ago)`);
   }
   lines.push('');
+
+  // ── Summary ──
+  if (mkt && live) {
+    const summaryParts: string[] = [];
+
+    // Volatility assessment
+    if (mkt.vol1h != null && mkt.vol4h != null) {
+      if (mkt.vol1h > 0.06 || mkt.vol4h > 0.05) summaryParts.push('High volatility — EXTREME conditions');
+      else if (mkt.vol1h > 0.04 || mkt.vol4h > 0.035) summaryParts.push('Volatility rising — watch closely');
+      else summaryParts.push('Low volatility — market quiet');
+    }
+
+    // SOL direction
+    if (mkt.solDelta24h != null) {
+      if (mkt.solDelta24h < -4) summaryParts.push('SOL in strong downtrend');
+      else if (mkt.solDelta24h < -2) summaryParts.push('SOL drifting down');
+      else if (mkt.solDelta24h > 4) summaryParts.push('SOL in strong uptrend');
+      else if (mkt.solDelta24h > 2) summaryParts.push('SOL pushing up');
+      else summaryParts.push('SOL flat');
+    }
+
+    // BTC correlation
+    if (mkt.btcDelta24h != null && mkt.solDelta24h != null && Math.abs(mkt.btcDelta24h) > 3) {
+      const same = (mkt.btcDelta24h > 0) === (mkt.solDelta24h > 0);
+      summaryParts.push(same ? 'correlated with BTC macro move' : 'diverging from BTC');
+    }
+
+    // Sentiment
+    if (mkt.fearGreedIndex != null) {
+      if (mkt.fearGreedIndex < 25) summaryParts.push('extreme fear in market');
+      else if (mkt.fearGreedIndex > 75) summaryParts.push('extreme greed in market');
+    }
+
+    // Volume
+    if (mkt.volumeRatio4h != null && mkt.volumeRatio4h > 3) {
+      summaryParts.push('volume spike detected');
+    }
+
+    if (summaryParts.length > 0) {
+      lines.push(`💬 ${summaryParts.join(', ')}.`);
+      lines.push('');
+    }
+  }
 
   // ── Activity ──
   const realActions = lastHourEvents.filter(e =>
