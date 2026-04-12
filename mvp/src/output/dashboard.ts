@@ -2456,13 +2456,38 @@ function renderConfigHtml(): string {
 <style>${SHARED_STYLES}
 .cfg-section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
 .cfg-section h3{color:#58a6ff;font-size:14px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #21262d}
-.cfg-input{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px}
+.cfg-input{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;max-width:100%}
 .cfg-input:focus{border-color:#58a6ff;outline:none}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;padding:6px 8px;color:#8b949e;font-size:11px;border-bottom:1px solid #30363d}
 .save-bar{position:sticky;bottom:0;background:#0d1117;border-top:2px solid #58a6ff;padding:12px 16px;display:flex;align-items:center;gap:12px;z-index:10}
 .save-btn{background:#238636;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer}
 .save-btn:hover{background:#2ea043}
+@media(max-width:700px){
+  .cfg-section{padding:10px;margin-bottom:10px}
+  .cfg-section h3{font-size:12px;margin-bottom:8px}
+  .cfg-section>table{display:block}
+  .cfg-section>table>thead{display:none}
+  .cfg-section>table>tbody{display:block}
+  .cfg-section>table>tbody>tr{display:flex;flex-wrap:wrap;gap:4px;padding:8px 0;border-bottom:1px solid #21262d;align-items:center}
+  .cfg-section>table>tbody>tr>td{display:block;padding:2px 4px !important;font-size:11px !important;border:none !important}
+  .cfg-section>table>tbody>tr>td:first-child{width:100%;color:#c9d1d9 !important;font-weight:bold;font-size:12px !important}
+  .cfg-section>table>tbody>tr>td:nth-child(2){display:none}
+  .cfg-section>table>tbody>tr>td:nth-child(3){flex:0 0 auto}
+  .cfg-section>table>tbody>tr>td:nth-child(4){flex:1;min-width:0}
+  .cfg-section>table>tbody>tr>td:nth-child(5){display:none}
+  .cfg-section div[style*="overflow-x"] table{display:table}
+  .cfg-section div[style*="overflow-x"] thead{display:table-header-group}
+  .cfg-section div[style*="overflow-x"] tbody{display:table-row-group}
+  .cfg-section div[style*="overflow-x"] tr{display:table-row}
+  .cfg-section div[style*="overflow-x"] td,.cfg-section div[style*="overflow-x"] th{display:table-cell}
+  .cfg-input{font-size:14px !important;padding:6px 8px !important;min-height:36px}
+  select.cfg-input{min-height:36px}
+  .cfg-section div[style*="overflow-x"]{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .save-bar{padding:8px 12px}
+  .save-btn{padding:10px 16px;font-size:13px;flex:1}
+  #save-status{font-size:11px !important}
+}
 .modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center}
 .modal-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:450px;width:90%}
 .modal-box h3{color:#f0883e;margin-bottom:12px}
