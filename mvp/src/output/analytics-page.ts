@@ -16,33 +16,51 @@ export function renderAnalyticsPageHtml(): string {
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;padding:12px}
+body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;padding:12px;-webkit-text-size-adjust:100%}
 .nav{display:flex;gap:5px;justify-content:center;margin-bottom:12px;flex-wrap:wrap}
 .nav a{color:#8b949e;text-decoration:none;padding:7px 10px;border:1px solid #30363d;border-radius:6px;font-size:11px;text-align:center}
 .nav a:hover,.nav a.active{color:#c9d1d9;border-color:#58a6ff;background:#161b22}
-@media(max-width:700px){.nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.nav a{padding:7px 3px;font-size:10px}}
 .header{text-align:center;margin-bottom:16px}
 .header h1{font-size:18px;color:#58a6ff;margin-bottom:4px}
 .header .sub{color:#8b949e;font-size:11px}
 .controls{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;justify-content:center}
-.controls select,.controls button{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer}
+.controls select,.controls button{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 14px;font-size:13px;cursor:pointer;-webkit-appearance:none}
 .controls button:hover{border-color:#58a6ff}
 .toggle-panel{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:16px;display:none}
 .toggle-panel.show{display:block}
-.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}
-.toggle-item{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b949e}
-.toggle-item input{accent-color:#58a6ff}
+.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.toggle-item{display:flex;align-items:center;gap:8px;font-size:12px;color:#8b949e;padding:4px 0}
+.toggle-item input{accent-color:#58a6ff;width:18px;height:18px}
 .toggle-item label{cursor:pointer}
-.widget-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(450px,1fr));gap:12px}
-@media(max-width:500px){.widget-grid{grid-template-columns:1fr}}
-.widget{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;position:relative}
-.widget h3{font-size:13px;color:#58a6ff;margin-bottom:8px}
+.widget-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,450px),1fr));gap:12px}
+.widget{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;position:relative;overflow:hidden}
+.widget h3{font-size:13px;color:#58a6ff;margin-bottom:8px;padding-right:50px}
 .widget .desc{font-size:10px;color:#8b949e;margin-bottom:10px}
 .widget canvas{width:100%!important;max-height:220px}
 .widget table{width:100%;border-collapse:collapse;font-size:11px}
 .widget th{text-align:left;color:#8b949e;padding:4px 6px;border-bottom:1px solid #30363d;font-size:10px}
 .widget td{padding:4px 6px;border-bottom:1px solid #21262d}
-.widget .export-btn{position:absolute;top:10px;right:10px;background:#21262d;color:#8b949e;border:none;padding:3px 8px;border-radius:4px;font-size:9px;cursor:pointer}
+.widget .export-btn{position:absolute;top:10px;right:10px;background:#21262d;color:#8b949e;border:none;padding:4px 10px;border-radius:4px;font-size:10px;cursor:pointer;z-index:1}
+.widget div[style*="overflow-x"]{-webkit-overflow-scrolling:touch}
+@media(max-width:700px){
+  body{padding:8px}
+  .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+  .nav a{padding:7px 3px;font-size:9px}
+  .header h1{font-size:16px}
+  .controls{gap:6px}
+  .controls select,.controls button{padding:10px 12px;font-size:14px;flex:1;min-height:40px}
+  .toggle-grid{grid-template-columns:1fr 1fr}
+  .toggle-item{font-size:13px;padding:6px 0}
+  .toggle-item input{width:20px;height:20px}
+  .widget-grid{gap:8px}
+  .widget{padding:10px}
+  .widget h3{font-size:12px;margin-bottom:6px}
+  .widget canvas{max-height:180px}
+  .widget table{font-size:10px}
+  .widget th,.widget td{padding:3px 4px}
+  .widget .export-btn{padding:6px 10px;font-size:11px}
+  .widget .metric .val{font-size:20px}
+}
 .widget .export-btn:hover{color:#58a6ff}
 .widget .metric{text-align:center;padding:8px}
 .widget .metric .val{font-size:24px;font-weight:bold}
