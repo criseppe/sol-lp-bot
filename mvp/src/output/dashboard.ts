@@ -276,8 +276,12 @@ export function startDashboard(port: number): DashboardServer {
     const date = (_req.query as any).date; // YYYY-MM-DD format
     if (!date) { res.status(400).json({ error: 'date param required (YYYY-MM-DD)' }); return; }
 
-    // Get all snapshots for this date
-    const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range FROM live_snapshots ORDER BY timestamp ASC').all() as any[];
+    // Get snapshots for this date and the previous day (for prevDayLastFees)
+    // Fetch 2 days of data instead of entire table
+    const dateMid = new Date(date + 'T12:00:00Z');
+    const fetchFrom = dateMid.getTime() - 36 * 3600000; // 36h before noon = covers prev day
+    const fetchTo = dateMid.getTime() + 36 * 3600000;   // 36h after noon = covers next day
+    const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range FROM live_snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC').all(fetchFrom, fetchTo) as any[];
     const daySnaps = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
 
     // Build hourly fees
@@ -325,13 +329,18 @@ export function startDashboard(port: number): DashboardServer {
     }
 
     // Get events for this day
-    const dayStart = new Date(date + 'T00:00:00+02:00').getTime(); // Berlin timezone approx
-    const dayEnd = dayStart + 86400000;
+    // Compute day boundaries in Berlin timezone (handles CET/CEST correctly)
+    const dayMid = new Date(date + 'T12:00:00Z');
+    const berlinDate = dayMid.toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+    // Find first and last snapshot of the target date to determine boundaries
+    const dayBounds = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
+    const dayStart = dayBounds.length > 0 ? dayBounds[0].timestamp - 60000 : dayMid.getTime() - 12 * 3600000;
+    const dayEnd = dayBounds.length > 0 ? dayBounds[dayBounds.length - 1].timestamp + 60000 : dayMid.getTime() + 12 * 3600000;
     const events = dbRef.prepare(`SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, note
       FROM rebalance_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`).all(dayStart, dayEnd) as any[];
 
-    // Available dates
-    const dates = [...new Set(allSnaps.map((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' })))].sort();
+    // Available dates (from daily_summary table — efficient, no full scan)
+    const dates = (dbRef.prepare('SELECT DISTINCT date FROM daily_summary ORDER BY date ASC').all() as any[]).map((r: any) => r.date);
 
     res.json({ date, hourlyData, dayTotal: dayCum, events, availableDates: dates });
   });
@@ -407,8 +416,11 @@ export function startDashboard(port: number): DashboardServer {
     res.json({ success: true, enabled });
   });
 
+  let analysisRunning = false;
   app.post('/api/analysis/run', async (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    if (analysisRunning) { res.status(429).json({ error: 'Analysis already running' }); return; }
+    analysisRunning = true;
     try {
       const { execSync } = await import('child_process');
       const output = execSync('node scripts/weekly-analysis.cjs --days=7', { cwd: process.cwd(), timeout: 30000 }).toString();
@@ -419,6 +431,8 @@ export function startDashboard(port: number): DashboardServer {
       res.json({ success: true, report: output });
     } catch (err) {
       res.status(500).json({ error: String(err) });
+    } finally {
+      analysisRunning = false;
     }
   });
 

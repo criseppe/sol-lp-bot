@@ -15,7 +15,7 @@ import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldR
 import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
-import { getConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
+import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ let liveLastAutoDeployTime = 0;
 let liveLastAutoDeployCheck = 0;
 let liveLastHarvestCheck = 0;
 let autoDeployEnabled = true; // will be loaded from DB
-let liveFlashCrashCooldownUntil = 0; // timestamp: block re-entry until this time
+let liveFlashCrashCooldownUntil = parseInt(getConfig(db)['flashCrashCooldownUntil'] ?? '0'); // persisted across restarts
 let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detection
 let consecutiveTxFailures = 0; // exponential backoff on repeated TX failures
 let txBackoffUntil = 0; // timestamp: skip position operations until this time
@@ -423,8 +423,9 @@ async function main() {
             const snap24hAgo = getLiveSnapshots(db, 24);
             if (snap24hAgo.length > 0) {
               const oldest = snap24hAgo[0];
+              const oldPending = (oldest.pending_fees_sol ?? 0) * oldest.price + (oldest.pending_fees_usdc ?? 0);
               const oldTotal = (oldest.cum_fees_sol ?? 0) * oldest.price + (oldest.cum_fees_usdc ?? 0)
-                + ((oldest.pending_fees_sol ?? 0) * oldest.price + (oldest.pending_fees_usdc ?? 0) > 1000 ? 0 : (oldest.pending_fees_sol ?? 0) * oldest.price + (oldest.pending_fees_usdc ?? 0));
+                + (oldPending > 1000 ? 0 : oldPending);
               const nowTotal = totalFeesUsdc;
               actual24hFeesUsdc = Math.max(0, nowTotal - oldTotal);
               actual24hAprPct = positionValueUsdc > 0 ? (actual24hFeesUsdc * 365 / positionValueUsdc) * 100 : 0;
@@ -888,6 +889,7 @@ async function runLiveCycle(price: number): Promise<void> {
       }
       if (isFlashCrash(liveRecentPrices)) {
         liveFlashCrashCooldownUntil = now + runtime.flashCrashWaitMinutes * 60_000;
+        setConfig(db, 'flashCrashCooldownUntil', String(liveFlashCrashCooldownUntil));
         const oldPeak = livePullbackPeak;
         livePullbackPeak = price;   // Reset peak to crash level
         livePullbackStart = now;    // Reset 4h timeout from now
@@ -903,6 +905,7 @@ async function runLiveCycle(price: number): Promise<void> {
       if (decision.should) {
         livePullbackActive = false;
         liveFlashCrashCooldownUntil = 0;
+        setConfig(db, 'flashCrashCooldownUntil', '0');
         const waitH = ((now - livePullbackStart) / 3600_000).toFixed(1);
         const pullPct = ((livePullbackPeak - price) / livePullbackPeak * 100).toFixed(1);
         const reason = decision.reason === 'PULLBACK'
@@ -967,6 +970,7 @@ async function runLiveCycle(price: number): Promise<void> {
       if (isFlashCrash(liveRecentPrices)) {
         await liveClosePosition(price, 'OOR_BELOW', reason + ' Flash crash detected — closing without reopen, entering cooldown.');
         liveFlashCrashCooldownUntil = now + runtime.flashCrashWaitMinutes * 60_000;
+        setConfig(db, 'flashCrashCooldownUntil', String(liveFlashCrashCooldownUntil));
         liveBotState = 'IDLE';
         console.log(JSON.stringify({ level: 'warn', msg: `OOR_BELOW + flash crash: closed position, cooldown ${runtime.flashCrashWaitMinutes}min`, timestamp: now }));
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
@@ -1016,8 +1020,8 @@ async function runLiveCycle(price: number): Promise<void> {
           // Not enough fees to justify gas — skip this harvest, check again next hour
           console.log(JSON.stringify({ level: 'info', msg: `Harvest skipped: pending fees $${pendingTotal.toFixed(4)} < $0.50 minimum`, timestamp: now }));
           // Don't update liveLastHarvestTime — will re-check next hour
-          return;
-        }
+          // NOTE: do NOT return here — auto-deploy and idle rebalance still need to run
+        } else {
         const daysSinceHarvest = ((now - liveLastHarvestTime) / 86400_000).toFixed(1);
         const fees = await liveExecutor.collectFees();
         liveCumFeesSol += fees.feeSol;
@@ -1043,6 +1047,7 @@ async function runLiveCycle(price: number): Promise<void> {
           solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
           feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
         });
+        } // end else (fees >= $0.50)
       } catch (err) {
         console.log(JSON.stringify({ level: 'error', msg: 'fee harvest failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
       }
@@ -1191,7 +1196,9 @@ async function runLiveCycle(price: number): Promise<void> {
               feeSol: 0, feeUsdc: 0, ilAtClose: 0,
             });
           } else if (swapDirection) {
-            console.log(JSON.stringify({ level: 'warn', msg: 'Idle rebalance swap failed', timestamp: now }));
+            // Mark as done to prevent retrying every 60s during persistent API outage
+            lastIdleRebalanceRegime = liveRegime;
+            console.log(JSON.stringify({ level: 'warn', msg: 'Idle rebalance swap failed — will retry on next regime change', timestamp: now }));
           } else {
             // Deviation exists but swap amount too small — mark as done
             lastIdleRebalanceRegime = liveRegime;

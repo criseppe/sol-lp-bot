@@ -151,7 +151,15 @@ export class MarketDataService {
     console.log(JSON.stringify({ level: 'info', msg: 'market data service started (15min polling)', timestamp: Date.now() }));
   }
 
+  private refreshing = false;
+
   async refresh(): Promise<void> {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try { return await this._doRefresh(); } finally { this.refreshing = false; }
+  }
+
+  private async _doRefresh(): Promise<void> {
     const errors: string[] = [];
     const now = Math.floor(Date.now() / 1000);
 

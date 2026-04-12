@@ -786,14 +786,22 @@ export class LiveExecutor {
     if (quote) {
       const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
       if (usdcNeeded > usdcAvailable) {
-        quote = increaseLiquidityQuoteByInputToken(
+        quote = usdcAvailable > 0.5 ? increaseLiquidityQuoteByInputToken(
           usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
-        );
+        ) : null;
+        if (quote) {
+          const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
+          if (solNeeded > solAvailable) quote = null;
+        }
       }
     } else if (usdcAvailable > 0.5) {
       quote = increaseLiquidityQuoteByInputToken(
         usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
+      if (quote) {
+        const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
+        if (solNeeded > solAvailable) quote = null;
+      }
     }
 
     if (!quote || quote.liquidityAmount.isZero()) {
