@@ -45,7 +45,7 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    body: JSON.stringify({ chat_id: chatId, text: text.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&gt;/g, '>').replace(/&lt;/g, '<'), disable_web_page_preview: true }),
   });
   if (!res.ok) {
     const body = await res.text();
