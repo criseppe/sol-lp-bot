@@ -589,8 +589,16 @@ async function main() {
 
     dashboard.onAddLiquidity(async () => {
       const currentPrice = currentLiveData?.solPrice ?? 0;
-      console.log(JSON.stringify({ level: 'info', msg: 'ADD LIQUIDITY triggered from dashboard', timestamp: Date.now() }));
-      const result = await executor.increaseLiquidity(currentPrice);
+      // Apply regime deploy cap (same as auto-deploy)
+      const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+      const balances = await getWalletBalances(conn, (executor as any).wallet.publicKey);
+      const posComp = await executor.getPositionComposition();
+      const posValue = posComp?.totalUsdc ?? 0;
+      const totalValue = balances.sol * currentPrice + balances.usdc + posValue;
+      const maxDeploy = totalValue * params.deployPct;
+      const headroom = Math.max(0, maxDeploy - posValue);
+      console.log(JSON.stringify({ level: 'info', msg: `ADD LIQUIDITY triggered from dashboard. Headroom: $${headroom.toFixed(2)} (cap ${(params.deployPct*100).toFixed(0)}%)`, timestamp: Date.now() }));
+      const result = await executor.increaseLiquidity(currentPrice, headroom > 10 ? headroom : undefined);
       if (!result) throw new Error('No valid liquidity quote — insufficient funds or position out of range');
       insertRebalanceEventWithRule2(db, {
         timestamp: Date.now(), eventType: 'LIQUIDITY_ADDED', price: currentPrice, regime: liveRegime,
