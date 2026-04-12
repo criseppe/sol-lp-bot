@@ -282,7 +282,7 @@ async function main() {
 
               console.log(JSON.stringify({ level: 'info', msg: `orphan ${mint.toBase58().slice(0, 12)}... closed successfully`, timestamp: Date.now() }));
             } catch (err) {
-              console.log(JSON.stringify({ level: 'error', msg: `failed to close orphan ${mint.toBase58().slice(0, 12)}...`, error: String(err), timestamp: Date.now() }));
+              console.log(JSON.stringify({ level: 'error', msg: `failed to close orphan ${mint.toBase58().slice(0, 12)}...`, error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: Date.now() }));
             }
           }
 
@@ -526,7 +526,7 @@ async function main() {
         console.log(JSON.stringify({ level: 'info', msg: 'pruned price ticks older than 30 days', timestamp: now2 }));
       }
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'cycle error', error: String(err), timestamp: Date.now() }));
+      console.log(JSON.stringify({ level: 'error', msg: 'cycle error', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: Date.now() }));
     } finally {
       cycleRunning = false;
     }
@@ -749,7 +749,7 @@ async function main() {
         console.log(JSON.stringify({ level: 'info', msg: 'Analysis agent: report complete + sent to Telegram', timestamp: now }));
       }
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'Analysis agent failed', error: String(err), timestamp: now }));
+      console.log(JSON.stringify({ level: 'error', msg: 'Analysis agent failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
     }
   }, 60_000);
 
@@ -1044,7 +1044,7 @@ async function runLiveCycle(price: number): Promise<void> {
           feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
         });
       } catch (err) {
-        console.log(JSON.stringify({ level: 'error', msg: 'fee harvest failed', error: String(err), timestamp: now }));
+        console.log(JSON.stringify({ level: 'error', msg: 'fee harvest failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
       }
     }
   }
@@ -1117,7 +1117,7 @@ async function runLiveCycle(price: number): Promise<void> {
         }
       }
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'auto-deploy check failed', error: String(err), timestamp: now }));
+      console.log(JSON.stringify({ level: 'error', msg: 'auto-deploy check failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
     }
   }
 
@@ -1206,7 +1206,7 @@ async function runLiveCycle(price: number): Promise<void> {
         lastIdleRebalanceRegime = liveRegime;
       }
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: String(err), timestamp: now }));
+      console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
     }
   }
 
