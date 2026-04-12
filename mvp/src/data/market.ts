@@ -107,6 +107,23 @@ async function fetchBtcPrice(): Promise<{ price: number; delta24h: number } | nu
   return { price: json.bitcoin.usd, delta24h: json.bitcoin.usd_24h_change };
 }
 
+/**
+ * Fetch 7-day SOL volume history from CoinGecko market_chart.
+ * Returns latest volume, 7-day average, and ratio (instant — no accumulation needed).
+ */
+async function fetchVolumeRatio7d(): Promise<{ latest: number; avg7d: number; ratio: number } | null> {
+  const url = `${COINGECKO_URL}/coins/solana/market_chart?vs_currency=usd&days=7`;
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) throw new Error(`CoinGecko market_chart ${res.status}`);
+  const json = await res.json() as { total_volumes?: Array<[number, number]> };
+  if (!json.total_volumes || json.total_volumes.length < 10) return null;
+  const vols = json.total_volumes;
+  const latest = vols[vols.length - 1][1];
+  const avg = vols.reduce((s, v) => s + v[1], 0) / vols.length;
+  if (avg <= 0) return null;
+  return { latest, avg7d: avg, ratio: latest / avg };
+}
+
 async function fetchFearGreed(): Promise<{ value: number; label: string } | null> {
   const res = await fetchWithTimeout(FEAR_GREED_URL);
   if (!res.ok) throw new Error(`F&G ${res.status}`);
@@ -115,16 +132,10 @@ async function fetchFearGreed(): Promise<{ value: number; label: string } | null
   return { value: parseInt(json.data[0].value), label: json.data[0].value_classification };
 }
 
-// Max volume history entries: 7 days * 4 readings/hour * 24 hours = 672
-// At 15-min polling we get 96/day * 7 = 672 readings
-const MAX_VOLUME_HISTORY = 672;
-
 export class MarketDataService {
   private signals: MarketSignals | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private fetchCount = 0;
-  // Rolling 24h volume readings for computing volume ratio
-  private volumeHistory: Array<{ timestamp: number; volume24h: number }> = [];
 
   async start(): Promise<void> {
     // Initial fetch
@@ -172,28 +183,24 @@ export class MarketDataService {
       errors.push(`coingecko-ohlc-7d: ${String(err).slice(0, 80)}`);
     }
 
-    // 3. SOL 24h volume + volume ratio from rolling history
+    // 3. SOL 24h volume + volume ratio (instant from 7d history, no accumulation needed)
     try {
       const solData = await fetchSolMarketData();
       if (solData) {
         if (solDelta24h == null) solDelta24h = solData.delta24h;
         solVolume24h = solData.volume24h;
-
-        // Store in rolling history
-        this.volumeHistory.push({ timestamp: Date.now(), volume24h: solData.volume24h });
-        if (this.volumeHistory.length > MAX_VOLUME_HISTORY) {
-          this.volumeHistory = this.volumeHistory.slice(-MAX_VOLUME_HISTORY);
-        }
-
-        // Compute volume ratio: current vs 7-day average
-        // Need at least 24h of data (~96 readings at 15min) for meaningful average
-        if (this.volumeHistory.length >= 4) {
-          const avgVol = this.volumeHistory.reduce((sum, v) => sum + v.volume24h, 0) / this.volumeHistory.length;
-          volumeRatio4h = avgVol > 0 ? solData.volume24h / avgVol : null;
-        }
       }
     } catch (err) {
-      errors.push(`coingecko-sol-vol: ${String(err).slice(0, 80)}`);
+      errors.push(`coingecko-sol: ${String(err).slice(0, 80)}`);
+    }
+    try {
+      const volRatio = await fetchVolumeRatio7d();
+      if (volRatio) {
+        volumeRatio4h = volRatio.ratio;
+        if (solVolume24h == null) solVolume24h = volRatio.latest;
+      }
+    } catch (err) {
+      errors.push(`coingecko-vol-ratio: ${String(err).slice(0, 80)}`);
     }
 
     // 4. BTC price & 24h change
