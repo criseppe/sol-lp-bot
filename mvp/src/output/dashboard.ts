@@ -140,6 +140,7 @@ export interface DashboardServer {
 
 export function startDashboard(port: number): DashboardServer {
   const app = express();
+  app.set('etag', false);
   let server: Server;
 
   // --- Basic auth middleware ---
