@@ -2809,7 +2809,7 @@ ${NAV_HTML}
   <div class="flow">
     <div class="flow-step"><h3>1. Fetch Price</h3><div style="font-size:12px;color:#8b949e">SOL/USD from Pyth Hermes. Reject if confidence &gt; 0.5% or stale &gt; 60s.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
-    <div class="flow-step"><h3>2. Regime Detection <span style="color:#8b949e;font-weight:normal;font-size:11px">(every 1h)</span></h3><div style="font-size:12px;color:#8b949e">Classify market from daily closes: RANGING / BULLISH / BEARISH / EXTREME.</div></div>
+    <div class="flow-step"><h3>2. Enhanced Regime Detection <span style="color:#8b949e;font-weight:normal;font-size:11px">(every 1h)</span></h3><div style="font-size:12px;color:#8b949e">Base regime from daily closes + market signal overrides (1h/4h vol, SOL/BTC 24h change, volume ratio, Fear &amp; Greed). Confidence score 0&#x2013;5. Also re-checked before every position reopen.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
     <div class="flow-step"><h3>3. Safety Checks</h3><div style="font-size:12px;color:#8b949e">Circuit breakers: daily loss &gt; 5%, IL &gt; 8%, rebalances &gt; 10/hr &#x2192; HALT.</div></div>
     <div class="flow-arrow">&#x25BC;</div>
@@ -2826,8 +2826,10 @@ ${NAV_HTML}
 <!-- ── REGIME DETECTION ─────────────────────────────────────────────── -->
 
 <div class="card" style="margin-bottom:16px">
-  <h2>Regime Detection</h2>
-  <p style="font-size:12px;color:#8b949e;margin-bottom:8px">Evaluated every 1 hour using 2 days of daily closing prices.</p>
+  <h2>Regime Detection (Enhanced)</h2>
+  <p style="font-size:12px;color:#8b949e;margin-bottom:8px">Evaluated every 1 hour. Combines daily closing prices with real-time market signals for faster, more accurate classification.</p>
+
+  <div style="font-size:12px;color:#58a6ff;font-weight:bold;margin:12px 0 6px">Step 1: Base Regime (Daily Closes)</div>
   <div class="logic-box"><b>dirRatio</b> = |net move| / total path
   1.0 = straight line (strong trend)
   0.0 = oscillating (ranging)
@@ -2835,17 +2837,94 @@ ${NAV_HTML}
 <b>realisedVol</b> = stddev of daily log returns
   Normal SOL: 3&#x2013;5%. Crisis: &gt; 8%
 
-<b>Classification:</b>
+<b>Base classification:</b>
   realisedVol &gt; 0.08            &#x2192; <span class="tag tag-extreme">EXTREME</span>
   dirRatio &gt; 0.35 &amp; price up   &#x2192; <span class="tag tag-bull">BULLISH_TREND</span>
   dirRatio &gt; 0.35 &amp; price down &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
   otherwise                      &#x2192; <span class="tag tag-ranging">RANGING</span></div>
+
+  <div style="font-size:12px;color:#58a6ff;font-weight:bold;margin:12px 0 6px">Step 2: Market Signal Overrides</div>
+  <p style="font-size:12px;color:#8b949e;margin-bottom:8px">External data from CoinGecko (OHLC, BTC, SOL volume) and Fear &amp; Greed Index, polled every 15 min. Can override the base regime when signals are strong enough.</p>
+  <div class="logic-box"><b>6 Market Signals:</b>
+
+<b>vol1h</b>  = stddev of 30min log returns (24h of CoinGecko OHLC)
+  Measures short-term intraday volatility.
+  &gt; 0.06 &#x2192; <span class="tag tag-extreme">EXTREME</span> override (catches vol spikes before daily closes do)
+
+<b>vol4h</b>  = stddev of 4h log returns (7d of CoinGecko OHLC)
+  Measures medium-term volatility.
+  &gt; 0.05 AND volume spike &gt; 3x &#x2192; <span class="tag tag-extreme">EXTREME</span> override
+
+<b>SOL 24h change</b> = SOL price % change over 24 hours
+  |change| &gt; 4% with volume &gt; 2x &#x2192; trend override:
+    positive &#x2192; <span class="tag tag-bull">BULLISH_TREND</span>
+    negative &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
+
+<b>BTC 24h change</b> = BTC price % change (CoinGecko)
+  |change| &gt; 3% in same direction as SOL = macro move
+  Boosts confidence (confirms the regime, doesn't override)
+
+<b>Volume ratio</b> = current SOL 24h vol / rolling 7-day avg
+  Built from CoinGecko readings every 15 min.
+  &gt; 3x = volume spike (confirms EXTREME or TREND)
+  &gt; 2x = elevated (needed for trend override)
+
+<b>Fear &amp; Greed</b> = crypto sentiment index (0&#x2013;100)
+  &lt; 25 (Extreme Fear) + SOL down &gt; 2% &#x2192; <span class="tag tag-bear">BEARISH_TREND</span>
+  &gt; 75 (Extreme Greed) &#x2192; confirms <span class="tag tag-bull">BULLISH_TREND</span>
+  40&#x2013;60 (Neutral) &#x2192; confirms <span class="tag tag-ranging">RANGING</span></div>
+
+  <div style="font-size:12px;color:#58a6ff;font-weight:bold;margin:12px 0 6px">Step 3: Confidence Score (0&#x2013;5)</div>
+  <div class="logic-box">Each signal that agrees with the chosen regime adds +1:
+  &#x2022; vol1h confirms volatility level           (+1)
+  &#x2022; vol4h + volume spike confirms extreme      (+1)
+  &#x2022; BTC correlated macro move                  (+1)
+  &#x2022; Fear &amp; Greed matches sentiment             (+1)
+  &#x2022; Volume level matches regime type            (+1)
+
+<b>Higher confidence = more signals agree.</b>
+Low confidence (1/5) means the regime is based mostly
+on daily closes with little market confirmation.
+High confidence (4-5/5) means multiple independent
+signals all point to the same conclusion.</div>
+
+  <div style="font-size:12px;color:#58a6ff;font-weight:bold;margin:12px 0 6px">Step 4: Override Priority</div>
+  <div class="logic-box">1. EXTREME (highest priority):
+   vol1h &gt; 0.06 alone is enough to override any base regime.
+   vol4h &gt; 0.05 + volume spike also triggers EXTREME.
+
+2. TREND:
+   Only overrides RANGING (not EXTREME).
+   Needs SOL |delta| &gt; 4% AND volume &gt; 2x.
+
+3. Fear &amp; Greed:
+   Only overrides RANGING to BEARISH (not other regimes).
+   Needs F&amp;G &lt; 25 AND SOL down &gt; 2%.
+
+4. If all APIs are down:
+   Falls back to base regime from daily closes only.
+   No degradation &#x2014; bot always has a valid regime.</div>
+
   <div class="example-box">
-    <div class="example-title">Example: $80 &#x2192; $83 &#x2192; $82 over 2 days</div>
-    <div class="example-text">dirRatio = |$82-$80| / (|$83-$80|+|$82-$83|) = 2/4 = <b>0.50</b></div>
-    <div class="example-text">realisedVol = stddev(ln(83/80), ln(82/83)) = <b>0.025</b></div>
-    <div class="example-text">0.025 &lt; 0.08 &#x2192; not EXTREME. 0.50 &gt; 0.35 &amp; up &#x2192; <span class="tag tag-bull">BULLISH_TREND</span></div>
-    <div class="example-note">$80 &#x2192; $81 &#x2192; $80 would give dirRatio = 0.0 &#x2192; <span class="tag tag-ranging">RANGING</span>. A crash like $80 &#x2192; $95 &#x2192; $70 pushes vol past 0.08 &#x2192; <span class="tag tag-extreme">EXTREME</span>.</div>
+    <div class="example-title">Example: base = RANGING, but vol1h = 0.07</div>
+    <div class="example-text">Daily closes are flat (dirRatio = 0.15) &#x2192; base = <span class="tag tag-ranging">RANGING</span></div>
+    <div class="example-text">But 1h vol = 0.07 &gt; 0.06 threshold &#x2192; <b>OVERRIDE to <span class="tag tag-extreme">EXTREME</span></b></div>
+    <div class="example-text">Result: wider range (6%), lower deploy (25%), faster harvest (1d)</div>
+    <div class="example-note">Without enhanced detection, the bot would stay RANGING with a tight 1.5% range during high volatility &#x2014; high risk of repeated OOR exits.</div>
+  </div>
+  <div class="example-box">
+    <div class="example-title">Example: SOL -5.2%, BTC -3.8%, F&amp;G = 18</div>
+    <div class="example-text">Base = RANGING (only 3 daily closes, not enough for trend).</div>
+    <div class="example-text">SOL delta -5.2% &gt; 4% threshold + volume 2.5x &#x2192; <b>OVERRIDE to <span class="tag tag-bear">BEARISH_TREND</span></b></div>
+    <div class="example-text">BTC -3.8% same direction &#x2192; macro move confirmed (+1 confidence)</div>
+    <div class="example-text">F&amp;G 18 = Extreme Fear &#x2192; confirms BEARISH (+1 confidence)</div>
+    <div class="example-text">Confidence: 3/5. Result: 4% range, 50% deploy, faster harvest, 100% SOL&#x2192;USDC</div>
+  </div>
+  <div class="example-box">
+    <div class="example-title">Example: all APIs down</div>
+    <div class="example-text">CoinGecko 429, Fear &amp; Greed timeout &#x2192; all signals null.</div>
+    <div class="example-text">Falls back to base regime from daily closes. Confidence: 0/5.</div>
+    <div class="example-note">Bot continues operating normally &#x2014; just without market data enhancement.</div>
   </div>
 </div>
 
