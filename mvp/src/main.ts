@@ -92,6 +92,7 @@ let liveFlashCrashCooldownUntil = 0; // timestamp: block re-entry until this tim
 let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detection
 let consecutiveTxFailures = 0; // exponential backoff on repeated TX failures
 let txBackoffUntil = 0; // timestamp: skip position operations until this time
+let lastIdleRebalanceRegime: string | null = null; // track which regime last triggered idle rebalance (cooldown: once per regime change)
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
@@ -1087,6 +1088,54 @@ async function runLiveCycle(price: number): Promise<void> {
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'auto-deploy check failed', error: String(err), timestamp: now }));
     }
+  }
+
+  // Idle wallet rebalance — convert idle SOL to USDC in BEARISH/EXTREME regimes
+  // Triggers once per regime change (not every cycle) to avoid repeated swaps
+  if (runtime.idleRebalanceEnabled && (liveRegime === 'BEARISH_TREND' || liveRegime === 'EXTREME') && lastIdleRebalanceRegime !== liveRegime) {
+    try {
+      const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+      const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
+      const idleSolUsdc = idleSol * price;
+
+      if (idleSolUsdc >= runtime.idleRebalanceMinUsdc) {
+        const convertPct = liveRegime === 'EXTREME' ? runtime.idleRebalanceExtremePct : runtime.idleRebalanceBearishPct;
+        const solToSwap = idleSol * convertPct;
+
+        if (solToSwap > 0.01) {
+          console.log(JSON.stringify({ level: 'info', msg: `Idle wallet rebalance: converting ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)}) to USDC (${liveRegime} regime, ${(convertPct * 100).toFixed(0)}%)`, timestamp: now }));
+
+          const swapResult = await liveExecutor.doSwapPublic(
+            MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
+            `Idle wallet rebalance: ${liveRegime} regime, converting ${(convertPct * 100).toFixed(0)}% of idle SOL to USDC for downside protection`,
+          );
+
+          if (swapResult) {
+            lastIdleRebalanceRegime = liveRegime;
+            const balAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+            insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+              prox_lower: null, prox_upper: null, in_range: null,
+              decision: 'IDLE_REBALANCE', reasoning: `Idle wallet rebalance (${liveRegime}): converted ${swapResult.inputAmount.toFixed(4)} SOL → ${swapResult.outputAmount.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of idle). Wallet after: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC. Keeping ${runtime.idleRebalanceSolKeep} SOL for gas.`,
+              params_json: JSON.stringify({ convertPct, solSwapped: swapResult.inputAmount, usdcReceived: swapResult.outputAmount, provider: swapResult.provider }) });
+            insertRebalanceEventWithRule2(db, {
+              timestamp: now, eventType: 'PRICE_UPDATE', price, regime: liveRegime,
+              note: `IDLE REBALANCE: ${liveRegime} regime → converted ${swapResult.inputAmount.toFixed(4)} SOL ($${(swapResult.inputAmount * price).toFixed(2)}) → ${swapResult.outputAmount.toFixed(2)} USDC via ${swapResult.provider}. Keeping ${runtime.idleRebalanceSolKeep} SOL for gas.`,
+              solBefore: balances.sol, usdcBefore: balances.usdc,
+              solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
+              feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+            });
+          } else {
+            console.log(JSON.stringify({ level: 'warn', msg: 'Idle rebalance swap failed', timestamp: now }));
+          }
+        }
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: String(err), timestamp: now }));
+    }
+  }
+  // Reset idle rebalance flag when regime changes to RANGING/BULLISH (allow re-trigger if regime goes bearish again)
+  if (liveRegime === 'RANGING' || liveRegime === 'BULLISH_TREND') {
+    lastIdleRebalanceRegime = null;
   }
 
   liveBotState = 'ACTIVE';

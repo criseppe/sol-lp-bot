@@ -2622,6 +2622,30 @@ ${NAV_HTML}
   </table>
 </div>
 
+<!-- SECTION 5b: Idle Wallet Rebalance -->
+<div class="cfg-section">
+  <h3>5b. Idle Wallet Rebalance</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px">Enable idle rebalance</td>
+      <td style="padding:6px 8px;color:#30363d;font-size:11px">true</td>
+      <td style="padding:6px 8px">
+        <select class="cfg-input" data-key="idleRebalanceEnabled" style="width:80px">
+          <option value="true" ${c.idleRebalanceEnabled ? 'selected' : ''}>On</option>
+          <option value="false" ${!c.idleRebalanceEnabled ? 'selected' : ''}>Off</option>
+        </select>
+      </td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Convert idle SOL to USDC in BEARISH/EXTREME regimes for downside protection.</td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Off: idle capital stays as-is. On: converts on regime change.</td>
+    </tr>
+    ${field('idleRebalanceMinUsdc', c.idleRebalanceMinUsdc, 100, 'Min idle value ($)', 'Only trigger if idle SOL value exceeds this threshold.', 'At $50: triggers on smaller amounts. At $200: only large idle balances.')}
+    ${field('idleRebalanceSolKeep', c.idleRebalanceSolKeep, 0.15, 'SOL to keep', 'Always keep this much SOL for gas and re-entry flexibility.', 'At 0.05: minimal SOL reserve. At 0.5: more SOL kept back.')}
+    ${field('idleRebalanceBearishPct', c.idleRebalanceBearishPct, 0.80, 'BEARISH convert %', 'Convert this % of idle SOL to USDC in BEARISH regime.', 'At 0.60: conservative. At 0.95: aggressive protection.')}
+    ${field('idleRebalanceExtremePct', c.idleRebalanceExtremePct, 0.90, 'EXTREME convert %', 'Convert this % of idle SOL to USDC in EXTREME regime.', 'At 0.80: moderate. At 1.0: convert everything possible.')}
+  </table>
+</div>
+
 <!-- SECTION 6: Circuit Breakers -->
 <div class="cfg-section">
   <h3>6. Circuit Breakers</h3>
@@ -3136,11 +3160,11 @@ exists and is earning fees.</div>
   <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Deploys idle wallet funds into an <b>existing in-range position</b>. Does not open new positions &#x2014; Rules 1&#x2013;5 handle that. Only runs after all exit rules have been evaluated and none triggered.</p>
   <div class="logic-box"><b>6 conditions must ALL pass:</b>
   1. Feature enabled          (dashboard toggle)
-  2. Regime allows it         (blocked in BEARISH and EXTREME)
+  2. Regime allows it         (blocked in EXTREME only)
   3. Idle funds &gt; threshold   (SOL &gt; 0.05 or USDC &gt; $5, after reserves)
-  4. Cooldown elapsed         (max 1 deploy per hour)
+  4. Cooldown elapsed         (configurable, default 5 min)
   5. Capital cap headroom     (position below regime deploy % cap)
-  6. Price near ideal         (within 2% of geometric mean of range)
+  6. Price within range       (not too close to edges)
 
 <b>Reserves:</b>  0.05 SOL (gas) + $1 USDC always kept
 <b>Cooldown:</b>  1 hour between deployments</div>
@@ -3168,6 +3192,35 @@ exists and is earning fees.</div>
   <div class="trigger">Runs: checked every 5 minutes when position is in range</div>
 </div>
 
+<div class="rule-card">
+  <h3><span class="rule-num">8</span> Idle Wallet Rebalance</h3>
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Converts idle SOL in the wallet to USDC during BEARISH/EXTREME regimes. Protects idle capital from further price decline. Does not touch the position &#x2014; only the wallet balance.</p>
+  <div class="logic-box"><b>Triggers once per regime change</b> (not every cycle):
+
+Regime enters BEARISH &#x2192; convert 80% of idle SOL to USDC
+Regime enters EXTREME &#x2192; convert 90% of idle SOL to USDC
+Regime returns to RANGING/BULLISH &#x2192; reset (allow re-trigger)
+
+<b>Conditions:</b>
+  &#x2022; Idle SOL value &gt; $100 (skip dust amounts)
+  &#x2022; Always keep 0.15 SOL for gas + re-entry
+  &#x2022; Feature can be disabled via /config
+
+<b>Rationale:</b>
+  In a downtrend, idle SOL loses value while earning zero fees.
+  The position already earns fees &#x2014; idle capital should match
+  the regime's risk posture. Harvest already converts SOL fees
+  to USDC (Rule 6) &#x2014; this extends the same logic to the wallet.</div>
+  <div class="example-box">
+    <div class="example-title">Regime changes RANGING &#x2192; BEARISH</div>
+    <div class="example-text">Wallet: 5.9 SOL ($486) + $5 USDC. Idle SOL = 5.9 - 0.15 keep = 5.75 SOL ($473).</div>
+    <div class="example-text">$473 &gt; $100 threshold &#x2192; convert 80% = 4.60 SOL &#x2192; ~$379 USDC via Jupiter.</div>
+    <div class="example-text">Wallet after: 1.30 SOL ($107) + $384 USDC. Protected from further SOL decline.</div>
+    <div class="example-note">If regime flips back to RANGING, idle rebalance resets &#x2014; no reverse swap (the bot will use USDC naturally on the next position open via pre-open swap).</div>
+  </div>
+  <div class="trigger">Runs: once when regime changes to BEARISH or EXTREME. Resets on RANGING/BULLISH.</div>
+</div>
+
 <!-- ── RULE EXECUTION ORDER ─────────────────────────────────────────── -->
 
 <div class="card" style="margin-bottom:16px">
@@ -3176,10 +3229,12 @@ exists and is earning fees.</div>
   <div class="logic-box">1. No position?  &#x2192; Open (R1, R4, R5) or pullback watch (R3)    <b style="color:#f97316">return</b>
 2. Out of range? &#x2192; Close + reopen (below) or pullback (above)  <b style="color:#f97316">return</b>
 3. Rule 2 exit?  &#x2192; Proximity triggered &#x2192; close + act           <b style="color:#f97316">return</b>
-4. Rule 6        &#x2192; Harvest if due (no return, continues)
-5. Rule 7        &#x2192; Auto deploy if conditions met
-6. Log HOLD      &#x2192; Record state to DB</div>
-  <div style="font-size:11px;color:#8b949e;margin-top:4px">This ordering ensures auto deploy (R7) never conflicts with exit rules (R2, OOR). It only runs when the position is safely in range and holding.</div>
+4. Max age?      &#x2192; Rebalance if position too old (configurable)  <b style="color:#f97316">return</b>
+5. Rule 6        &#x2192; Harvest if due (min $0.50 threshold)
+6. Rule 7        &#x2192; Auto deploy if conditions met
+7. Rule 8        &#x2192; Idle wallet rebalance (once per regime change)
+8. Log HOLD      &#x2192; Record state to DB</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">Exit rules (1-3) are evaluated first. If none trigger, maintenance rules (4-7) run. Idle rebalance (R8) runs last &#x2014; only after confirming the position is safe and stable.</div>
 </div>
 
 <!-- ── STATE MACHINE ───────────────────────────────────────────────── -->

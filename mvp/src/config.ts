@@ -52,6 +52,13 @@ export const runtime = {
   // Position max age (hours) — rebalance to reset IL baseline. 0 = disabled.
   positionMaxAgeHours: 0,
 
+  // Idle wallet rebalance — convert idle SOL to USDC in bearish/extreme regimes
+  idleRebalanceEnabled: true,
+  idleRebalanceMinUsdc: 100,                 // min idle SOL value to trigger ($)
+  idleRebalanceSolKeep: 0.15,                // always keep this much SOL (gas + re-entry)
+  idleRebalanceBearishPct: 0.80,             // convert 80% of idle SOL in BEARISH
+  idleRebalanceExtremePct: 0.90,             // convert 90% of idle SOL in EXTREME
+
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
@@ -141,6 +148,13 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   // Position max age
   const vMaxAge = nv('positionMaxAgeHours', 0, 168); if (vMaxAge != null) runtime.positionMaxAgeHours = vMaxAge;
 
+  // Idle wallet rebalance
+  const vIREnabled = g('idleRebalanceEnabled'); if (vIREnabled === 'true' || vIREnabled === 'false') runtime.idleRebalanceEnabled = vIREnabled === 'true';
+  const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
+  const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
+  const vIRBear = nv('idleRebalanceBearishPct', 0, 1); if (vIRBear != null) runtime.idleRebalanceBearishPct = vIRBear;
+  const vIRExtreme = nv('idleRebalanceExtremePct', 0, 1); if (vIRExtreme != null) runtime.idleRebalanceExtremePct = vIRExtreme;
+
   // Enhanced regime
   const vUseEnh = g('useEnhancedRegime'); if (vUseEnh === 'true' || vUseEnh === 'false') runtime.useEnhancedRegime = vUseEnh === 'true';
   const vV1h = nv('vol1hExtremeThreshold', 0.01, 0.5); if (vV1h != null) runtime.vol1hExtremeThreshold = vV1h;
@@ -204,6 +218,11 @@ export function exportConfig(): Record<string, string> {
   out['swapBufferPct'] = String(runtime.swapBufferPct);
   out['swapProvider'] = runtime.swapProvider;
   out['positionMaxAgeHours'] = String(runtime.positionMaxAgeHours);
+  out['idleRebalanceEnabled'] = String(runtime.idleRebalanceEnabled);
+  out['idleRebalanceMinUsdc'] = String(runtime.idleRebalanceMinUsdc);
+  out['idleRebalanceSolKeep'] = String(runtime.idleRebalanceSolKeep);
+  out['idleRebalanceBearishPct'] = String(runtime.idleRebalanceBearishPct);
+  out['idleRebalanceExtremePct'] = String(runtime.idleRebalanceExtremePct);
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
   out['useEnhancedRegime'] = String(runtime.useEnhancedRegime);
   out['vol1hExtremeThreshold'] = String(runtime.vol1hExtremeThreshold);

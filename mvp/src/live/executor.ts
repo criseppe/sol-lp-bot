@@ -128,6 +128,13 @@ export class LiveExecutor {
     return result;
   }
 
+  /**
+   * Public swap method for external callers (idle wallet rebalance, etc.).
+   */
+  async doSwapPublic(inputMint: string, outputMint: string, amountRaw: number, reason: string): Promise<SwapResult | null> {
+    return this.doSwap(inputMint, outputMint, amountRaw, reason);
+  }
+
   async openPosition(
     range: RangeBounds,
     currentPrice: number,
