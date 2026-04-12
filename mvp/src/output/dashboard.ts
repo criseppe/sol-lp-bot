@@ -102,6 +102,7 @@ export interface LiveData {
     vol1h: number | null;
     vol4h: number | null;
     solDelta24h: number | null;
+    solVolume24h: number | null;
     btcDelta24h: number | null;
     btcPrice: number | null;
     volumeRatio4h: number | null;
@@ -2257,7 +2258,8 @@ ${(() => {
         <div><span style="color:#8b949e">Vol 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol4h, 0.05)}">\${fmt(s.vol4h, 4)}</span></div>
         <div><span style="color:#8b949e">SOL 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.solDelta24h)}">\${pct(s.solDelta24h)}</span></div>
         <div><span style="color:#8b949e">BTC 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.btcDelta24h)}">\${pct(s.btcDelta24h)}</span></div>
-        <div><span style="color:#8b949e">Vol Ratio 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${s.volumeRatio4h > 3 ? '#ef4444' : s.volumeRatio4h > 2 ? '#eab308' : '#c9d1d9'}">\${fmt(s.volumeRatio4h, 1)}x</span></div>
+        <div><span style="color:#8b949e">Vol Ratio</span><br><span style="font-size:16px;font-weight:bold;color:\${s.volumeRatio4h > 3 ? '#ef4444' : s.volumeRatio4h > 2 ? '#eab308' : '#c9d1d9'}">\${s.volumeRatio4h != null ? fmt(s.volumeRatio4h, 1) + 'x' : 'building...'}</span></div>
+        <div><span style="color:#8b949e">SOL Vol 24h</span><br><span style="font-size:16px;font-weight:bold;color:#c9d1d9">\${s.solVolume24h != null ? '$' + (s.solVolume24h / 1e6).toFixed(0) + 'M' : 'n/a'}</span></div>
         <div><span style="color:#8b949e">Fear & Greed</span><br><span style="font-size:16px;font-weight:bold;color:\${fgCol(s.fearGreedIndex)}">\${s.fearGreedIndex != null ? s.fearGreedIndex + ' (' + (s.fearGreedLabel || '') + ')' : 'n/a'}</span></div>
       </div>
       <div style="margin-top:8px;font-size:10px;color:#8b949e">Updated \${age}m ago\${s.errors && s.errors.length > 0 ? ' · Errors: ' + s.errors.join(', ') : ''}</div>

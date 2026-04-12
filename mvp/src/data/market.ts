@@ -17,17 +17,18 @@ export interface OHLCV {
 }
 
 export interface MarketSignals {
-  // SOL volatility (from Birdeye OHLCV)
-  vol1h: number | null;       // stddev of 1h log returns (last 24h)
+  // SOL volatility (from CoinGecko OHLC)
+  vol1h: number | null;       // stddev of 30min log returns (last 24h)
   vol4h: number | null;       // stddev of 4h log returns (last 7d)
   solDelta24h: number | null;  // SOL price change % in last 24h
+  solVolume24h: number | null;  // SOL 24h trading volume in USD
 
   // BTC correlation
   btcDelta24h: number | null;  // BTC price change % in last 24h
   btcPrice: number | null;
 
   // Volume
-  volumeRatio4h: number | null; // current 4h vol / 7d avg 4h vol
+  volumeRatio4h: number | null; // latest 24h vol / rolling 7d avg vol
 
   // Sentiment
   fearGreedIndex: number | null;  // 0-100
@@ -114,10 +115,16 @@ async function fetchFearGreed(): Promise<{ value: number; label: string } | null
   return { value: parseInt(json.data[0].value), label: json.data[0].value_classification };
 }
 
+// Max volume history entries: 7 days * 4 readings/hour * 24 hours = 672
+// At 15-min polling we get 96/day * 7 = 672 readings
+const MAX_VOLUME_HISTORY = 672;
+
 export class MarketDataService {
   private signals: MarketSignals | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private fetchCount = 0;
+  // Rolling 24h volume readings for computing volume ratio
+  private volumeHistory: Array<{ timestamp: number; volume24h: number }> = [];
 
   async start(): Promise<void> {
     // Initial fetch
@@ -153,26 +160,43 @@ export class MarketDataService {
 
     // 2. SOL 4H candles (last 7d) for medium-term vol — via CoinGecko OHLC
     let vol4h: number | null = null;
-    // Volume ratio not available from CoinGecko OHLC (no volume data in free tier).
-    // Could be sourced from Orca pool stats in future. Null = signal skipped.
-    const volumeRatio4h: number | null = null;
+    let volumeRatio4h: number | null = null;
+    let solVolume24h: number | null = null;
     try {
       const candles7d = await fetchCoinGeckoOHLC(7); // 4h candles
       if (candles7d.length >= 6) {
         const closes = candles7d.map(c => c.close);
         vol4h = stdDev(logReturns(closes));
       }
-      // Volume ratio from SOL market data (24h vol vs rough estimate)
-      const solData = await fetchSolMarketData();
-      if (solData) {
-        // Use SOL 24h change as more reliable signal (CoinGecko OHLC has no volume)
-        if (solDelta24h == null) solDelta24h = solData.delta24h;
-      }
     } catch (err) {
       errors.push(`coingecko-ohlc-7d: ${String(err).slice(0, 80)}`);
     }
 
-    // 3. BTC price & 24h change
+    // 3. SOL 24h volume + volume ratio from rolling history
+    try {
+      const solData = await fetchSolMarketData();
+      if (solData) {
+        if (solDelta24h == null) solDelta24h = solData.delta24h;
+        solVolume24h = solData.volume24h;
+
+        // Store in rolling history
+        this.volumeHistory.push({ timestamp: Date.now(), volume24h: solData.volume24h });
+        if (this.volumeHistory.length > MAX_VOLUME_HISTORY) {
+          this.volumeHistory = this.volumeHistory.slice(-MAX_VOLUME_HISTORY);
+        }
+
+        // Compute volume ratio: current vs 7-day average
+        // Need at least 24h of data (~96 readings at 15min) for meaningful average
+        if (this.volumeHistory.length >= 4) {
+          const avgVol = this.volumeHistory.reduce((sum, v) => sum + v.volume24h, 0) / this.volumeHistory.length;
+          volumeRatio4h = avgVol > 0 ? solData.volume24h / avgVol : null;
+        }
+      }
+    } catch (err) {
+      errors.push(`coingecko-sol-vol: ${String(err).slice(0, 80)}`);
+    }
+
+    // 4. BTC price & 24h change
     let btcPrice: number | null = null;
     let btcDelta24h: number | null = null;
     try {
@@ -185,7 +209,7 @@ export class MarketDataService {
       errors.push(`coingecko: ${String(err).slice(0, 80)}`);
     }
 
-    // 4. Fear & Greed Index
+    // 5. Fear & Greed Index
     let fearGreedIndex: number | null = null;
     let fearGreedLabel: string | null = null;
     try {
@@ -202,6 +226,7 @@ export class MarketDataService {
       vol1h,
       vol4h,
       solDelta24h,
+      solVolume24h,
       btcDelta24h,
       btcPrice,
       volumeRatio4h,
@@ -219,7 +244,8 @@ export class MarketDataService {
       vol4h: vol4h?.toFixed(4) ?? 'n/a',
       solDelta24h: solDelta24h != null ? `${solDelta24h.toFixed(2)}%` : 'n/a',
       btcDelta24h: btcDelta24h != null ? `${btcDelta24h.toFixed(2)}%` : 'n/a',
-      volumeRatio4h: volumeRatio4h != null ? (volumeRatio4h as number).toFixed(2) : 'n/a',
+      volumeRatio4h: volumeRatio4h?.toFixed(2) ?? 'n/a',
+      solVolume24h: solVolume24h != null ? `$${(solVolume24h / 1e6).toFixed(0)}M` : 'n/a',
       fearGreed: fearGreedIndex != null ? `${fearGreedIndex} (${fearGreedLabel})` : 'n/a',
       errors: errors.length > 0 ? errors : undefined,
       timestamp: Date.now(),
