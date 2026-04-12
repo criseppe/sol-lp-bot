@@ -780,7 +780,9 @@ async function runLiveCycle(price: number): Promise<void> {
     const confidenceNote = ` Confidence: ${result.confidence}/5.`;
 
     // Suppress regime changes on thin data to prevent flapping (only for base-regime changes)
-    const changed = result.regime !== liveRegime && (closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE || result.overrideReason != null);
+    // Allow regime change if: enough daily data, OR market signals override, OR market signals confirm base regime with confidence
+    const marketConfirmed = result.confidence > 0 && mktSignals != null;
+    const changed = result.regime !== liveRegime && (closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE || result.overrideReason != null || marketConfirmed);
 
     // Log regime changes immediately; unchanged evals only every 1 hour
     if (changed || now - liveLastRegimeEvalLog >= 3_600_000) {
