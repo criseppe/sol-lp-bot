@@ -1407,8 +1407,8 @@ ${NAV_HTML}
     <div class="row"><span class="label">USDC in Position</span><span class="value">${fmt(live.positionUsdc, 6)}</span></div>
     <div class="row"><span class="label">Position Value</span><span class="value" style="color:#58a6ff">$${fmt(live.positionValueUsdc)}</span></div>
     <div class="row"><span class="label">Entry Price</span><span class="value">$${fmt(live.entryPrice ?? 0)}</span></div>
-    <div class="row"><span class="label">Actual Yield 24h</span><span class="value" style="color:#22c55e">$${fmt(live.actual24hFeesUsdc, 4)}</span></div>
-    <div class="row"><span class="label">Actual APR</span><span class="value" style="color:#22c55e">${fmt(live.actual24hAprPct, 1)}%</span></div>
+    <div class="row"><span class="label">Fees Today</span><span class="value" style="color:#22c55e">$${fmt(live.actual24hFeesUsdc, 4)}</span></div>
+    <div class="row"><span class="label">Today's APR</span><span class="value" style="color:#22c55e">${fmt(live.actual24hAprPct, 1)}%</span></div>
     <div class="row"><span class="label">Est. Max Yield 24h</span><span class="value" style="color:#8b949e">$${fmt(live.estDailyFeesUsdc, 4)} <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
     <div class="row"><span class="label">Est. Max APR</span><span class="value" style="color:#8b949e">${fmt(live.estAprPct, 1)}% <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
     ${(() => {
