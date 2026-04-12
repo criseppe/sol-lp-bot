@@ -52,12 +52,16 @@ export const runtime = {
   // Position max age (hours) — rebalance to reset IL baseline. 0 = disabled.
   positionMaxAgeHours: 0,
 
-  // Idle wallet rebalance — convert idle SOL to USDC in bearish/extreme regimes
+  // Idle wallet rebalance — maintain target SOL/USDC split per regime
   idleRebalanceEnabled: true,
-  idleRebalanceMinUsdc: 100,                 // min idle SOL value to trigger ($)
-  idleRebalanceSolKeep: 0.15,                // always keep this much SOL (gas + re-entry)
-  idleRebalanceBearishPct: 0.80,             // convert 80% of idle SOL in BEARISH
-  idleRebalanceExtremePct: 0.90,             // convert 90% of idle SOL in EXTREME
+  idleRebalanceMinUsdc: 100,                 // min idle value to trigger ($)
+  idleRebalanceSolKeep: 0.15,                // always keep this much SOL for gas
+  idleRebalanceDeviationPct: 0.20,           // only rebalance if >20% off target
+  // Target idle SOL % per regime (rest is USDC)
+  idleTargetSolPctRanging: 0.50,             // 50% SOL — balanced for deposits
+  idleTargetSolPctBullish: 0.60,             // 60% SOL — ride the upside
+  idleTargetSolPctBearish: 0.35,             // 35% SOL — protect from downside
+  idleTargetSolPctExtreme: 0.15,             // 15% SOL — survival mode
 
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
@@ -152,8 +156,11 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vIREnabled = g('idleRebalanceEnabled'); if (vIREnabled === 'true' || vIREnabled === 'false') runtime.idleRebalanceEnabled = vIREnabled === 'true';
   const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
-  const vIRBear = nv('idleRebalanceBearishPct', 0, 1); if (vIRBear != null) runtime.idleRebalanceBearishPct = vIRBear;
-  const vIRExtreme = nv('idleRebalanceExtremePct', 0, 1); if (vIRExtreme != null) runtime.idleRebalanceExtremePct = vIRExtreme;
+  const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
+  const vIRRanging = nv('idleTargetSolPctRanging', 0, 1); if (vIRRanging != null) runtime.idleTargetSolPctRanging = vIRRanging;
+  const vIRBull = nv('idleTargetSolPctBullish', 0, 1); if (vIRBull != null) runtime.idleTargetSolPctBullish = vIRBull;
+  const vIRBear = nv('idleTargetSolPctBearish', 0, 1); if (vIRBear != null) runtime.idleTargetSolPctBearish = vIRBear;
+  const vIRExtreme = nv('idleTargetSolPctExtreme', 0, 1); if (vIRExtreme != null) runtime.idleTargetSolPctExtreme = vIRExtreme;
 
   // Enhanced regime
   const vUseEnh = g('useEnhancedRegime'); if (vUseEnh === 'true' || vUseEnh === 'false') runtime.useEnhancedRegime = vUseEnh === 'true';
@@ -221,8 +228,11 @@ export function exportConfig(): Record<string, string> {
   out['idleRebalanceEnabled'] = String(runtime.idleRebalanceEnabled);
   out['idleRebalanceMinUsdc'] = String(runtime.idleRebalanceMinUsdc);
   out['idleRebalanceSolKeep'] = String(runtime.idleRebalanceSolKeep);
-  out['idleRebalanceBearishPct'] = String(runtime.idleRebalanceBearishPct);
-  out['idleRebalanceExtremePct'] = String(runtime.idleRebalanceExtremePct);
+  out['idleRebalanceDeviationPct'] = String(runtime.idleRebalanceDeviationPct);
+  out['idleTargetSolPctRanging'] = String(runtime.idleTargetSolPctRanging);
+  out['idleTargetSolPctBullish'] = String(runtime.idleTargetSolPctBullish);
+  out['idleTargetSolPctBearish'] = String(runtime.idleTargetSolPctBearish);
+  out['idleTargetSolPctExtreme'] = String(runtime.idleTargetSolPctExtreme);
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
   out['useEnhancedRegime'] = String(runtime.useEnhancedRegime);
   out['vol1hExtremeThreshold'] = String(runtime.vol1hExtremeThreshold);

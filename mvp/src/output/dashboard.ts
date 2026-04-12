@@ -2624,7 +2624,7 @@ ${NAV_HTML}
 
 <!-- SECTION 5b: Idle Wallet Rebalance -->
 <div class="cfg-section">
-  <h3>5b. Idle Wallet Rebalance</h3>
+  <h3>5b. Idle Wallet Rebalance (Rule 8)</h3>
   <table>
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
     <tr style="border-bottom:1px solid #21262d">
@@ -2636,13 +2636,16 @@ ${NAV_HTML}
           <option value="false" ${!c.idleRebalanceEnabled ? 'selected' : ''}>Off</option>
         </select>
       </td>
-      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Convert idle SOL to USDC in BEARISH/EXTREME regimes for downside protection.</td>
-      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Off: idle capital stays as-is. On: converts on regime change.</td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Maintain target SOL/USDC split in idle wallet per regime. Triggers once per regime change.</td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Off: idle capital stays as-is. On: rebalances on regime change.</td>
     </tr>
-    ${field('idleRebalanceMinUsdc', c.idleRebalanceMinUsdc, 100, 'Min idle value ($)', 'Only trigger if idle SOL value exceeds this threshold.', 'At $50: triggers on smaller amounts. At $200: only large idle balances.')}
-    ${field('idleRebalanceSolKeep', c.idleRebalanceSolKeep, 0.15, 'SOL to keep', 'Always keep this much SOL for gas and re-entry flexibility.', 'At 0.05: minimal SOL reserve. At 0.5: more SOL kept back.')}
-    ${field('idleRebalanceBearishPct', c.idleRebalanceBearishPct, 0.80, 'BEARISH convert %', 'Convert this % of idle SOL to USDC in BEARISH regime.', 'At 0.60: conservative. At 0.95: aggressive protection.')}
-    ${field('idleRebalanceExtremePct', c.idleRebalanceExtremePct, 0.90, 'EXTREME convert %', 'Convert this % of idle SOL to USDC in EXTREME regime.', 'At 0.80: moderate. At 1.0: convert everything possible.')}
+    ${field('idleRebalanceMinUsdc', c.idleRebalanceMinUsdc, 100, 'Min idle value ($)', 'Only trigger if total idle value exceeds this threshold.', 'At $50: triggers on smaller amounts. At $200: only large idle balances.')}
+    ${field('idleRebalanceSolKeep', c.idleRebalanceSolKeep, 0.15, 'SOL to keep', 'Always keep this much SOL for gas regardless of target.', 'At 0.05: minimal gas reserve. At 0.5: more SOL kept back.')}
+    ${field('idleRebalanceDeviationPct', c.idleRebalanceDeviationPct, 0.20, 'Deviation trigger', 'Only rebalance if wallet is more than this % off the regime target.', 'At 0.10: triggers more often. At 0.30: only large imbalances.')}
+    ${field('idleTargetSolPctRanging', c.idleTargetSolPctRanging, 0.50, 'RANGING target SOL %', 'Target SOL share of idle wallet in RANGING. 0.50 = balanced.', 'At 0.40: slight USDC bias. At 0.60: slight SOL bias.')}
+    ${field('idleTargetSolPctBullish', c.idleTargetSolPctBullish, 0.60, 'BULLISH target SOL %', 'Target SOL share in BULLISH. Higher = ride the upside.', 'At 0.50: balanced. At 0.70: strong SOL exposure.')}
+    ${field('idleTargetSolPctBearish', c.idleTargetSolPctBearish, 0.35, 'BEARISH target SOL %', 'Target SOL share in BEARISH. Lower = more USDC protection.', 'At 0.20: aggressive protection. At 0.40: moderate.')}
+    ${field('idleTargetSolPctExtreme', c.idleTargetSolPctExtreme, 0.15, 'EXTREME target SOL %', 'Target SOL share in EXTREME. Minimum SOL exposure.', 'At 0.10: almost all USDC. At 0.25: keep some SOL.')}
   </table>
 </div>
 
@@ -3194,31 +3197,48 @@ exists and is earning fees.</div>
 
 <div class="rule-card">
   <h3><span class="rule-num">8</span> Idle Wallet Rebalance</h3>
-  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Converts idle SOL in the wallet to USDC during BEARISH/EXTREME regimes. Protects idle capital from further price decline. Does not touch the position &#x2014; only the wallet balance.</p>
-  <div class="logic-box"><b>Triggers once per regime change</b> (not every cycle):
+  <p style="font-size:12px;color:#c9d1d9;line-height:1.5">Maintains a target SOL/USDC split for idle wallet capital based on the current regime. Swaps in either direction to reach the target. Triggers once per regime change. Does not touch the position &#x2014; only the wallet balance.</p>
+  <div class="logic-box"><b>Target idle SOL % by regime:</b>
+<span class="tag tag-ranging">RANGING</span>  50% SOL (balanced &#x2014; ready for LP deposits)
+<span class="tag tag-bull">BULLISH</span>  60% SOL (ride the upside)
+<span class="tag tag-bear">BEARISH</span>  35% SOL (protect with USDC)
+<span class="tag tag-extreme">EXTREME</span> 15% SOL (maximum USDC protection)
 
-Regime enters BEARISH &#x2192; convert 80% of idle SOL to USDC
-Regime enters EXTREME &#x2192; convert 90% of idle SOL to USDC
-Regime returns to RANGING/BULLISH &#x2192; reset (allow re-trigger)
+<b>Triggers when:</b>
+  1. Regime changes (any direction)
+  2. Total idle value &gt; $100
+  3. Current SOL % deviates &gt; 20% from target
+  4. Swap amount &gt; $5 (skip dust)
 
-<b>Conditions:</b>
-  &#x2022; Idle SOL value &gt; $100 (skip dust amounts)
-  &#x2022; Always keep 0.15 SOL for gas + re-entry
-  &#x2022; Feature can be disabled via /config
+<b>Swaps both ways:</b>
+  SOL-heavy in BEARISH &#x2192; sell SOL for USDC
+  USDC-heavy in BULLISH &#x2192; buy SOL with USDC
+  Already near target &#x2192; skip, no swap needed
 
-<b>Rationale:</b>
-  In a downtrend, idle SOL loses value while earning zero fees.
-  The position already earns fees &#x2014; idle capital should match
-  the regime's risk posture. Harvest already converts SOL fees
-  to USDC (Rule 6) &#x2014; this extends the same logic to the wallet.</div>
+<b>Safety:</b>
+  &#x2022; Always keep 0.15 SOL for gas
+  &#x2022; Only once per regime change (no repeated swaps)
+  &#x2022; Resets when regime changes again</div>
   <div class="example-box">
-    <div class="example-title">Regime changes RANGING &#x2192; BEARISH</div>
-    <div class="example-text">Wallet: 5.9 SOL ($486) + $5 USDC. Idle SOL = 5.9 - 0.15 keep = 5.75 SOL ($473).</div>
-    <div class="example-text">$473 &gt; $100 threshold &#x2192; convert 80% = 4.60 SOL &#x2192; ~$379 USDC via Jupiter.</div>
-    <div class="example-text">Wallet after: 1.30 SOL ($107) + $384 USDC. Protected from further SOL decline.</div>
-    <div class="example-note">If regime flips back to RANGING, idle rebalance resets &#x2014; no reverse swap (the bot will use USDC naturally on the next position open via pre-open swap).</div>
+    <div class="example-title">RANGING &#x2192; BEARISH: too much SOL</div>
+    <div class="example-text">Wallet: 5.9 SOL ($486) + $5 USDC. SOL % = 99%. Target = 35%.</div>
+    <div class="example-text">Deviation 64% &gt; 20% threshold. Need to sell SOL to reach 35%.</div>
+    <div class="example-text">Target SOL value = $172. Current = $486. Sell ~$314 worth = 3.82 SOL.</div>
+    <div class="example-text">Wallet after: ~2.08 SOL ($171) + $319 USDC. SOL &#x2248; 35%. &#x2713;</div>
   </div>
-  <div class="trigger">Runs: once when regime changes to BEARISH or EXTREME. Resets on RANGING/BULLISH.</div>
+  <div class="example-box">
+    <div class="example-title">BEARISH &#x2192; BULLISH: too much USDC</div>
+    <div class="example-text">Wallet: 0.5 SOL ($41) + $350 USDC. SOL % = 10%. Target = 60%.</div>
+    <div class="example-text">Deviation 50% &gt; 20% threshold. Need to buy SOL with USDC.</div>
+    <div class="example-text">Target SOL value = $234. Current = $41. Buy ~$193 worth &#x2192; 2.35 SOL.</div>
+    <div class="example-text">Wallet after: ~2.85 SOL ($234) + $157 USDC. SOL &#x2248; 60%. &#x2713;</div>
+  </div>
+  <div class="example-box">
+    <div class="example-title">Already near target &#x2192; skip</div>
+    <div class="example-text">Wallet: 2.0 SOL ($164) + $200 USDC. SOL % = 45%. Target (RANGING) = 50%.</div>
+    <div class="example-text">Deviation 5% &lt; 20% threshold &#x2192; <b style="color:#22c55e">SKIP</b>. No swap needed.</div>
+  </div>
+  <div class="trigger">Runs: once per regime change, all regimes. Skips if wallet already near target.</div>
 </div>
 
 <!-- ── RULE EXECUTION ORDER ─────────────────────────────────────────── -->

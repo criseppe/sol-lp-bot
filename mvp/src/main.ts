@@ -1090,52 +1090,93 @@ async function runLiveCycle(price: number): Promise<void> {
     }
   }
 
-  // Idle wallet rebalance — convert idle SOL to USDC in BEARISH/EXTREME regimes
+  // Rule 8: Idle wallet rebalance — maintain target SOL/USDC split per regime
   // Triggers once per regime change (not every cycle) to avoid repeated swaps
-  if (runtime.idleRebalanceEnabled && (liveRegime === 'BEARISH_TREND' || liveRegime === 'EXTREME') && lastIdleRebalanceRegime !== liveRegime) {
+  if (runtime.idleRebalanceEnabled && lastIdleRebalanceRegime !== liveRegime) {
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
       const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
-      const idleSolUsdc = idleSol * price;
+      const idleUsdc = Math.max(0, balances.usdc - runtime.usdcReserve);
+      const idleTotal = idleSol * price + idleUsdc;
 
-      if (idleSolUsdc >= runtime.idleRebalanceMinUsdc) {
-        const convertPct = liveRegime === 'EXTREME' ? runtime.idleRebalanceExtremePct : runtime.idleRebalanceBearishPct;
-        const solToSwap = idleSol * convertPct;
+      if (idleTotal >= runtime.idleRebalanceMinUsdc) {
+        // Get target SOL % for current regime
+        const targetSolPct =
+          liveRegime === 'EXTREME' ? runtime.idleTargetSolPctExtreme :
+          liveRegime === 'BEARISH_TREND' ? runtime.idleTargetSolPctBearish :
+          liveRegime === 'BULLISH_TREND' ? runtime.idleTargetSolPctBullish :
+          runtime.idleTargetSolPctRanging;
 
-        if (solToSwap > 0.01) {
-          console.log(JSON.stringify({ level: 'info', msg: `Idle wallet rebalance: converting ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)}) to USDC (${liveRegime} regime, ${(convertPct * 100).toFixed(0)}%)`, timestamp: now }));
+        const currentSolPct = idleTotal > 0 ? (idleSol * price) / idleTotal : 0;
+        const deviation = currentSolPct - targetSolPct;
 
-          const swapResult = await liveExecutor.doSwapPublic(
-            MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
-            `Idle wallet rebalance: ${liveRegime} regime, converting ${(convertPct * 100).toFixed(0)}% of idle SOL to USDC for downside protection`,
-          );
+        // Only swap if wallet is significantly off-target
+        if (Math.abs(deviation) > runtime.idleRebalanceDeviationPct) {
+          const targetSolUsdc = idleTotal * targetSolPct;
+          const currentSolUsdc = idleSol * price;
+          const diffUsdc = Math.abs(currentSolUsdc - targetSolUsdc);
+
+          let swapResult = null;
+          let swapDirection = '';
+
+          if (deviation > 0) {
+            // Too much SOL → swap SOL to USDC
+            const solToSwap = Math.min(diffUsdc / price, idleSol);
+            if (solToSwap > 0.01 && diffUsdc > 5) {
+              swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
+              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)})`, timestamp: now }));
+              swapResult = await liveExecutor.doSwapPublic(
+                MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
+                `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
+              );
+            }
+          } else {
+            // Too much USDC → swap USDC to SOL
+            const usdcToSwap = Math.min(diffUsdc, idleUsdc);
+            if (usdcToSwap > 1 && diffUsdc > 5) {
+              swapDirection = `USDC→SOL (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
+              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC`, timestamp: now }));
+              swapResult = await liveExecutor.doSwapPublic(
+                MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6),
+                `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
+              );
+            }
+          }
 
           if (swapResult) {
             lastIdleRebalanceRegime = liveRegime;
+            await new Promise(r => setTimeout(r, 4000));
             const balAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+            const newSolPct = (Math.max(0, balAfter.sol - runtime.idleRebalanceSolKeep) * price) / idleTotal;
             insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
               prox_lower: null, prox_upper: null, in_range: null,
-              decision: 'IDLE_REBALANCE', reasoning: `Idle wallet rebalance (${liveRegime}): converted ${swapResult.inputAmount.toFixed(4)} SOL → ${swapResult.outputAmount.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of idle). Wallet after: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC. Keeping ${runtime.idleRebalanceSolKeep} SOL for gas.`,
-              params_json: JSON.stringify({ convertPct, solSwapped: swapResult.inputAmount, usdcReceived: swapResult.outputAmount, provider: swapResult.provider }) });
+              decision: 'IDLE_REBALANCE', reasoning: `Idle wallet rebalance (${liveRegime}): ${swapDirection}. Swapped ${swapResult.inputAmount.toFixed(4)} ${deviation > 0 ? 'SOL' : 'USDC'} → ${swapResult.outputAmount.toFixed(4)} ${deviation > 0 ? 'USDC' : 'SOL'} via ${swapResult.provider}. Wallet: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC (SOL ${(newSolPct * 100).toFixed(0)}%, target ${(targetSolPct * 100).toFixed(0)}%).`,
+              params_json: JSON.stringify({ targetSolPct, currentSolPct: currentSolPct, deviation, provider: swapResult.provider }) });
             insertRebalanceEventWithRule2(db, {
               timestamp: now, eventType: 'PRICE_UPDATE', price, regime: liveRegime,
-              note: `IDLE REBALANCE: ${liveRegime} regime → converted ${swapResult.inputAmount.toFixed(4)} SOL ($${(swapResult.inputAmount * price).toFixed(2)}) → ${swapResult.outputAmount.toFixed(2)} USDC via ${swapResult.provider}. Keeping ${runtime.idleRebalanceSolKeep} SOL for gas.`,
+              note: `IDLE REBALANCE (${liveRegime}): ${swapDirection}. ${swapResult.inputAmount.toFixed(4)} ${deviation > 0 ? 'SOL' : 'USDC'} → ${swapResult.outputAmount.toFixed(4)} ${deviation > 0 ? 'USDC' : 'SOL'} via ${swapResult.provider}.`,
               solBefore: balances.sol, usdcBefore: balances.usdc,
               solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
               feeSol: 0, feeUsdc: 0, ilAtClose: 0,
             });
-          } else {
+          } else if (swapDirection) {
             console.log(JSON.stringify({ level: 'warn', msg: 'Idle rebalance swap failed', timestamp: now }));
+          } else {
+            // Deviation exists but swap amount too small — mark as done
+            lastIdleRebalanceRegime = liveRegime;
           }
+        } else {
+          // Wallet already near target — mark as done for this regime
+          lastIdleRebalanceRegime = liveRegime;
+          console.log(JSON.stringify({ level: 'info', msg: `Idle wallet already near target: SOL ${(currentSolPct * 100).toFixed(0)}% vs target ${(targetSolPct * 100).toFixed(0)}% (deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < ${(runtime.idleRebalanceDeviationPct * 100).toFixed(0)}% threshold)`, timestamp: now }));
         }
+      } else {
+        // Not enough idle capital to bother — mark as done
+        lastIdleRebalanceRegime = liveRegime;
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: String(err), timestamp: now }));
     }
-  }
-  // Reset idle rebalance flag when regime changes to RANGING/BULLISH (allow re-trigger if regime goes bearish again)
-  if (liveRegime === 'RANGING' || liveRegime === 'BULLISH_TREND') {
-    lastIdleRebalanceRegime = null;
   }
 
   liveBotState = 'ACTIVE';
