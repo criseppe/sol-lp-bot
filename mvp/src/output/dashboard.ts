@@ -1363,26 +1363,23 @@ ${NAV_HTML}
     <h2>Total Portfolio Value</h2>
     <div class="big-number">
       <div class="val" style="color:#58a6ff">$${fmt(live.totalValueWithPosition)}</div>
-      ${(() => {
-        const targetPct = live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50;
-        const walletSolVal = live.solBalance * live.solPrice;
-        const walletTotal = walletSolVal + live.usdcBalance;
-        const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
-        const walletUsdcPct = walletTotal > 0 ? (live.usdcBalance / walletTotal * 100) : 0;
-        const deviation = Math.abs(walletSolPct - targetPct);
-        const deviationCol = deviation > 15 ? '#ef4444' : deviation > 10 ? '#eab308' : '#22c55e';
-        return `<div class="sub">
-          Wallet: <span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span>
-          <span style="color:#8b949e;margin-left:6px">·</span>
-          <span style="color:${deviationCol};margin-left:6px">Target: ${targetPct}% SOL (${live.regime})</span>
-        </div>`;
-      })()}
+      <div class="sub">Wallet + Liquidity Position</div>
     </div>
     <div class="wallet-split">
       <div class="wallet-half">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Wallet</div>
         <div style="font-size:16px;font-weight:bold">$${fmt(live.totalValueUsdc)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.solBalance, 4)} SOL + ${fmt(live.usdcBalance, 2)} USDC</div>
+        ${(() => {
+          const targetPct = live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50;
+          const walletSolVal = live.solBalance * live.solPrice;
+          const walletTotal = walletSolVal + live.usdcBalance;
+          const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
+          const walletUsdcPct = walletTotal > 0 ? (live.usdcBalance / walletTotal * 100) : 0;
+          const deviation = Math.abs(walletSolPct - targetPct);
+          const deviationCol = deviation > 15 ? '#ef4444' : deviation > 10 ? '#eab308' : '#22c55e';
+          return `<div style="font-size:10px;margin-top:4px"><span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span> <span style="color:${deviationCol}">· Target: ${targetPct}% SOL</span></div>`;
+        })()}
       </div>
       <div class="wallet-half">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Liquidity Position</div>
