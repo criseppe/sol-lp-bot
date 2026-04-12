@@ -3398,6 +3398,8 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div class="r"><span class="k">HARV</span><span class="v gold" id="hf">$0</span></div>
     <div class="r"><span class="k">TOTAL</span><span class="v gold" id="tf">$0</span></div>
     <div class="r"><span class="k">/DAY</span><span class="v gold" id="df">$0</span></div>
+    <div class="r"><span class="k">/HOUR</span><span class="v gold" id="fh">$0</span></div>
+    <div class="r"><span class="k">APR</span><span class="v gold" id="ap">0%</span></div>
   </div>
   <div class="stat-box"><h3 style="color:#f44">⚔️ BATTLE</h3>
     <div class="r"><span class="k">IL DMG</span><span class="v red" id="il">$0</span></div>
@@ -3406,6 +3408,8 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div class="r"><span class="k">TXS</span><span class="v cyan" id="tx">0</span></div>
   </div>
 </div>
+
+<div class="stat-box" style="margin-bottom:8px" id="pos-intel"><h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3><div style="color:#555;font-size:7px">No position</div></div>
 
 <div class="mood"><h3>🎮 BATTLEFIELD MOOD</h3><div class="mood-bar" id="mb"></div><div class="mood-labels"><span style="color:#f44">FEAR</span><span id="ml" style="color:#888">---</span><span style="color:#0f0">GREED</span></div></div>
 
@@ -3557,7 +3561,10 @@ async function refresh() {
     document.getElementById('pf').textContent='$'+fmt(live.pendingFeesTotal||0);
     document.getElementById('hf').textContent='$'+fmt(fees-(live.pendingFeesTotal||0));
     document.getElementById('tf').textContent='$'+fmt(fees);
-    document.getElementById('df').textContent='$'+fmt(live.estDailyFeesUsdc||0)+'/d';
+    const daily = live.estDailyFeesUsdc||0;
+    document.getElementById('df').textContent='$'+fmt(daily)+'/d';
+    document.getElementById('fh').textContent='$'+fmt(daily/24,4)+'/h';
+    document.getElementById('ap').textContent=fmt(live.estAprPct||0,1)+'%';
 
     // Battle
     document.getElementById('il').textContent='-$'+fmt(Math.abs(totalIL));
@@ -3566,6 +3573,50 @@ async function refresh() {
     ntEl.textContent=(net>=0?'+':'-')+'$'+fmt(Math.abs(net));
     ntEl.className='v '+(net>=0?'gold':'red');
     document.getElementById('tx').textContent=live.txCount||0;
+
+    // Position Intel
+    const pi=document.getElementById('pos-intel');
+    if (live.positionMint && live.positionRange) {
+      const lo=live.positionRange.lower, hi=live.positionRange.upper;
+      const c=(lo+hi)/2, hw=(hi-lo)/2;
+      const proxD=hw>0?Math.max(0,(c-live.solPrice)/hw):0;
+      const proxU=hw>0?Math.max(0,(live.solPrice-c)/hw):0;
+      const inR=live.solPrice>=lo&&live.solPrice<=hi;
+      const ageH=live.entryTime?((now-live.entryTime)/3600000):0;
+      const ageStr=ageH>=24?fmt(ageH/24,1)+'d':fmt(ageH,1)+'h';
+      const pxVsEntry=live.entryPrice?((live.solPrice-live.entryPrice)/live.entryPrice*100):0;
+      const entSol=live.entrySol||0, entUsdc=live.entryUsdc||0;
+      const entTotal=entSol*(live.solPrice)+entUsdc;
+      const posSol=live.positionSol||0, posUsdc=live.positionUsdc||0;
+      const posTotal=live.positionValueUsdc||0;
+      // Fees earned this position (pending only — harvested is cumulative across positions)
+      const posFees=live.pendingFeesTotal||0;
+      // Fees per hour for this position
+      const feesPerH=ageH>0?(posFees/ageH):0;
+      // Position P&L: current value - entry value + pending fees
+      const posPnl=posTotal-entTotal+posFees;
+
+      const proxCol=proxD>0.5||proxU>0.5?'#f44':proxD>0.3||proxU>0.3?'#ff0':'#0f0';
+      const pnlCol=posPnl>=0?'#ffd700':'#f44';
+      pi.innerHTML='<h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3>'+
+        '<div class="r"><span class="k">RANGE</span><span class="v" style="color:#0f0">$'+fmt(lo)+' — $'+fmt(hi)+'</span></div>'+
+        '<div class="r"><span class="k">WIDTH</span><span class="v">'+fmt((hi-lo)/c*100,1)+'%</span></div>'+
+        '<div class="r"><span class="k">AGE</span><span class="v cyan">'+ageStr+'</span></div>'+
+        '<div class="r"><span class="k">IN RANGE</span><span class="v" style="color:'+(inR?'#0f0':'#f44')+'">'+(inR?'YES ✅':'NO ❌')+'</span></div>'+
+        '<div class="r"><span class="k">IR 24H</span><span class="v" style="color:'+(ir24>90?'#ffd700':ir24>60?'#0f0':'#f44')+'">'+fmt(ir24,0)+'%</span></div>'+
+        '<div class="r"><span class="k">PROX</span><span class="v" style="color:'+proxCol+'">↓'+fmt(proxD*100,0)+'% ↑'+fmt(proxU*100,0)+'%</span></div>'+
+        '<div class="r"><span class="k">ENTRY</span><span class="v">$'+fmt(live.entryPrice||0)+' ('+(pxVsEntry>=0?'+':'')+fmt(pxVsEntry,1)+'%)</span></div>'+
+        '<div class="r"><span class="k">DEPOSITED</span><span class="v">'+fmt(entSol,4)+' SOL + $'+fmt(entUsdc)+'</span></div>'+
+        '<div class="r"><span class="k">CURRENT</span><span class="v">'+fmt(posSol,4)+' SOL + $'+fmt(posUsdc)+'</span></div>'+
+        '<div class="r"><span class="k">POS VALUE</span><span class="v" style="color:#58a6ff">$'+fmt(posTotal)+'</span></div>'+
+        '<div class="r"><span class="k">PEND FEES</span><span class="v gold">$'+fmt(posFees)+'</span></div>'+
+        '<div class="r"><span class="k">FEES/HR</span><span class="v gold">$'+fmt(feesPerH,4)+'</span></div>'+
+        '<div class="r"><span class="k">POS IL</span><span class="v red">$'+fmt(live.ilUsdc||0)+'</span></div>'+
+        '<div class="r"><span class="k">POS PNL</span><span class="v" style="color:'+pnlCol+'">'+(posPnl>=0?'+':'-')+'$'+fmt(Math.abs(posPnl))+'</span></div>'+
+        '<div class="r"><span class="k">REGIME</span><span class="v">'+live.regime+'</span></div>';
+    } else {
+      pi.innerHTML='<h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3><div style="color:#555;font-size:8px;padding:4px 0">'+(live.botState==='WAITING_PULLBACK'?'🎯 SCOUTING FOR RE-ENTRY...':'😴 NO ACTIVE POSITION')+'</div>';
+    }
 
     // Mood
     if (mkt && mkt.fearGreedIndex!=null) {
