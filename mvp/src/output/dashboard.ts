@@ -15,11 +15,13 @@ interface OnChainTx {
   time: string;
   fee: number;
   feeSol: number;
+  feeUsdc: number;
+  computeUnits: number;
   status: string;
   slot: number;
 }
 
-async function fetchRecentTransactions(rpcUrl: string, walletAddress: string, limit = 10): Promise<OnChainTx[]> {
+async function fetchRecentTransactions(rpcUrl: string, walletAddress: string, limit = 10, solPrice = 82): Promise<OnChainTx[]> {
   try {
     const conn = new Connection(rpcUrl);
     const wallet = new PublicKey(walletAddress);
@@ -27,11 +29,16 @@ async function fetchRecentTransactions(rpcUrl: string, walletAddress: string, li
     const txs: OnChainTx[] = [];
     for (const sig of sigs) {
       const tx = await conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 });
+      const fee = tx?.meta?.fee ?? 0;
+      const feeSol = fee / 1e9;
+      const cu = tx?.meta?.computeUnitsConsumed ?? 0;
       txs.push({
         signature: sig.signature,
         time: new Date((sig.blockTime ?? 0) * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: TZ }),
-        fee: tx?.meta?.fee ?? 0,
-        feeSol: (tx?.meta?.fee ?? 0) / 1e9,
+        fee,
+        feeSol,
+        feeUsdc: feeSol * solPrice,
+        computeUnits: cu,
         status: tx?.meta?.err ? 'FAILED' : 'OK',
         slot: sig.slot,
       });
@@ -300,7 +307,8 @@ export function startDashboard(port: number): DashboardServer {
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const rpcUrl = process.env.RPC_URL ?? '';
     const walletAddr = currentLive?.walletAddress ?? '';
-    const recentTxs = (rpcUrl && walletAddr) ? await fetchRecentTransactions(rpcUrl, walletAddr, 10) : [];
+    const solPrice = currentLive?.solPrice ?? 82;
+    const recentTxs = (rpcUrl && walletAddr) ? await fetchRecentTransactions(rpcUrl, walletAddr, 10, solPrice) : [];
     res.type('html').send(renderInsightsHtml({ snapshots, snapshots7d, inRangePct1h, inRangePct24h, inRangePctAll, decisions, regimeEvals, regimeHist, events, recentTxs, uptime }));
   });
 
@@ -2469,28 +2477,44 @@ ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
 <div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">On-Chain Transactions (last 10)</div>
 <div class="card" style="margin-bottom:16px">
 ${data.recentTxs.length > 0 ? `
+  ${(() => {
+    const totalFee = data.recentTxs.reduce((s: number, tx: OnChainTx) => s + tx.fee, 0);
+    const totalFeeSol = totalFee / 1e9;
+    const totalFeeUsdc = data.recentTxs.reduce((s: number, tx: OnChainTx) => s + tx.feeUsdc, 0);
+    const avgFee = totalFee / data.recentTxs.length;
+    const okCount = data.recentTxs.filter((tx: OnChainTx) => tx.status === 'OK').length;
+    return `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:12px">
+      <div><span style="color:#8b949e">Total gas (${data.recentTxs.length} txs):</span> <b style="color:#ef4444">${totalFeeSol.toFixed(6)} SOL ($${totalFeeUsdc.toFixed(4)})</b></div>
+      <div><span style="color:#8b949e">Avg/tx:</span> <b>${(avgFee / 1e9).toFixed(6)} SOL ($${(totalFeeUsdc / data.recentTxs.length).toFixed(4)})</b></div>
+      <div><span style="color:#8b949e">Success:</span> <b style="color:${okCount === data.recentTxs.length ? '#22c55e' : '#eab308'}">${okCount}/${data.recentTxs.length}</b></div>
+    </div>`;
+  })()}
   <div class="table-wrap"><table style="width:100%;border-collapse:collapse;font-size:12px">
     <thead>
       <tr>
         <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Time</th>
-        <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Gas Fee</th>
-        <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Status</th>
-        <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Transaction</th>
+        <th style="text-align:right;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Gas (SOL)</th>
+        <th style="text-align:right;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Gas ($)</th>
+        <th style="text-align:right;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">CU</th>
+        <th style="text-align:center;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">Status</th>
+        <th style="text-align:left;color:#8b949e;padding:6px 4px;border-bottom:1px solid #30363d">TX</th>
       </tr>
     </thead>
     <tbody>
-      ${data.recentTxs.map(tx => `
+      ${data.recentTxs.map((tx: OnChainTx) => `
         <tr>
-          <td style="padding:6px 4px;border-bottom:1px solid #21262d;white-space:nowrap">${tx.time}</td>
-          <td style="padding:6px 4px;border-bottom:1px solid #21262d;color:#ef4444">${tx.fee.toLocaleString()} lamports<br/><span style="color:#8b949e">${tx.feeSol.toFixed(6)} SOL</span></td>
-          <td style="padding:6px 4px;border-bottom:1px solid #21262d"><span style="color:${tx.status === 'OK' ? '#22c55e' : '#ef4444'}">${tx.status}</span></td>
-          <td style="padding:6px 4px;border-bottom:1px solid #21262d"><a href="https://solscan.io/tx/${tx.signature}" target="_blank" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:11px">${tx.signature.slice(0, 16)}...</a></td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d;white-space:nowrap;font-size:11px">${tx.time}</td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d;text-align:right;color:#ef4444;font-family:monospace;font-size:11px">${tx.feeSol.toFixed(6)}</td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d;text-align:right;color:#8b949e;font-family:monospace;font-size:11px">$${tx.feeUsdc.toFixed(4)}</td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d;text-align:right;color:#8b949e;font-size:10px">${tx.computeUnits > 0 ? (tx.computeUnits / 1000).toFixed(0) + 'K' : '-'}</td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d;text-align:center"><span style="color:${tx.status === 'OK' ? '#22c55e' : '#ef4444'};font-size:11px">${tx.status}</span></td>
+          <td style="padding:5px 4px;border-bottom:1px solid #21262d"><a href="https://solscan.io/tx/${tx.signature}" target="_blank" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:10px">${tx.signature.slice(0, 12)}...</a></td>
         </tr>
       `).join('')}
     </tbody>
   </table></div>
   <div style="font-size:11px;color:#8b949e;margin-top:8px;text-align:right">
-    <a href="https://solscan.io/account/${data.recentTxs.length > 0 ? '' : ''}Evga86Xco1D5XCeSF2T3Ff8DsJAhr2SoaVrPWALoLU6z" target="_blank" style="color:#58a6ff;text-decoration:none">View all on Solscan &rarr;</a>
+    <a href="https://solscan.io/account/Evga86Xco1D5XCeSF2T3Ff8DsJAhr2SoaVrPWALoLU6z" target="_blank" style="color:#58a6ff;text-decoration:none">View all on Solscan &rarr;</a>
   </div>
 ` : '<div style="color:#8b949e;text-align:center;padding:16px">No transactions found</div>'}
 </div>
