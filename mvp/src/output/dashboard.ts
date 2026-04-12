@@ -270,6 +270,72 @@ export function startDashboard(port: number): DashboardServer {
     res.json(getLiveSnapshots(dbRef, hours));
   });
 
+  // Hourly fees for a given date + events list
+  app.get('/api/hourly-fees', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
+    const date = (_req.query as any).date; // YYYY-MM-DD format
+    if (!date) { res.status(400).json({ error: 'date param required (YYYY-MM-DD)' }); return; }
+
+    // Get all snapshots for this date
+    const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range FROM live_snapshots ORDER BY timestamp ASC').all() as any[];
+    const daySnaps = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
+
+    // Build hourly fees
+    const hours: Record<number, { first: number; last: number; inRange: number; total: number }> = {};
+    for (let h = 0; h < 24; h++) hours[h] = { first: -1, last: 0, inRange: 0, total: 0 };
+
+    daySnaps.forEach((s: any) => {
+      const d = new Date(s.timestamp);
+      // Extract hour in Berlin timezone
+      const hStr = d.toLocaleString('en-US', { timeZone: 'Europe/Berlin', hour: 'numeric', hour12: false });
+      const h = parseInt(hStr) % 24;
+      const totalFees = (s.cum_fees_sol * s.price + s.cum_fees_usdc) +
+        ((s.pending_fees_sol * s.price + s.pending_fees_usdc) > 1000 ? 0 : (s.pending_fees_sol * s.price + s.pending_fees_usdc));
+      if (hours[h].first < 0) hours[h].first = totalFees;
+      hours[h].last = totalFees;
+      if (s.in_range) hours[h].inRange++;
+      hours[h].total++;
+    });
+
+    // Find previous day's last total for the first hour delta
+    const prevDaySnaps = allSnaps.filter((s: any) => {
+      const d = new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+      return d < date;
+    });
+    const prevDayLastFees = prevDaySnaps.length > 0 ? (() => {
+      const last = prevDaySnaps[prevDaySnaps.length - 1] as any;
+      return (last.cum_fees_sol * last.price + last.cum_fees_usdc) +
+        ((last.pending_fees_sol * last.price + last.pending_fees_usdc) > 1000 ? 0 : (last.pending_fees_sol * last.price + last.pending_fees_usdc));
+    })() : 0;
+
+    const hourlyData: Array<{ hour: number; fees: number; cumulative: number; inRangePct: number }> = [];
+    let prevTotal = prevDayLastFees;
+    let dayCum = 0;
+    for (let h = 0; h < 24; h++) {
+      const entry = hours[h];
+      if (entry.first < 0) {
+        hourlyData.push({ hour: h, fees: 0, cumulative: dayCum, inRangePct: 0 });
+        continue;
+      }
+      const fees = prevTotal > 0 ? Math.max(0, entry.last - prevTotal) : 0;
+      dayCum += fees;
+      const irPct = entry.total > 0 ? (entry.inRange / entry.total * 100) : 0;
+      hourlyData.push({ hour: h, fees, cumulative: dayCum, inRangePct: irPct });
+      prevTotal = entry.last;
+    }
+
+    // Get events for this day
+    const dayStart = new Date(date + 'T00:00:00+02:00').getTime(); // Berlin timezone approx
+    const dayEnd = dayStart + 86400000;
+    const events = dbRef.prepare(`SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, note
+      FROM rebalance_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`).all(dayStart, dayEnd) as any[];
+
+    // Available dates
+    const dates = [...new Set(allSnaps.map((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' })))].sort();
+
+    res.json({ date, hourlyData, dayTotal: dayCum, events, availableDates: dates });
+  });
+
   app.get('/api/regime-history', (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
     res.json(getRegimeHistory(dbRef, 50));
@@ -2237,6 +2303,130 @@ ${(() => {
 })()}
 
 ${buildDailyFeesChart(data.snapshots7d)}
+
+<div class="card" style="margin-bottom:16px">
+  <h2>Hourly Fee Breakdown</h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <label style="color:#8b949e;font-size:12px">Select day:</label>
+    <select id="fee-day-select" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-size:13px"></select>
+    <span id="fee-day-total" style="color:#ffd700;font-size:13px;font-weight:bold"></span>
+    <span id="fee-day-avg" style="color:#8b949e;font-size:11px"></span>
+  </div>
+  <div id="fee-hourly-table" style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <div style="color:#8b949e;text-align:center;padding:16px">Loading...</div>
+  </div>
+  <div style="margin-top:12px">
+    <div style="font-size:13px;color:#58a6ff;font-weight:bold;margin-bottom:8px;cursor:pointer" onclick="document.getElementById('fee-events-section').style.display=document.getElementById('fee-events-section').style.display==='none'?'block':'none'">
+      ▶ Events for this day <span style="color:#8b949e;font-weight:normal;font-size:11px">(click to expand)</span>
+    </div>
+    <div id="fee-events-section" style="display:none">
+      <div id="fee-events-table"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  var TZ = 'Europe/Berlin';
+  var select = document.getElementById('fee-day-select');
+  var tableDiv = document.getElementById('fee-hourly-table');
+  var totalEl = document.getElementById('fee-day-total');
+  var avgEl = document.getElementById('fee-day-avg');
+  var eventsDiv = document.getElementById('fee-events-table');
+  var today = new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+
+  function fmt(n, d) { return Math.abs(n).toFixed(d || 2); }
+
+  function loadDay(date) {
+    tableDiv.innerHTML = '<div style="color:#8b949e;text-align:center;padding:16px">Loading...</div>';
+    fetch('/api/hourly-fees?date=' + date).then(function(r) { return r.json(); }).then(function(d) {
+      if (!d || !d.hourlyData) { tableDiv.innerHTML = '<div style="color:#8b949e">No data</div>'; return; }
+
+      // Populate date selector if not done
+      if (select.options.length === 0 && d.availableDates) {
+        d.availableDates.reverse().forEach(function(dt) {
+          var opt = document.createElement('option');
+          opt.value = dt;
+          opt.textContent = dt;
+          if (dt === date) opt.selected = true;
+          select.appendChild(opt);
+        });
+      }
+
+      totalEl.textContent = 'Total: $' + fmt(d.dayTotal);
+      var hoursWithData = d.hourlyData.filter(function(h) { return h.fees > 0; }).length;
+      avgEl.textContent = hoursWithData > 0 ? '(avg $' + fmt(d.dayTotal / hoursWithData) + '/active hour)' : '';
+
+      // Build table
+      var maxFee = Math.max.apply(null, d.hourlyData.map(function(h) { return h.fees; }));
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+      html += '<thead><tr>';
+      html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Hour</th>';
+      html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Fees</th>';
+      html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">Cumul</th>';
+      html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d">IR%</th>';
+      html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;min-width:100px"></th>';
+      html += '</tr></thead><tbody>';
+
+      d.hourlyData.forEach(function(h) {
+        var barW = maxFee > 0 ? Math.round(h.fees / maxFee * 100) : 0;
+        var feeCol = h.fees > 2 ? '#ffd700' : h.fees > 0.5 ? '#22c55e' : h.fees > 0 ? '#8b949e' : '#333';
+        var irCol = h.inRangePct > 90 ? '#22c55e' : h.inRangePct > 50 ? '#eab308' : h.inRangePct > 0 ? '#ef4444' : '#333';
+        html += '<tr style="border-bottom:1px solid #21262d">';
+        html += '<td style="padding:4px;font-family:monospace;white-space:nowrap">' + String(h.hour).padStart(2, '0') + ':00</td>';
+        html += '<td style="padding:4px;text-align:right;color:' + feeCol + ';font-weight:bold">$' + fmt(h.fees, 4) + '</td>';
+        html += '<td style="padding:4px;text-align:right;color:#8b949e">$' + fmt(h.cumulative) + '</td>';
+        html += '<td style="padding:4px;text-align:right;color:' + irCol + '">' + (h.inRangePct > 0 ? fmt(h.inRangePct, 0) + '%' : '-') + '</td>';
+        html += '<td style="padding:4px"><div style="height:10px;background:' + feeCol + ';width:' + barW + '%;border-radius:2px;min-width:' + (h.fees > 0 ? '2px' : '0') + '"></div></td>';
+        html += '</tr>';
+      });
+
+      html += '</tbody></table>';
+      tableDiv.innerHTML = html;
+
+      // Build events table
+      if (d.events && d.events.length > 0) {
+        var eHtml = '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+        eHtml += '<thead><tr><th style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d">Time</th>';
+        eHtml += '<th style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d">Event</th>';
+        eHtml += '<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d">Price</th>';
+        eHtml += '<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d">Fees</th>';
+        eHtml += '<th style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d">Note</th></tr></thead><tbody>';
+        var evtColors = { POSITION_OPENED: '#22c55e', POSITION_CLOSED: '#8b949e', T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
+          OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308', FEE_HARVEST: '#ffd700', AUTO_DEPLOY: '#58a6ff',
+          REGIME_CHANGE: '#a855f7', PULLBACK_REENTRY: '#22c55e', LIQUIDITY_ADDED: '#58a6ff', PRICE_UPDATE: '#8b949e' };
+        d.events.forEach(function(e) {
+          var t = new Date(e.timestamp).toLocaleTimeString('en-US', { timeZone: TZ, hour12: false, hour: '2-digit', minute: '2-digit' });
+          var ec = evtColors[e.event_type] || '#8b949e';
+          var feeTot = (e.fee_sol || 0) * e.price + (e.fee_usdc || 0);
+          var noteShort = (e.note || '').split('\\n')[0].slice(0, 80);
+          eHtml += '<tr style="border-bottom:1px solid #21262d">';
+          eHtml += '<td style="padding:3px 4px;white-space:nowrap">' + t + '</td>';
+          eHtml += '<td style="padding:3px 4px;color:' + ec + ';font-weight:bold;white-space:nowrap">' + e.event_type + '</td>';
+          eHtml += '<td style="padding:3px 4px;text-align:right">$' + Number(e.price).toFixed(2) + '</td>';
+          eHtml += '<td style="padding:3px 4px;text-align:right;color:#ffd700">' + (feeTot > 0 ? '$' + feeTot.toFixed(4) : '-') + '</td>';
+          eHtml += '<td style="padding:3px 4px;color:#8b949e;font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + noteShort + '</td>';
+          eHtml += '</tr>';
+        });
+        eHtml += '</tbody></table>';
+        eventsDiv.innerHTML = eHtml;
+      } else {
+        eventsDiv.innerHTML = '<div style="color:#8b949e;font-size:11px">No events for this day</div>';
+      }
+    }).catch(function() { tableDiv.innerHTML = '<div style="color:#ef4444">Failed to load</div>'; });
+  }
+
+  select.addEventListener('change', function() { loadDay(this.value); });
+  loadDay(today);
+
+  // Auto-refresh at the top of every hour
+  var now = new Date();
+  var msToNextHour = (60 - now.getMinutes()) * 60000 - now.getSeconds() * 1000;
+  setTimeout(function() {
+    loadDay(select.value);
+    setInterval(function() { loadDay(select.value); }, 3600000);
+  }, msToNextHour);
+})();
+</script>
 
 ${(() => {
   // Build position history from rebalance events: pair opens with closes
