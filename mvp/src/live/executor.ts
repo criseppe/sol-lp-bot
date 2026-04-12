@@ -175,29 +175,39 @@ export class LiveExecutor {
     const idealSol = swapTargetUsdc / (currentPrice + usdcPer1Sol);
     const idealUsdc = idealSol * usdcPer1Sol;
 
-    if (usdcAvailable < 5 && solAvailable > 0.1 && idealUsdc > 10) {
-      // Wallet is mostly SOL — swap some to USDC
-      const solToSwap = Math.min((idealUsdc - usdcAvailable) / currentPrice * getSwapBuffer(), solAvailable - 0.05);
-      if (solToSwap > 0.01) {
-        console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${solToSwap.toFixed(4)} SOL -> USDC (wallet imbalanced)`, timestamp: Date.now() }));
-        await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Pre-open: SOL -> USDC to enable position opening`);
-        await new Promise(r => setTimeout(r, 4000));
-        solBal = await this.getSolBalance();
-        usdcBal = await this.getUsdcBalance();
-        solAvailable = Math.max(0, solBal - getSolReserve());
-        usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
-      }
-    } else if (solAvailable < 0.01 && usdcAvailable > 10 && idealSol > 0.05) {
-      // Wallet is mostly USDC — swap some to SOL
-      const usdcToSwap = Math.min((idealSol - solAvailable) * currentPrice * getSwapBuffer(), usdcAvailable - 2);
-      if (usdcToSwap > 1) {
-        console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${usdcToSwap.toFixed(2)} USDC -> SOL (wallet imbalanced)`, timestamp: Date.now() }));
-        await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL to enable position opening`);
-        await new Promise(r => setTimeout(r, 4000));
-        solBal = await this.getSolBalance();
-        usdcBal = await this.getUsdcBalance();
-        solAvailable = Math.max(0, solBal - getSolReserve());
-        usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+    // Pre-open swap: if wallet ratio is significantly off from the ideal LP deposit ratio, swap to match.
+    // Old logic only swapped when one side < $5 — now swaps whenever deviation > 30%.
+    const solValueUsdc = solAvailable * currentPrice;
+    const totalAvail = solValueUsdc + usdcAvailable;
+    const currentSolRatio = totalAvail > 0 ? solValueUsdc / totalAvail : 0.5;
+    const idealSolRatio = totalAvail > 0 ? (idealSol * currentPrice) / totalAvail : 0.5;
+    const ratioDeviation = Math.abs(currentSolRatio - idealSolRatio);
+
+    if (ratioDeviation > 0.30 && totalAvail > 50) {
+      if (currentSolRatio > idealSolRatio && solAvailable > 0.1) {
+        // Too much SOL — swap to USDC
+        const solToSwap = Math.min((idealUsdc - usdcAvailable) / currentPrice * getSwapBuffer(), solAvailable - 0.05);
+        if (solToSwap > 0.01) {
+          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${solToSwap.toFixed(4)} SOL -> USDC (ratio ${(currentSolRatio*100).toFixed(0)}% SOL vs ideal ${(idealSolRatio*100).toFixed(0)}%)`, timestamp: Date.now() }));
+          await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Pre-open: SOL -> USDC to match LP deposit ratio`);
+          await new Promise(r => setTimeout(r, 4000));
+          solBal = await this.getSolBalance();
+          usdcBal = await this.getUsdcBalance();
+          solAvailable = Math.max(0, solBal - getSolReserve());
+          usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+        }
+      } else if (currentSolRatio < idealSolRatio && usdcAvailable > 10) {
+        // Too much USDC — swap to SOL
+        const usdcToSwap = Math.min((idealSol - solAvailable) * currentPrice * getSwapBuffer(), usdcAvailable - 2);
+        if (usdcToSwap > 1) {
+          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${usdcToSwap.toFixed(2)} USDC -> SOL (ratio ${(currentSolRatio*100).toFixed(0)}% SOL vs ideal ${(idealSolRatio*100).toFixed(0)}%)`, timestamp: Date.now() }));
+          await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL to match LP deposit ratio`);
+          await new Promise(r => setTimeout(r, 4000));
+          solBal = await this.getSolBalance();
+          usdcBal = await this.getUsdcBalance();
+          solAvailable = Math.max(0, solBal - getSolReserve());
+          usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+        }
       }
     }
 
