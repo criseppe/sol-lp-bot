@@ -165,8 +165,12 @@ export function startDashboard(port: number): DashboardServer {
         return;
       }
       const [user, pass] = Buffer.from(auth.slice(6), 'base64').toString().split(':');
-      const userMatch = crypto.timingSafeEqual(Buffer.from(user), Buffer.from(dashUser));
-      const passMatch = crypto.timingSafeEqual(Buffer.from(pass), Buffer.from(dashPass));
+      const userBuf = Buffer.from(user ?? '');
+      const passBuf = Buffer.from(pass ?? '');
+      const expectUser = Buffer.from(dashUser);
+      const expectPass = Buffer.from(dashPass);
+      const userMatch = userBuf.length === expectUser.length && crypto.timingSafeEqual(userBuf, expectUser);
+      const passMatch = passBuf.length === expectPass.length && crypto.timingSafeEqual(passBuf, expectPass);
       if (!userMatch || !passMatch) {
         res.setHeader('WWW-Authenticate', 'Basic realm="SOL LP Bot Dashboard"');
         res.status(401).send('Invalid credentials');
