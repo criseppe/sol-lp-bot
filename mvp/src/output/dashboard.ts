@@ -2457,13 +2457,17 @@ ${(() => {
     range: string; closeReason: string;
     feeSol: number; feeUsdc: number; feeTotalUsdc: number;
     il: number; regime: string;
+    capitalInvested: number;
   }
   const positions: PositionRecord[] = [];
-  let lastOpen: { timestamp: number; price: number; note: string } | null = null;
+  let lastOpen: { timestamp: number; price: number; note: string; capitalInvested: number } | null = null;
 
   for (const e of allEvents) {
     if (e.eventType === 'POSITION_OPENED') {
-      lastOpen = { timestamp: e.timestamp, price: e.price, note: e.note };
+      // Capital invested = wallet value before - wallet value after open
+      const capBefore = (e.solBefore ?? 0) * e.price + (e.usdcBefore ?? 0);
+      const capAfter = (e.solAfter ?? 0) * e.price + (e.usdcAfter ?? 0);
+      lastOpen = { timestamp: e.timestamp, price: e.price, note: e.note, capitalInvested: Math.max(0, capBefore - capAfter) };
     } else if (closeTypes.has(e.eventType) && lastOpen) {
       const rangeMatch = (e.note || '').match(/Range was \$([\d.]+).*?\$([\d.]+)/);
       const range = rangeMatch ? `$${rangeMatch[1]}-$${rangeMatch[2]}` : '--';
@@ -2480,6 +2484,7 @@ ${(() => {
         feeTotalUsdc: (e.feeSol ?? 0) * e.price + (e.feeUsdc ?? 0),
         il: e.ilAtClose ?? 0,
         regime: e.regime,
+        capitalInvested: lastOpen.capitalInvested,
       });
       lastOpen = null;
     }
@@ -2500,6 +2505,9 @@ ${(() => {
     POSITION_CLOSED: '#8b949e',
   };
 
+  const totalCapital = recent.reduce((s, p) => s + p.capitalInvested, 0);
+  const avgRoR = totalCapital > 0 ? ((totalFees + totalIl) / totalCapital * 100) : 0;
+
   const rows = recent.map(p => {
     const openT = new Date(p.openTime).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ });
     const durMin = Math.floor(p.duration / 60_000);
@@ -2507,30 +2515,34 @@ ${(() => {
     const net = p.feeTotalUsdc + p.il;
     const netCol = net >= 0 ? '#22c55e' : '#ef4444';
     const reasonCol = reasonColors[p.closeReason] ?? '#8b949e';
+    const ror = p.capitalInvested > 0 ? (net / p.capitalInvested * 100) : 0;
+    const rorAnn = p.duration > 0 && p.capitalInvested > 0 ? (net / p.capitalInvested) * (365 * 24 * 3600_000 / p.duration) * 100 : 0;
     return `<tr style="border-bottom:1px solid #21262d">
       <td style="padding:4px 6px;color:#8b949e;font-size:10px;white-space:nowrap">${openT}</td>
       <td style="padding:4px 6px;text-align:right">${durStr}</td>
       <td style="padding:4px 6px;text-align:right;font-size:10px;color:#8b949e">${p.range}</td>
-      <td style="padding:4px 6px;text-align:right">$${fmt(p.entryPrice, 2)}<span style="color:#8b949e">→</span>$${fmt(p.closePrice, 2)}</td>
+      <td style="padding:4px 6px;text-align:right;color:#58a6ff">$${fmt(p.capitalInvested, 0)}</td>
       <td style="padding:4px 6px;text-align:right;color:#22c55e">$${fmt(p.feeTotalUsdc, 4)}</td>
       <td style="padding:4px 6px;text-align:right;color:${p.il < 0 ? '#ef4444' : '#22c55e'}">${p.il < 0 ? '-' : '+'}$${fmt(Math.abs(p.il), 4)}</td>
       <td style="padding:4px 6px;text-align:right;color:${netCol};font-weight:bold">${net >= 0 ? '+' : '-'}$${fmt(Math.abs(net), 4)}</td>
+      <td style="padding:4px 6px;text-align:right;color:${ror >= 0 ? '#22c55e' : '#ef4444'};font-size:10px">${ror >= 0 ? '+' : ''}${fmt(ror, 3)}%</td>
       <td style="padding:4px 6px"><span class="badge" style="background:${reasonCol}20;color:${reasonCol};font-size:9px">${p.closeReason.replace('_', ' ')}</span></td>
     </tr>`;
   }).join('');
 
   return `<div class="card" style="margin-bottom:16px">
-  <h2>Position History <span style="color:#8b949e;font-size:12px;font-weight:normal">| Last ${recent.length} | Avg duration: ${avgDurStr} | Fees: $${fmt(totalFees, 2)} | IL: $${fmt(Math.abs(totalIl), 2)} | Net: <span style="color:${totalFees + totalIl >= 0 ? '#22c55e' : '#ef4444'}">${totalFees + totalIl >= 0 ? '+' : '-'}$${fmt(Math.abs(totalFees + totalIl), 2)}</span></span></h2>
+  <h2>Position History <span style="color:#8b949e;font-size:12px;font-weight:normal">| ${recent.length} positions | Avg: ${avgDurStr} | Capital: $${fmt(totalCapital, 0)} | Fees: $${fmt(totalFees, 2)} | IL: $${fmt(Math.abs(totalIl), 2)} | Net: <span style="color:${totalFees + totalIl >= 0 ? '#22c55e' : '#ef4444'}">${totalFees + totalIl >= 0 ? '+' : '-'}$${fmt(Math.abs(totalFees + totalIl), 2)}</span> | RoR: <span style="color:${avgRoR >= 0 ? '#22c55e' : '#ef4444'}">${avgRoR >= 0 ? '+' : ''}${fmt(avgRoR, 3)}%</span></span></h2>
   <div style="overflow-x:auto">
   <table style="width:100%;border-collapse:collapse;font-size:11px">
     <tr style="border-bottom:1px solid #30363d">
       <th style="text-align:left;padding:4px 6px;color:#8b949e">Opened</th>
       <th style="text-align:right;padding:4px 6px;color:#8b949e">Duration</th>
       <th style="text-align:right;padding:4px 6px;color:#8b949e">Range</th>
-      <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry→Close</th>
+      <th style="text-align:right;padding:4px 6px;color:#58a6ff">Capital</th>
       <th style="text-align:right;padding:4px 6px;color:#22c55e">Fees</th>
       <th style="text-align:right;padding:4px 6px;color:#ef4444">IL</th>
       <th style="text-align:right;padding:4px 6px;color:#eab308">Net</th>
+      <th style="text-align:right;padding:4px 6px;color:#8b949e">RoR</th>
       <th style="text-align:left;padding:4px 6px;color:#8b949e">Exit</th>
     </tr>
     ${rows}
