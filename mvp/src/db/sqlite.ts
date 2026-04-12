@@ -187,6 +187,16 @@ export function initDb(dbPath: string): Database.Database {
     );
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS investors (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      amount_usdc REAL NOT NULL,
+      invest_date TEXT NOT NULL,
+      created_at  INTEGER NOT NULL
+    );
+  `);
+
   // Migration: add pullback state columns to bot_state
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`); } catch (_) {}
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`); } catch (_) {}

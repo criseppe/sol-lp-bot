@@ -391,6 +391,37 @@ export function startDashboard(port: number): DashboardServer {
     res.type('html').send(renderArcadeHtml());
   });
 
+  // Investors page
+  app.get('/investors', async (_req, res) => {
+    const { renderInvestorsPageHtml } = await import('./investors-page.js');
+    res.type('html').send(renderInvestorsPageHtml());
+  });
+
+  app.get('/api/investors', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    const investors = dbRef.prepare('SELECT * FROM investors ORDER BY invest_date ASC').all();
+    const totalInvested = investors.reduce((s: number, i: any) => s + i.amount_usdc, 0);
+    const latestSnap = dbRef.prepare('SELECT * FROM live_snapshots ORDER BY timestamp DESC LIMIT 1').get() as any;
+    const totalPortfolio = latestSnap?.total_with_position ?? 0;
+    const summaries = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date DESC LIMIT 1').get() as any;
+    const totalFees = summaries?.cum_fees_usdc ?? 0;
+    res.json({ investors, totalInvested, totalPortfolio, totalFees });
+  });
+
+  app.post('/api/investors', (req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    const { name, amount, date } = req.body;
+    if (!name || !amount || !date) { res.status(400).json({ error: 'name, amount, date required' }); return; }
+    dbRef.prepare('INSERT INTO investors (name, amount_usdc, invest_date, created_at) VALUES (?, ?, ?, ?)').run(name, parseFloat(amount), date, Date.now());
+    res.json({ success: true });
+  });
+
+  app.delete('/api/investors/:id', (req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    dbRef.prepare('DELETE FROM investors WHERE id = ?').run(parseInt(req.params.id));
+    res.json({ success: true });
+  });
+
   // Analytics page
   app.get('/analytics', async (_req, res) => {
     const { renderAnalyticsPageHtml } = await import('./analytics-page.js');
@@ -1104,6 +1135,7 @@ const NAV_HTML = `
   <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
   <a href="/analytics" id="nav-analytics">Analytics</a>
+  <a href="/investors" id="nav-investors">Investors</a>
   <a href="/projection" id="nav-projection">Projection</a>
   <a href="/analysis" id="nav-analysis">Agent</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
