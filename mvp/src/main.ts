@@ -418,20 +418,16 @@ async function main() {
           const estDailyFeesUsdc = yieldEst?.dailyFeesUsdc ?? 0;
           const estAprPct = yieldEst?.aprPct ?? 0;
 
-          // Actual trailing 24h fees from snapshot history
+          // Actual fees today from daily_summary (consistent with insights/analytics)
           let actual24hFeesUsdc = 0;
           let actual24hAprPct = 0;
           try {
-            const snap24hAgo = getLiveSnapshots(db, 24);
-            if (snap24hAgo.length > 0) {
-              const oldest = snap24hAgo[0];
-              const oldPending = (oldest.pending_fees_sol ?? 0) * oldest.price + (oldest.pending_fees_usdc ?? 0);
-              const oldTotal = (oldest.cum_fees_sol ?? 0) * oldest.price + (oldest.cum_fees_usdc ?? 0)
-                + (oldPending > 1000 ? 0 : oldPending);
-              const nowTotal = totalFeesUsdc;
-              actual24hFeesUsdc = Math.max(0, nowTotal - oldTotal);
-              actual24hAprPct = positionValueUsdc > 0 ? (actual24hFeesUsdc * 365 / positionValueUsdc) * 100 : 0;
+            const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+            const todaySummary = getDailySummaries(db, 1);
+            if (todaySummary.length > 0 && todaySummary[0].date === today) {
+              actual24hFeesUsdc = todaySummary[0].fees_earned_usdc;
             }
+            actual24hAprPct = positionValueUsdc > 0 ? (actual24hFeesUsdc * 365 / positionValueUsdc) * 100 : 0;
           } catch {}
 
           // Calculate IL
