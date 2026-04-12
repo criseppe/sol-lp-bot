@@ -298,6 +298,11 @@ export function startDashboard(port: number): DashboardServer {
     res.type('html').send(renderStrategyHtml());
   });
 
+  // Arcade page
+  app.get('/arcade', (_req, res) => {
+    res.type('html').send(renderArcadeHtml());
+  });
+
   // Config page + API
   app.get('/config', (_req, res) => {
     res.type('html').send(renderConfigHtml());
@@ -797,6 +802,7 @@ const NAV_HTML = `
   <a href="/strategy" id="nav-strategy">Strategy</a>
   <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
+  <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
 // ── Paper page ────────────────────────────────────────────────────────────
@@ -3206,3 +3212,549 @@ ${NAV_HTML}
 </body>
 </html>`;
 }
+
+// ── ARCADE PAGE ──────────────────────────────────────────────────────────
+
+function renderArcadeHtml(): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LP BOT ARCADE</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #0f0;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    overflow-x: hidden;
+    image-rendering: pixelated;
+  }
+  /* CRT scanline effect */
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px);
+    pointer-events: none;
+    z-index: 9999;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.6) 100%);
+    pointer-events: none;
+    z-index: 9998;
+  }
+  .screen {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 16px;
+    min-height: 100vh;
+  }
+  /* Blinking cursor */
+  @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  @keyframes rainbow { 0%{color:#f00} 16%{color:#ff0} 33%{color:#0f0} 50%{color:#0ff} 66%{color:#00f} 83%{color:#f0f} 100%{color:#f00} }
+  @keyframes slideIn { from { transform: translateX(-100%); opacity:0; } to { transform: translateX(0); opacity:1; } }
+  @keyframes coinSpin { 0%{transform:scaleX(1)} 50%{transform:scaleX(0.1)} 100%{transform:scaleX(1)} }
+  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  .blink { animation: blink 1s infinite; }
+  .pulse { animation: pulse 2s infinite; }
+  .rainbow { animation: rainbow 3s linear infinite; }
+
+  .title {
+    text-align: center;
+    font-size: 18px;
+    color: #ff0;
+    text-shadow: 3px 3px #800, 0 0 20px #ff0;
+    margin: 20px 0 8px;
+    letter-spacing: 4px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 8px;
+    color: #888;
+    margin-bottom: 24px;
+  }
+
+  /* Score bar */
+  .score-bar {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border: 2px solid #333;
+    background: #111;
+    margin-bottom: 16px;
+  }
+  .score-item { text-align: center; }
+  .score-label { color: #888; font-size: 7px; margin-bottom: 4px; }
+  .score-value { color: #0f0; font-size: 14px; text-shadow: 0 0 8px #0f0; }
+  .score-value.gold { color: #ffd700; text-shadow: 0 0 8px #ffd700; }
+  .score-value.red { color: #f44; text-shadow: 0 0 8px #f44; }
+
+  /* Character area */
+  .character-zone {
+    position: relative;
+    height: 140px;
+    border: 2px solid #333;
+    background: #0a0a0a;
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .ground {
+    position: absolute;
+    bottom: 0;
+    left: 0; right: 0;
+    height: 20px;
+    background: repeating-linear-gradient(90deg, #1a3a1a 0px, #1a3a1a 16px, #0d2a0d 16px, #0d2a0d 32px);
+    border-top: 2px solid #2a5a2a;
+  }
+  .bot-char {
+    position: absolute;
+    bottom: 22px;
+    font-size: 32px;
+    transition: left 2s ease;
+    animation: float 3s ease-in-out infinite;
+    filter: drop-shadow(0 0 8px rgba(0,255,0,0.5));
+  }
+  .range-zone {
+    position: absolute;
+    bottom: 0;
+    height: 100%;
+    background: rgba(0,255,0,0.06);
+    border-left: 2px dashed #0a0;
+    border-right: 2px dashed #0a0;
+  }
+  .range-label {
+    position: absolute;
+    top: 4px;
+    font-size: 7px;
+    color: #0a0;
+  }
+  .price-line {
+    position: absolute;
+    bottom: 22px;
+    width: 2px;
+    height: 90px;
+    background: #ff0;
+    box-shadow: 0 0 6px #ff0;
+  }
+  .price-tag {
+    position: absolute;
+    top: 4px;
+    font-size: 7px;
+    color: #ff0;
+    white-space: nowrap;
+  }
+
+  /* Stats boxes */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .stat-box {
+    border: 2px solid #333;
+    background: #0a0a0a;
+    padding: 10px;
+  }
+  .stat-box h3 {
+    color: #ff0;
+    font-size: 8px;
+    margin-bottom: 8px;
+    text-shadow: 0 0 6px #880;
+  }
+  .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .stat-key { color: #888; }
+  .stat-val { color: #0f0; }
+  .stat-val.gold { color: #ffd700; }
+  .stat-val.bad { color: #f44; }
+
+  /* XP / Level bar */
+  .xp-section {
+    border: 2px solid #333;
+    background: #0a0a0a;
+    padding: 10px;
+    margin-bottom: 16px;
+  }
+  .xp-section h3 { color: #f0f; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #808; }
+  .xp-bar-bg {
+    height: 16px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    position: relative;
+    margin-bottom: 4px;
+  }
+  .xp-bar-fill {
+    height: 100%;
+    transition: width 1s ease;
+    position: relative;
+  }
+  .xp-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(90deg, rgba(255,255,255,0.1) 0px, rgba(255,255,255,0.1) 4px, transparent 4px, transparent 8px);
+  }
+  .xp-text { text-align: center; font-size: 7px; color: #888; margin-top: 2px; }
+
+  /* Achievements */
+  .achievements {
+    border: 2px solid #333;
+    background: #0a0a0a;
+    padding: 10px;
+    margin-bottom: 16px;
+  }
+  .achievements h3 { color: #0ff; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #088; }
+  .badge { display: inline-block; margin: 4px; padding: 4px 8px; border: 1px solid; font-size: 7px; }
+  .badge.earned { border-color: #ffd700; color: #ffd700; background: rgba(255,215,0,0.1); }
+  .badge.locked { border-color: #333; color: #444; }
+
+  /* Event log as game messages */
+  .game-log {
+    border: 2px solid #333;
+    background: #0a0a0a;
+    padding: 10px;
+    margin-bottom: 16px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .game-log h3 { color: #f80; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #840; }
+  .log-line { margin-bottom: 4px; color: #888; }
+  .log-line .time { color: #555; }
+  .log-line .action { color: #0f0; }
+  .log-line .warning { color: #ff0; }
+  .log-line .danger { color: #f44; }
+  .log-line .loot { color: #ffd700; }
+
+  /* Nav */
+  .nav { text-align: center; margin-bottom: 16px; }
+  .nav a { color: #888; text-decoration: none; margin: 0 8px; font-size: 8px; }
+  .nav a:hover { color: #0f0; }
+  .nav a.active { color: #ff0; }
+
+  /* Insert coin */
+  .insert-coin {
+    text-align: center;
+    font-size: 10px;
+    color: #888;
+    margin: 20px 0;
+    animation: blink 1.5s infinite;
+  }
+
+  /* Market mood */
+  .mood-bar {
+    border: 2px solid #333;
+    background: #0a0a0a;
+    padding: 10px;
+    margin-bottom: 16px;
+  }
+  .mood-bar h3 { color: #f0f; font-size: 8px; margin-bottom: 8px; }
+  .mood-meter {
+    display: flex;
+    height: 12px;
+    border: 1px solid #333;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+  .mood-segment { height: 100%; }
+</style>
+</head>
+<body>
+<div class="screen">
+
+<div class="nav">
+  <a href="/">WALLET</a>
+  <a href="/insights">INSIGHTS</a>
+  <a href="/config">CONFIG</a>
+  <a href="/strategy">STRATEGY</a>
+  <a href="/health">HEALTH</a>
+  <a href="/arcade" class="active">ARCADE</a>
+</div>
+
+<div class="title">LP BOT ARCADE</div>
+<div class="subtitle">- INSERT LIQUIDITY TO PLAY -</div>
+
+<div id="loading" style="text-align:center;color:#0f0;padding:40px">
+  LOADING<span class="blink">...</span>
+</div>
+
+<div id="game" style="display:none">
+
+<!-- SCORE BAR -->
+<div class="score-bar">
+  <div class="score-item"><div class="score-label">SCORE (FEES)</div><div class="score-value gold" id="score">$0.00</div></div>
+  <div class="score-item"><div class="score-label">HP (VALUE)</div><div class="score-value" id="hp">$0</div></div>
+  <div class="score-item"><div class="score-label">LEVEL</div><div class="score-value" id="level">1</div></div>
+  <div class="score-item"><div class="score-label">STATUS</div><div class="score-value" id="status">---</div></div>
+</div>
+
+<!-- CHARACTER ZONE -->
+<div class="character-zone" id="arena">
+  <div class="range-zone" id="rangeZone"></div>
+  <div class="price-line" id="priceLine"></div>
+  <div class="price-tag" id="priceTag"></div>
+  <div class="bot-char" id="botChar">🤖</div>
+  <div class="ground"></div>
+</div>
+
+<!-- XP BAR (in-range %) -->
+<div class="xp-section">
+  <h3>⚡ IN-RANGE XP BAR</h3>
+  <div class="xp-bar-bg">
+    <div class="xp-bar-fill" id="xpBar" style="width:0%;background:linear-gradient(90deg,#0f0,#0ff)"></div>
+  </div>
+  <div class="xp-text" id="xpText">0% IN RANGE — EARN XP BY STAYING IN BOUNDS!</div>
+</div>
+
+<!-- STATS -->
+<div class="stats-grid">
+  <div class="stat-box">
+    <h3>💰 LOOT CHEST</h3>
+    <div class="stat-row"><span class="stat-key">PENDING</span><span class="stat-val gold" id="pendFees">$0</span></div>
+    <div class="stat-row"><span class="stat-key">HARVESTED</span><span class="stat-val gold" id="harvFees">$0</span></div>
+    <div class="stat-row"><span class="stat-key">TOTAL LOOT</span><span class="stat-val gold" id="totalFees">$0</span></div>
+    <div class="stat-row"><span class="stat-key">DAILY LOOT</span><span class="stat-val gold" id="estDaily">$0</span></div>
+  </div>
+  <div class="stat-box">
+    <h3>⚔️ BATTLE STATS</h3>
+    <div class="stat-row"><span class="stat-key">IL DAMAGE</span><span class="stat-val bad" id="ilDmg">$0</span></div>
+    <div class="stat-row"><span class="stat-key">GAS BURNED</span><span class="stat-val bad" id="gasCost">$0</span></div>
+    <div class="stat-row"><span class="stat-key">NET PNL</span><span class="stat-val" id="netPnl">$0</span></div>
+    <div class="stat-row"><span class="stat-key">REBALANCES</span><span class="stat-val" id="txCount">0</span></div>
+  </div>
+</div>
+
+<!-- MARKET MOOD -->
+<div class="mood-bar">
+  <h3>🎮 MARKET MOOD</h3>
+  <div class="mood-meter" id="moodMeter"></div>
+  <div style="display:flex;justify-content:space-between;font-size:7px"><span style="color:#f44">EXTREME FEAR</span><span style="color:#888" id="moodLabel">---</span><span style="color:#0f0">EXTREME GREED</span></div>
+</div>
+
+<!-- ACHIEVEMENTS -->
+<div class="achievements">
+  <h3>🏆 ACHIEVEMENTS</h3>
+  <div id="badges"></div>
+</div>
+
+<!-- GAME LOG -->
+<div class="game-log">
+  <h3>📜 ADVENTURE LOG</h3>
+  <div id="gameLog"></div>
+</div>
+
+<div class="insert-coin">— AUTO-REFRESH 30s —</div>
+
+</div><!-- /game -->
+</div><!-- /screen -->
+
+<script>
+const TZ = 'Europe/Berlin';
+
+function fmt(n, d=2) { return Math.abs(n).toFixed(d); }
+
+function getLevel(totalFees) {
+  if (totalFees >= 500) return { lvl: 10, title: 'LP GOD', next: Infinity };
+  if (totalFees >= 200) return { lvl: 9, title: 'WHALE RIDER', next: 500 };
+  if (totalFees >= 100) return { lvl: 8, title: 'FEE MACHINE', next: 200 };
+  if (totalFees >= 50) return { lvl: 7, title: 'POOL SHARK', next: 100 };
+  if (totalFees >= 25) return { lvl: 6, title: 'RANGE RIDER', next: 50 };
+  if (totalFees >= 10) return { lvl: 5, title: 'LIQUIDITY MAGE', next: 25 };
+  if (totalFees >= 5) return { lvl: 4, title: 'FEE HUNTER', next: 10 };
+  if (totalFees >= 2) return { lvl: 3, title: 'POOL PADAWAN', next: 5 };
+  if (totalFees >= 0.5) return { lvl: 2, title: 'NOOB FARMER', next: 2 };
+  return { lvl: 1, title: 'FRESH SPAWN', next: 0.5 };
+}
+
+function getBadges(data) {
+  const d = data;
+  const badges = [];
+  const totalFees = d.totalFeesUsdc || 0;
+  const ir24 = d._inRange24h || 0;
+  const txs = d.txCount || 0;
+
+  badges.push({ name: '🌱 FIRST LP', desc: 'Open first position', earned: !!d.positionMint });
+  badges.push({ name: '💰 $1 FEES', desc: 'Earn $1 in fees', earned: totalFees >= 1 });
+  badges.push({ name: '💎 $10 FEES', desc: 'Earn $10 in fees', earned: totalFees >= 10 });
+  badges.push({ name: '👑 $50 FEES', desc: 'Earn $50 in fees', earned: totalFees >= 50 });
+  badges.push({ name: '🔥 $100 CLUB', desc: 'Earn $100 in fees', earned: totalFees >= 100 });
+  badges.push({ name: '🎯 SNIPER', desc: '90%+ in-range 24h', earned: ir24 >= 90 });
+  badges.push({ name: '📏 RULER', desc: '95%+ in-range 24h', earned: ir24 >= 95 });
+  badges.push({ name: '⚡ ACTIVE', desc: '10+ transactions', earned: txs >= 10 });
+  badges.push({ name: '🏗️ BUILDER', desc: '50+ transactions', earned: txs >= 50 });
+  badges.push({ name: '🐋 WHALE', desc: '$5000+ total value', earned: (d.totalValueWithPosition || 0) >= 5000 });
+  return badges;
+}
+
+function statusEmoji(state) {
+  if (state === 'ACTIVE') return '🟢 ACTIVE';
+  if (state === 'WAITING_PULLBACK') return '⏳ PULLBACK';
+  if (state === 'HALTED') return '💀 HALTED';
+  if (state === 'IDLE') return '😴 IDLE';
+  return '❓ ' + state;
+}
+
+async function refresh() {
+  try {
+    const [liveRes, snapRes] = await Promise.all([
+      fetch('/api/live'), fetch('/api/snapshots?hours=24')
+    ]);
+    const live = await liveRes.json();
+    const snaps = await snapRes.json();
+    if (!live) return;
+
+    // In-range 24h
+    const total = snaps.length;
+    const inRange = snaps.filter(s => s.in_range).length;
+    const ir24 = total > 0 ? (inRange/total*100) : 0;
+    live._inRange24h = ir24;
+
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('game').style.display = 'block';
+
+    // Score
+    const totalFees = live.totalFeesUsdc || 0;
+    document.getElementById('score').textContent = '$' + fmt(totalFees);
+
+    // HP
+    const hp = live.totalValueWithPosition || 0;
+    document.getElementById('hp').textContent = '$' + fmt(hp, 0);
+
+    // Level
+    const lvl = getLevel(totalFees);
+    document.getElementById('level').innerHTML = lvl.lvl + ' <span style="font-size:7px;color:#888">' + lvl.title + '</span>';
+
+    // Status
+    const statusEl = document.getElementById('status');
+    statusEl.innerHTML = statusEmoji(live.botState);
+
+    // XP bar (in-range)
+    const xpBar = document.getElementById('xpBar');
+    const xpPct = Math.min(ir24, 100);
+    xpBar.style.width = xpPct + '%';
+    xpBar.style.background = xpPct > 90 ? 'linear-gradient(90deg,#0f0,#ffd700)' : xpPct > 60 ? 'linear-gradient(90deg,#0f0,#0ff)' : 'linear-gradient(90deg,#f44,#ff0)';
+    document.getElementById('xpText').textContent = fmt(ir24, 0) + '% IN RANGE 24H — ' + (ir24 > 95 ? 'LEGENDARY!' : ir24 > 80 ? 'EXCELLENT!' : ir24 > 50 ? 'KEEP GOING!' : 'DANGER ZONE!');
+
+    // Character position in range
+    if (live.positionRange) {
+      const lower = live.positionRange.lower;
+      const upper = live.positionRange.upper;
+      const padding = (upper - lower) * 0.3;
+      const viewMin = lower - padding;
+      const viewMax = upper + padding;
+      const viewWidth = viewMax - viewMin;
+      const arena = document.getElementById('arena');
+      const w = arena.offsetWidth;
+
+      // Range zone
+      const rz = document.getElementById('rangeZone');
+      const rzLeft = ((lower - viewMin) / viewWidth * 100);
+      const rzWidth = ((upper - lower) / viewWidth * 100);
+      rz.style.left = rzLeft + '%';
+      rz.style.width = rzWidth + '%';
+
+      // Price line
+      const pricePct = ((live.solPrice - viewMin) / viewWidth * 100);
+      const pl = document.getElementById('priceLine');
+      pl.style.left = Math.max(2, Math.min(98, pricePct)) + '%';
+      const pt = document.getElementById('priceTag');
+      pt.style.left = Math.max(2, Math.min(85, pricePct)) + '%';
+      pt.textContent = '$' + fmt(live.solPrice);
+
+      // Bot character follows price
+      const bc = document.getElementById('botChar');
+      bc.style.left = Math.max(2, Math.min(90, pricePct - 3)) + '%';
+
+      // Change bot emoji based on state
+      if (live.botState === 'HALTED') bc.textContent = '💀';
+      else if (!live.positionMint) bc.textContent = '😴';
+      else if (live.solPrice < lower || live.solPrice > upper) bc.textContent = '😱';
+      else bc.textContent = '🤖';
+    }
+
+    // Loot chest
+    document.getElementById('pendFees').textContent = '$' + fmt(live.pendingFeesTotal || 0);
+    document.getElementById('harvFees').textContent = '$' + fmt((live.totalFeesUsdc || 0) - (live.pendingFeesTotal || 0));
+    document.getElementById('totalFees').textContent = '$' + fmt(totalFees);
+    document.getElementById('estDaily').textContent = '$' + fmt(live.estDailyFeesUsdc || 0) + '/day';
+
+    // Battle stats
+    const totalIL = (live.ilUsdc || 0) + (live.realizedIlUsdc || 0);
+    const net = totalFees + totalIL - (live.gasUsdc || 0);
+    document.getElementById('ilDmg').textContent = '$' + fmt(Math.abs(totalIL));
+    document.getElementById('gasCost').textContent = '$' + fmt(live.gasUsdc || 0);
+    const netEl = document.getElementById('netPnl');
+    netEl.textContent = (net >= 0 ? '+' : '-') + '$' + fmt(Math.abs(net));
+    netEl.className = 'stat-val ' + (net >= 0 ? 'gold' : 'bad');
+    document.getElementById('txCount').textContent = live.txCount || 0;
+
+    // Market mood
+    const mktRes = await fetch('/api/market-signals').catch(() => null);
+    const mkt = mktRes ? await mktRes.json() : null;
+    if (mkt && mkt.fearGreedIndex != null) {
+      const fgi = mkt.fearGreedIndex;
+      const meter = document.getElementById('moodMeter');
+      meter.innerHTML = '';
+      const colors = ['#f44','#f44','#f80','#f80','#ff0','#ff0','#0f0','#0f0','#0f0','#0f0'];
+      for (let i = 0; i < 10; i++) {
+        const seg = document.createElement('div');
+        seg.className = 'mood-segment';
+        seg.style.flex = '1';
+        seg.style.background = i < Math.floor(fgi/10) ? colors[i] : '#1a1a1a';
+        if (i === Math.floor(fgi/10)) seg.style.boxShadow = '0 0 8px ' + colors[i];
+        meter.appendChild(seg);
+      }
+      document.getElementById('moodLabel').textContent = fgi + '/100 ' + (mkt.fearGreedLabel || '');
+    }
+
+    // Achievements
+    const badges = getBadges(live);
+    const badgesEl = document.getElementById('badges');
+    badgesEl.innerHTML = badges.map(b =>
+      '<div class="badge ' + (b.earned ? 'earned' : 'locked') + '" title="' + b.desc + '">' +
+      b.name + (b.earned ? '' : ' 🔒') + '</div>'
+    ).join('');
+
+    // Game log from recent events
+    const eventsRes = await fetch('/api/events');
+    const events = await eventsRes.json();
+    const logEl = document.getElementById('gameLog');
+    const eventMessages = {
+      'POSITION_OPENED': { cls: 'action', msg: '⚔️ ENTERED THE POOL!' },
+      'POSITION_CLOSED': { cls: 'warning', msg: '🏃 RETREATED FROM POOL' },
+      'T1_DOWNSIDE': { cls: 'danger', msg: '🛡️ DOWNSIDE SHIELD ACTIVATED!' },
+      'T1_UPSIDE': { cls: 'warning', msg: '🚀 UPSIDE EXIT — WATCHING FOR PULLBACK' },
+      'OOR_BELOW': { cls: 'danger', msg: '💥 HIT BELOW — OUT OF RANGE!' },
+      'OOR_ABOVE': { cls: 'warning', msg: '🌙 MOONED OUT OF RANGE!' },
+      'FEE_HARVEST': { cls: 'loot', msg: '💰 LOOT COLLECTED!' },
+      'AUTO_DEPLOY': { cls: 'action', msg: '🏗️ REINFORCEMENTS DEPLOYED!' },
+      'REGIME_CHANGE': { cls: 'warning', msg: '🌊 WORLD EVENT — REGIME SHIFT!' },
+      'PULLBACK_REENTRY': { cls: 'action', msg: '🎯 PULLBACK CAUGHT — RE-ENTERING!' },
+      'PULLBACK_TIMEOUT': { cls: 'warning', msg: '⏰ TIMEOUT — FORCED RE-ENTRY' },
+      'LIQUIDITY_ADDED': { cls: 'loot', msg: '💎 EXTRA LIQUIDITY INJECTED!' },
+    };
+    logEl.innerHTML = events.slice(0, 15).map(e => {
+      const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: TZ });
+      const em = eventMessages[e.eventType] || { cls: '', msg: e.eventType };
+      return '<div class="log-line"><span class="time">[' + t + ']</span> <span class="' + em.cls + '">' + em.msg + '</span> <span style="color:#555">$' + fmt(e.price) + '</span></div>';
+    }).join('');
+
+  } catch (err) {
+    console.error('Arcade refresh failed:', err);
+  }
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>`;
+}
+
