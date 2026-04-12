@@ -1,0 +1,1192 @@
+================================================================================
+  SOL/USDC LP BOT — COMPREHENSIVE BUSINESS PROCESS MODEL (BPM)
+  Generated: 2026-04-12
+  Codebase: /home/botuser/sol-lp-bot/mvp/src/
+================================================================================
+
+TABLE OF CONTENTS
+
+  1. PROCESS OVERVIEW
+  2. MAIN DECISION LOOP (Process P1)
+  3. REGIME DETECTION (Process P2)
+  4. POSITION LIFECYCLE (Process P3)
+  5. RULE EXECUTION (Process P4)
+  6. MARKET DATA PIPELINE (Process P5)
+  7. STATE MACHINE
+  8. ERROR HANDLING & SAFETY (Process P6)
+  9. CONFIGURATION FLOW (Process P7)
+  10. REPORTING & MONITORING (Process P8)
+
+================================================================================
+1. PROCESS OVERVIEW
+================================================================================
+
+High-level process map showing all major processes and their interactions.
+
+  +-------------------------------------------------------------------+
+  |                     POOL: SOL/USDC LP BOT                         |
+  +-------------------------------------------------------------------+
+  |                                                                   |
+  |  LANE: Data Services          LANE: Decision Engine               |
+  |  +-----------------------+    +-----------------------------+     |
+  |  | Oracle (Pyth Hermes)  |--->| Main Decision Loop (P1)     |     |
+  |  | polls every 2s        |    | fires every 60s (default)   |     |
+  |  +-----------------------+    +-----------------------------+     |
+  |  | Market Data (CoinGecko|        |           |         |         |
+  |  | polls every 15min     |        v           v         v         |
+  |  +-----------------------+    +--------+ +--------+ +--------+   |
+  |  | Pool State (Orca RPC) |    |Regime  | |Position| |Rule    |   |
+  |  | cached 10s TTL        |    |Detect  | |Lifecycl| |Engine  |   |
+  |  +-----------------------+    |(P2)    | |(P3)    | |(P4)    |   |
+  |                               +--------+ +--------+ +--------+   |
+  |  LANE: Execution                  |           |                   |
+  |  +-----------------------+        v           v                   |
+  |  | LiveExecutor (Orca TX)|<--[position open/close/harvest/deploy] |
+  |  | Jupiter + Orca swaps  |                                        |
+  |  +-----------------------+                                        |
+  |                                                                   |
+  |  LANE: Persistence            LANE: Output                        |
+  |  +-----------------------+    +-----------------------------+     |
+  |  | SQLite DB (WAL mode)  |    | Dashboard (HTTP :3000)      |     |
+  |  | 10 tables             |    | Telegram Reporter (20min)   |     |
+  |  +-----------------------+    | Analysis Agent (weekly)     |     |
+  |                               +-----------------------------+     |
+  +-------------------------------------------------------------------+
+
+Cross-process data flows:
+
+  Oracle --[price]--> Decision Loop --[decisions]--> Executor --[TX results]--> DB
+  Market Data --[signals]--> Regime Detection --[regime]--> Decision Loop
+  DB --[state restore]--> Decision Loop (on startup)
+  DB --[config]--> Runtime Config --[params]--> All Rules
+  Dashboard <--[live data]--> Decision Loop
+  Dashboard --[controls: pause/resume/close/harvest]--> Decision Loop
+
+
+================================================================================
+2. MAIN DECISION LOOP (Process P1)
+================================================================================
+
+Source: src/main.ts, function runLiveCycle() (line 783) + setInterval (line 357)
+
+TIMER START EVENT: fires every `runtime.decisionIntervalSeconds` seconds
+(default 60s). Configurable [10, 600] via DB config.
+
+  [Timer: 60s] --> (Guard: cycleRunning?) --yes--> [Skip]
+                                           --no--> [Set cycleRunning=true]
+
+STEP 1: GET PRICE
+  |
+  v
+  (XOR Gateway G1: oracle.getPrice() valid?)
+  --null--> [Return — no valid price]
+  --valid--> continue
+
+STEP 2: REFRESH POOL STATE
+  |
+  v
+  pool.fetchState()  (10s cache TTL, fetches on-chain Whirlpool data)
+
+STEP 3: BOT PAUSED CHECK
+  |
+  v
+  (XOR Gateway G2: botPaused?)
+  --yes--> [Skip runLiveCycle]
+  --no--> [runLiveCycle(price)]
+
+STEP 4: STORE PRICE TICK
+  |
+  v
+  insertPriceTick(db, {price, confidence, regime})
+
+STEP 5: UPDATE DASHBOARD
+  |
+  v
+  - getWalletBalances()
+  - getPositionData()
+  - getPositionComposition()
+  - getPendingFees() (every 2min, expensive: 4 RPC calls)
+  - getEstimatedYield24h()
+  - Calculate IL, total value
+  - updateLiveData() -> dashboard
+  - insertLiveSnapshot() -> DB
+
+STEP 6: PERSIST STATE
+  |
+  v
+  upsertBotState(db, {state, regime, position_json, fees, il, gas, pullback})
+
+STEP 7: DAILY P&L
+  |
+  v
+  checkAndWriteDailyPnl(price) -> upsertDailySummary(db)
+  - Detects capital injections (token quantity increase > $20)
+  - Tracks cumulative fees, IL, portfolio change
+
+STEP 8: PRUNE (once per day)
+  |
+  v
+  pruneOldPriceTicks(db, 30) — remove price ticks older than 30 days
+
+  [Set cycleRunning=false]
+
+--- runLiveCycle(price) detailed flow: ---
+
+  (XOR Gateway G3: liveBotState === 'HALTED'?)
+  --yes--> [Return]
+  --no--> continue
+
+  STEP A: Track recent prices (keep last 10 for flash crash detection)
+  liveRecentPrices.push(price); if > 10, shift()
+
+  STEP B: REGIME UPDATE (hourly gate)
+  |
+  v
+  (XOR Gateway G4: now - liveLastRegimeCheck > 3,600,000ms?)
+  --no--> skip regime check
+  --yes--> [Execute Regime Detection (P2)]
+           |
+           v
+           (XOR Gateway G4a: regime changed AND
+              (closes >= 5 OR market override OR market confirmed)?)
+           --yes--> [Update liveRegime, log REGIME_CHANGE event]
+           --no--> [Log REGIME_EVAL every 1h]
+           Set liveLastRegimeCheck = now
+
+  STEP C: REBALANCE RATE LIMIT
+  |
+  v
+  (XOR Gateway G5: liveRebalancesThisHour >= runtime.rebalanceLoopLimit?)
+  --yes--> [Return — rate limited, max 10/hour default]
+  --no--> continue
+
+  Get regime params for current liveRegime.
+
+  STEP D: NO POSITION BRANCH
+  |
+  v
+  (XOR Gateway G6: currentPos === null?)
+  --yes--> (XOR Gateway G7: livePullbackActive?)
+           |
+           --yes--> [PULLBACK WATCH — see Process P3 section 4]
+           |         - Flash crash cooldown check
+           |         - shouldReenterAfterUpside() check
+           |         - Peak tracking
+           |
+           --no--> [liveOpenPosition() — open fresh position]
+                   Set idleRebalancePending = true
+                   Return
+  --no--> continue to position monitoring
+
+  STEP E: PROXIMITY CHECK (with position)
+  |
+  v
+  calcProximity(price, currentPos) -> {proxToLower, proxToUpper, inRange}
+
+  (XOR Gateway G8: prox.inRange?)
+  --yes--> (AND Gateway: rule2Enabled?)
+           |
+           --yes--> (XOR Gateway G9: shouldFireDownside?)
+           |         --yes--> liveCloseAndReopen() [T1_DOWNSIDE]
+           |                  Return
+           |         --no--> (XOR Gateway G10: shouldFireUpside?)
+           |                  --yes--> liveClosePosition() [T1_UPSIDE]
+           |                           Enter WAITING_PULLBACK
+           |                           Return
+           |                  --no--> continue
+           --no--> continue (OOR detection only)
+           |
+           [Log HOLD decision every 30 min]
+  --no--> (XOR Gateway G11: price < priceLower?)
+           --yes--> (XOR Gateway G12: isFlashCrash?)
+                     --yes--> liveClosePosition() [OOR_BELOW]
+                              Enter flash crash cooldown
+                              Set liveBotState = IDLE
+                              Return
+                     --no--> liveCloseAndReopen() [OOR_BELOW]
+                              Return
+           --no--> (price > priceUpper implied)
+                   liveClosePosition() [OOR_ABOVE]
+                   Enter WAITING_PULLBACK (pullback watch)
+                   Return
+
+  STEP F: POSITION MAX AGE CHECK
+  |
+  v
+  (XOR Gateway G13: positionMaxAgeHours > 0 AND
+                     ageHours >= positionMaxAgeHours?)
+  --yes--> liveCloseAndReopen() [POSITION_CLOSED]
+           Return
+  --no--> continue
+
+  STEP G: FEE HARVEST (hourly gate)
+  |
+  v
+  (XOR Gateway G14: now - liveLastHarvestCheck >= 3,600,000ms?)
+  --yes--> (XOR Gateway G15: isHarvestDue(lastHarvest, params, now)?)
+           --yes--> (XOR Gateway G16: pendingFees >= $0.50?)
+                    --yes--> collectFees()
+                             Convert SOL fees per harvestSolConvertPct
+                             Update liveLastHarvestTime, liveCumFees
+                    --no--> [Skip — fees too small for gas]
+           --no--> skip
+  --no--> skip
+
+  STEP H: AUTO CAPITAL DEPLOYMENT (Rule 7)
+  |
+  v
+  (AND Gateway: prox.inRange AND
+                now - liveLastAutoDeployCheck >= autoDeployCheckMinutes * 60000?)
+  --yes--> checkAutoDeploy() -> {shouldDeploy, reason, deployableUsdc}
+           (XOR Gateway G17: shouldDeploy?)
+           --yes--> liveExecutor.increaseLiquidity(price, deployableUsdc)
+                    Log AUTO_DEPLOY event
+           --no--> [Log DEPLOY_SKIP periodically]
+  --no--> skip
+
+  STEP I: IDLE WALLET REBALANCE (Rule 8)
+  |
+  v
+  (AND Gateway: idleRebalanceEnabled AND
+                (regime changed OR idleRebalancePending after cooldown)?)
+  --yes--> Calculate target SOL% per regime
+           (XOR Gateway G18: |deviation| > idleRebalanceDeviationPct?)
+           --yes--> Swap SOL<->USDC to reach target split
+           --no--> [Already near target]
+  --no--> skip
+
+  Set liveBotState = 'ACTIVE'
+  [End of runLiveCycle]
+
+
+================================================================================
+3. REGIME DETECTION (Process P2)
+================================================================================
+
+Source: src/engine/regime.ts
+
+Two-stage detection: Base regime from daily closes, then Enhanced with
+market signals.
+
+--- STAGE 1: BASE REGIME (detectRegime) ---
+
+Input: daily closing prices from getDailyCloses(db, regimeWindowDays)
+       (default 7 days)
+
+  (XOR Gateway: prices.length < 3?)
+  --yes--> Return 'RANGING' (insufficient data)
+  --no--> continue
+
+  Calculate:
+    netMove = |lastPrice - firstPrice|
+    totalPath = sum of |prices[i] - prices[i-1]| for all i
+    dirRatio = netMove / totalPath  (0 = choppy, 1 = straight line)
+    logReturns = log(prices[i] / prices[i-1])
+    realisedVol = stdDev(logReturns)
+
+  Decision tree:
+    (XOR: realisedVol > 0.08 OR !isFinite?)
+    --yes--> EXTREME
+    --no--> (XOR: dirRatio > trendThreshold?)  [default 0.35]
+            --yes--> (XOR: lastPrice > firstPrice?)
+                     --yes--> BULLISH_TREND
+                     --no--> BEARISH_TREND
+            --no--> RANGING
+
+--- STAGE 2: ENHANCED DETECTION (detectRegimeEnhanced) ---
+
+Input: base regime result + MarketSignals from MarketDataService
+
+  If no market signals available: return base regime with confidence=0.
+
+  Step 1b: Vol4h refinement
+    - If base=EXTREME but vol4h < threshold*0.8: DOWNGRADE to trend/ranging
+      (base EXTREME from sparse daily data was misleading)
+    - If base!=EXTREME but vol4h > threshold: UPGRADE to EXTREME
+      (base missed it with few daily closes)
+
+  Step 2: EXTREME override — 1h vol spike
+    If vol1h > vol1hExtremeThreshold (0.06): -> EXTREME, confidence++
+
+  Step 3: EXTREME override — 4h vol + volume spike
+    If vol4h > threshold AND volumeRatio4h > volumeSpikeMultiple (3x):
+    -> EXTREME, confidence++
+
+  Step 4: TREND override — large SOL move + volume
+    If |solDelta24h| > trendDeltaThreshold (4%) AND volumeRatio4h > 2x
+    AND current regime is RANGING:
+    -> BULLISH_TREND or BEARISH_TREND based on sign
+
+  Step 5: BTC correlation check
+    If |btcDelta24h| > btcCorrelationThreshold (3%) AND same direction
+    as SOL: confidence++
+
+  Step 6: Fear & Greed tiebreaker
+    - F&G < 25 (extreme fear): confirms BEARISH/EXTREME, confidence++
+      Can override RANGING -> BEARISH if SOL dropping > 2%
+    - F&G > 75 (extreme greed): confirms BULLISH, confidence++
+    - F&G 40-60 + RANGING: confidence++
+
+  Step 7: Volume confirms regime
+    - Low volume + RANGING: confidence++
+    - High volume + trending/extreme: confidence++
+
+  Output: {regime, baseRegime, overrideReason, confidence (0-5), signals}
+
+--- PRIORITY CHAIN ---
+
+  Highest priority first:
+  1. 1h vol spike -> EXTREME (immediate danger)
+  2. 4h vol + volume spike -> EXTREME
+  3. vol4h refinement of base EXTREME (can downgrade or upgrade)
+  4. SOL delta + volume -> TREND override
+  5. F&G extreme fear + SOL drop -> BEARISH override
+  6. Base regime from daily closes (lowest priority, can be overridden)
+
+--- REGIME CHANGE SUPPRESSION ---
+
+  A regime change is only applied if:
+  - Daily closes >= 5 (MIN_CLOSES_FOR_REGIME_CHANGE), OR
+  - Market signals produced an override (overrideReason != null), OR
+  - Market signals confirm with confidence > 0
+
+  This prevents flapping on thin data.
+
+
+================================================================================
+4. POSITION LIFECYCLE (Process P3)
+================================================================================
+
+Source: src/main.ts (liveOpenPosition, liveClosePosition, liveCloseAndReopen)
+        src/live/executor.ts (openPosition, closePosition, collectFees)
+
+--- SUBPROCESS 3.1: OPEN POSITION ---
+
+  Trigger: liveOpenPosition(price, eventType, reason)
+
+  [TX Backoff Check]
+  (XOR: Date.now() < txBackoffUntil?)
+  --yes--> [Skip — exponential backoff active]
+  --no--> continue
+
+  Step 1: Calculate range
+    params = runtime.regimeParams[liveRegime]
+    If rangeWidthOverride != null, use override
+    range = calcRange(price, params) -> {tickLower, tickUpper, priceLower, priceUpper}
+
+  Step 2: Calculate deploy amount
+    totalWalletUsdc = sol * price + usdc
+    reserveUsdc = solReserve * price + usdcReserve
+    deployUsdc = min(total * deployPct, total - reserve)
+    (XOR: deployUsdc < $5?) --yes--> [Abort — insufficient funds]
+
+  Step 3: Execute on-chain (executor.openPosition)
+    a) Fetch pool state (IGNORE_CACHE)
+    b) Init tick arrays if needed (retry once on failure)
+    c) Get wallet balances, compute ideal SOL/USDC ratio for range
+    d) PRE-OPEN SWAP (if wallet heavily imbalanced):
+       - If USDC < $5 and SOL > 0.1: swap SOL -> USDC
+       - If SOL < 0.01 and USDC > $10: swap USDC -> SOL
+       Uses Jupiter (Orca fallback). Wait 4s for confirmation.
+    e) DEPLOY CAP: cap available capital at deployUsdc
+       (prevents depositing more than regime allows)
+    f) QUOTING:
+       - Try SOL-based quote first
+       - If SOL quote needs more USDC than available, try USDC-based
+       - Reserve 0.02 SOL extra for rent + TX fees
+    g) Open position TX (whirlpool.openPosition)
+    h) Record: positionMint, entryPrice, entryTime, regime, entrySol, entryUsdc
+
+  Step 4: Post-open
+    - Reset consecutiveTxFailures, txBackoffUntil
+    - Increment liveRebalancesThisHour, dailyRebalanceCount
+    - Set liveBotState = ACTIVE
+    - Auto-enable autoDeploy if deposited < 50% of target
+    - Log POSITION_OPENED event
+    - Set idleRebalancePending = true
+
+  [Error boundary: TX failure]
+  - consecutiveTxFailures++
+  - txBackoffUntil = now + min(300, 60 * 2^(failures-1)) seconds
+  - Backoff sequence: 60s, 120s, 240s, 300s (cap)
+
+--- SUBPROCESS 3.2: CLOSE POSITION ---
+
+  Trigger: liveClosePosition(price, eventType, reason)
+
+  Step 1: Capture position ID before close
+  Step 2: Capture wallet balances before close
+  Step 3: executor.closePosition()
+    a) Get pending fees (collectFeesQuote from on-chain tick arrays)
+    b) Compute IL: ilPct = 2*sqrt(r)/(1+r) - 1, where r = currentPrice/entryPrice
+    c) Capture position info (mint, range)
+    d) Get wallet balances before
+    e) whirlpool.closePosition() — may produce multiple TX builders
+       Execute each via execTx() (with retry on transient errors)
+    f) CRITICAL: Only clear currentPosition AFTER all TXs succeed
+       (crash-safe: if TX fails, position state is preserved)
+    g) Get wallet balances after
+    h) Return: {solReceived, usdcReceived, fees, il, entryPrice, closePrice}
+
+  Step 4: Accumulate cumulative fees and IL
+    liveCumFeesSol += feeSolCollected
+    liveCumFeesUsdc += feeUsdcCollected
+    liveRealizedIl += ilAtClose
+
+  Step 5: Log event, reset backoff counters
+
+--- SUBPROCESS 3.3: CLOSE AND REOPEN ---
+
+  Trigger: liveCloseAndReopen(price, eventType, reason)
+
+  Step 1: liveClosePosition()
+    (XOR: close succeeded?)
+    --no--> [Abort — "position still open", do NOT attempt reopen]
+    --yes--> continue
+
+  Step 2: Wait 2s (let on-chain state settle)
+
+  Step 3: RE-CHECK REGIME before reopening
+    Fresh detectRegimeEnhanced() call
+    If regime changed: update liveRegime, log REGIME_CHANGE
+    Reset liveLastRegimeCheck
+
+  Step 4: liveOpenPosition() with new regime params
+
+  Step 5: IMMEDIATE DB SAVE of new position
+    (prevents orphan recovery from killing a legitimate position
+     if bot crashes before next cycle save)
+
+  Step 6: Set idleRebalancePending = true
+
+--- SUBPROCESS 3.4: PULLBACK WATCH ---
+
+  State: liveBotState = WAITING_PULLBACK
+  Variables: livePullbackActive, livePullbackPeak, livePullbackStart
+
+  Entry conditions (two paths):
+  1. T1_UPSIDE: Rule 2 early upside exit triggered
+  2. OOR_ABOVE: Price fully out of range above
+
+  Per-cycle logic when in pullback watch:
+
+  [Flash Crash Cooldown Gate]
+  (XOR: now < liveFlashCrashCooldownUntil?)
+  --yes--> [Return — still in cooldown]
+  --no--> continue
+
+  [Flash Crash Detection]
+  (XOR: isFlashCrash(liveRecentPrices)?)
+  --yes--> Set cooldownUntil = now + flashCrashWaitMinutes * 60000
+           Reset peak to current price
+           Reset timeout start to now
+           Persist cooldownUntil to DB config
+           [Return]
+
+  [Re-entry Decision]
+  shouldReenterAfterUpside(currentPrice, peakPrice, watchStartTime, now)
+
+  (XOR: pullbackPct >= pullbackThresholdPct?)   [default 2.5%]
+  --yes--> {should: true, reason: 'PULLBACK'}
+
+  (XOR: hoursWaiting >= timeoutHours?)           [default 4h]
+  --yes--> {should: true, reason: 'TIMEOUT'}
+
+  --no--> {should: false, reason: 'WAITING'}
+          Track peak: if price > livePullbackPeak, update peak
+
+  On re-entry:
+    livePullbackActive = false
+    liveFlashCrashCooldownUntil = 0
+    liveOpenPosition(price, 'PULLBACK_REENTRY', reason)
+    idleRebalancePending = true
+
+
+================================================================================
+5. RULE EXECUTION (Process P4)
+================================================================================
+
+Source: src/engine/rules.ts
+Each rule is parameterized by the current regime via REGIME_PARAMS.
+
+--- R1: RANGE CALCULATION (calcRange) ---
+
+  Input: currentPrice, RegimeParams, priceToTick converters
+  Output: RangeBounds {tickLower, tickUpper, priceLower, priceUpper}
+
+  Formula:
+    lower = currentPrice * (1 - rangeWidthPct/100 * skewDown)
+    upper = currentPrice * (1 + rangeWidthPct/100 * skewUp)
+
+  Tick alignment:
+    tickLower: priceToTickLower(lower) — rounds DOWN
+    tickUpper: priceToTickUpper(upper) — rounds UP
+    (ensures range is never narrower than intended)
+
+  Regime defaults:
+    RANGING:       1.5% width, 30% down / 70% up
+    BULLISH_TREND: 3.0% width, 20% down / 80% up
+    BEARISH_TREND: 2.5% width, 40% down / 60% up
+    EXTREME:       6.0% width, 50% down / 50% up
+
+  Optional: rangeWidthOverride replaces rangeWidthPct if set.
+
+--- R2: PROXIMITY MONITORING (calcProximity, shouldFireDownside, shouldFireUpside) ---
+
+  calcProximity:
+    centre = (priceLower + priceUpper) / 2
+    halfWidth = (priceUpper - priceLower) / 2
+    proxToLower = max(0, (centre - currentPrice) / halfWidth)   [0=center, 1=edge]
+    proxToUpper = max(0, (currentPrice - centre) / halfWidth)
+    inRange = currentPrice in [priceLower, priceUpper]
+
+  Trigger conditions:
+    shouldFireDownside: proxToLower >= proxThresholdLower
+    shouldFireUpside:   proxToUpper >= proxThresholdUpper
+
+  Regime thresholds:
+    RANGING:       lower 65%, upper 88%
+    BULLISH_TREND: lower 70%, upper 92%
+    BEARISH_TREND: lower 55%, upper 82%
+    EXTREME:       lower 50%, upper 80%
+
+  Toggled by rule2Enabled flag (DB rule_toggles table).
+  When disabled: positions only close on full OOR (out of range).
+
+--- R3: PULLBACK RE-ENTRY (shouldReenterAfterUpside, isFlashCrash) ---
+
+  Purpose: After upside exit, wait for price pullback before re-entering.
+
+  shouldReenterAfterUpside:
+    pullbackPct = (peakPrice - currentPrice) / peakPrice * 100
+    hoursWaiting = (now - watchStartTime) / 3600000
+
+    If pullbackPct >= runtime.pullbackThresholdPct (default 2.5%):
+      -> Re-enter (PULLBACK reason)
+    If hoursWaiting >= runtime.timeoutHours (default 4h):
+      -> Re-enter (TIMEOUT reason)
+    Else: WAITING
+
+  isFlashCrash:
+    Computes max drawdown (peak-to-trough) in price window.
+    NOT endpoint-to-endpoint — a 5% drop + 3% recovery = 5% crash.
+    Threshold: runtime.flashCrashPct (default 5%)
+
+  Flash crash behavior:
+    - Block re-entry for flashCrashWaitMinutes (default 15min)
+    - Reset peak to crash price
+    - Reset timeout start
+    - Cooldown persisted to DB (survives restart)
+
+--- R4: RE-ENTRY SPLIT (getDownsideReentrySplit) ---
+
+  Returns the regime-specific SOL re-entry split ratio.
+  Used to determine how to split capital on downside re-entry.
+
+    RANGING:       50% SOL
+    BULLISH_TREND: 50% SOL
+    BEARISH_TREND: 30% SOL
+    EXTREME:       20% SOL
+
+--- R5: POSITION SIZING + DEPLOY CAP (getDeployAmount, checkAutoDeploy) ---
+
+  getDeployAmount:
+    deployUsdc = totalCapital * deployPct
+    reserveUsdc = totalCapital * (1 - deployPct)
+
+  Deploy percentages by regime:
+    RANGING:       100%
+    BULLISH_TREND: 85%
+    BEARISH_TREND: 75%
+    EXTREME:       25%
+
+  Deploy cap enforcement (in executor.openPosition):
+    availableValueUsdc = solAvail * price + usdcAvail
+    if availableValueUsdc > usdcToDeposit:
+      scale down solAvail and usdcAvail proportionally
+
+  Capital guard: runtime.maxLiveCapitalUsdc (default $5000)
+    Validated at startup via validateWalletForLive().
+
+--- R6: FEE HARVEST (isHarvestDue, calcHarvestFees, collectFees) ---
+
+  isHarvestDue:
+    daysSinceHarvest = (now - lastHarvestTime) / 86400000
+    Return: daysSinceHarvest >= harvestIntervalDays
+
+  Harvest intervals by regime:
+    RANGING:       7 days
+    BULLISH_TREND: 4 days
+    BEARISH_TREND: 2 days
+    EXTREME:       1 day
+
+  Harvest execution:
+    1. Check pending fees >= $0.50 (skip if too small for gas ~$0.10)
+    2. collectFees() — on-chain TX to claim accrued fees
+    3. SOL fee conversion:
+       Convert harvestSolConvertPct of SOL fees to USDC via swap
+       RANGING: 0% (keep SOL), BULLISH: 70%, BEARISH: 100%, EXTREME: 100%
+       Gas reserve check: ensure minSolForGas remains after conversion
+    4. Update cumulative fee trackers
+
+  Harvest check gate: every 1 hour (liveLastHarvestCheck)
+
+--- R7: AUTO CAPITAL DEPLOYMENT (checkAutoDeploy) ---
+
+  Purpose: Deploy idle wallet funds into existing position.
+  Check interval: every autoDeployCheckMinutes (default 5min).
+  Cooldown: autoDeployCooldownMinutes (default 30min).
+
+  Decision chain (BR = Business Rule):
+
+  BR-0: Enabled check (autoDeployEnabled toggle)
+  BR-3: Block in EXTREME regime (survival mode, 25% cap is deliberate)
+        BEARISH is allowed — deploy cap limits exposure.
+  BR-1: Minimum idle funds: SOL >= minIdleSol OR USDC >= minIdleUsdc
+  BR-6: Cooldown: minSinceLast < cooldownMin? Skip.
+  BR-3: Capital cap headroom: maxDeployUsdc - positionValueUsdc >= minDeployUsdc
+  BR-4: Dust check: deployableUsdc >= minDeployUsdc (default $10)
+  BR-2: Price in range check: deviation from range midpoint <= 1
+        Plus: not too close to edges (deviation < 1 - deployRatioTolerance)
+
+  Execution if shouldDeploy:
+    liveExecutor.increaseLiquidity(price, deployableUsdc)
+    (swap to match ratio, cap at deploy target, quote, increase liquidity TX)
+
+--- R8: IDLE WALLET REBALANCE ---
+
+  Purpose: Maintain target SOL/USDC split in idle wallet per regime.
+
+  Trigger conditions (OR):
+    - Regime changed (lastIdleRebalanceRegime != liveRegime)
+    - idleRebalancePending after position reopen (with 30min cooldown)
+
+  Target SOL percentages:
+    RANGING:       50% SOL
+    BULLISH_TREND: 60% SOL
+    BEARISH_TREND: 35% SOL
+    EXTREME:       15% SOL
+
+  Execution:
+    1. Get idle capital (wallet - reserves)
+    2. If idleTotal < idleRebalanceMinUsdc ($100): skip
+    3. Compute currentSolPct vs targetSolPct
+    4. If |deviation| <= idleRebalanceDeviationPct (15%): skip (near target)
+    5. Swap via doSwapPublic (Jupiter, Orca fallback)
+       - SOL excess: swap SOL -> USDC (min 0.01 SOL, $5 value)
+       - USDC excess: swap USDC -> SOL (min $1, $5 value)
+
+
+================================================================================
+6. MARKET DATA PIPELINE (Process P5)
+================================================================================
+
+Source: src/data/oracle.ts, src/data/market.ts, src/data/pool.ts
+
+--- ORACLE (Pyth Hermes) ---
+
+  Service: OracleService (src/data/oracle.ts)
+  Feed: SOL/USD Pyth price feed
+  Polling: every 2 seconds via setInterval
+
+  Data flow:
+    Hermes API (getLatestPriceUpdates) -> handlePriceUpdate() -> lastPrice
+
+  Validation pipeline (each price update):
+    1. Staleness: ageSec = now - publishTime; reject if > maxStalenessSec (60s)
+    2. Positive price: reject if <= 0 or !isFinite
+    3. Confidence: confidencePct = (conf / price) * 100;
+       reject if > maxConfidencePct (0.5%)
+
+  On rejection: badPriceCount incremented, logged as warning.
+
+  getPrice() returns null if:
+    - No price received yet
+    - Last update older than maxStalenessSec
+
+--- MARKET DATA (CoinGecko + Alternative.me) ---
+
+  Service: MarketDataService (src/data/market.ts)
+  Polling: every 15 minutes via setInterval
+  Re-entrance guard: this.refreshing flag prevents concurrent fetches
+
+  Data sources (fetched sequentially with 10s timeouts each):
+    1. CoinGecko OHLC (days=1): ~30min candles -> vol1h (stddev of log returns)
+       Also derives solDelta24h from endpoint prices
+    2. CoinGecko OHLC (days=7): 4h candles -> vol4h (stddev of log returns)
+    3. CoinGecko simple/price: SOL 24h price change, 24h volume
+    4. CoinGecko market_chart (7d): volume ratio (latest / 7d average)
+    5. CoinGecko simple/price (BTC): BTC price and 24h change
+    6. Alternative.me Fear & Greed Index: 0-100 value + label
+
+  Output: MarketSignals object with all data + errors array
+  Graceful degradation: each API call is independently try/caught.
+  Missing signals = null (enhanced regime detection handles nulls).
+
+--- POOL STATE (Orca Whirlpool) ---
+
+  Service: PoolService (src/data/pool.ts)
+  Cache TTL: 10 seconds
+  Fetched: on-demand via fetchState() (called each decision cycle)
+
+  Data: tickCurrentIndex, sqrtPriceX64, liquidity, feeRate
+  Error handling: on fetch error, returns cached state with updated timestamp
+  (prevents rapid retry loops)
+
+  Tick utility functions:
+    priceToTick(price) -> initializable tick index
+    priceToTickLower(price) -> rounded DOWN (for lower bounds)
+    priceToTickUpper(price) -> rounded UP (for upper bounds)
+    tickToPrice(tick) -> price
+
+--- DATA FLOW DIAGRAM ---
+
+  Pyth Hermes ─[2s poll]──> OracleService.lastPrice ──> runLiveCycle(price)
+                                                             |
+  CoinGecko ──[15m poll]──> MarketDataService.signals ──────>|
+  Alt.me F&G ─[15m poll]──>                                  |
+                                                             v
+  Orca RPC ───[per cycle]──> PoolService.cachedState ──> Regime Detection
+                                                         Position Operations
+                                                         Dashboard Data
+
+
+================================================================================
+7. STATE MACHINE
+================================================================================
+
+Source: src/types.ts (BotState type), src/main.ts (transitions)
+
+States:
+  IDLE              — No position, bot ready to open
+  ACTIVE            — Position open, monitoring and earning fees
+  WAITING_PULLBACK  — No position, watching for price pullback after upside exit
+  HALTED            — Bot stopped, no actions taken (runLiveCycle returns immediately)
+  REBALANCING       — (Defined in types but not used in live code; reserved)
+
+                    +---------------------------------------------+
+                    |              STATE TRANSITIONS               |
+                    +---------------------------------------------+
+
+  +--------+   open position   +---------+
+  | IDLE   |------------------>| ACTIVE  |
+  +--------+                   +---------+
+      ^                            |
+      |  flash crash OOR_BELOW     |  T1_DOWNSIDE (close+reopen)
+      |  (close, no reopen)        |  -> stays ACTIVE (reopened)
+      |                            |
+      |  resume from pullback      |  OOR_BELOW (close+reopen)
+      |  timeout/pullback reached  |  -> stays ACTIVE (reopened)
+      |                            |
+      |                            |  position max age
+      |                            |  -> stays ACTIVE (close+reopen)
+      |                            |
+      |                            |  T1_UPSIDE
+      |                            |  -> WAITING_PULLBACK
+      |                            |
+      |                            |  OOR_ABOVE
+      |                            |  -> WAITING_PULLBACK
+      |                            |
+      |                            |  dashboard close/emergency
+      |                            |  -> IDLE (paused)
+      |                            |
+      |  +-------------------+     |
+      +--| WAITING_PULLBACK  |<----+
+      |  +-------------------+
+      |       |      ^
+      |       |      | flash crash -> cooldown, reset peak/timeout
+      |       |      | price > peak -> update peak
+      |       |
+      |       | pullback >= threshold OR timeout >= hours
+      |       v
+      +-- open position -> ACTIVE
+          (via PULLBACK_REENTRY)
+
+  +---------+
+  | HALTED  |  <-- (not triggered programmatically; reserved for future use)
+  +---------+      runLiveCycle returns immediately
+
+  Transitions also triggered by dashboard controls:
+    - Pause:          ACTIVE -> IDLE (botPaused = true)
+    - Resume:         IDLE -> ACTIVE (botPaused = false)
+    - Close Position: ACTIVE -> IDLE (botPaused = true)
+    - Emergency Stop: ACTIVE -> IDLE, then process.exit(0) after 3s
+
+
+--- MODULE-LEVEL STATE VARIABLES (src/main.ts) ---
+
+  liveExecutor: LiveExecutor | null     — on-chain executor instance
+  liveRegime: Regime                    — current regime ('RANGING' default)
+  liveBotState: BotState                — current bot state ('IDLE' default)
+  livePullbackActive: boolean           — pullback watch mode active
+  livePullbackPeak: number              — highest price seen during pullback
+  livePullbackStart: number             — timestamp pullback watch started
+  liveLastHarvestTime: number           — last fee harvest timestamp (persisted)
+  liveLastRegimeCheck: number           — last regime evaluation timestamp
+  liveLastRegimeEvalLog: number         — last regime eval log timestamp
+  liveRebalancesThisHour: number        — rebalance counter (rate limit)
+  liveRebalanceHourStart: number        — hour window start
+  liveCumFeesSol: number                — cumulative harvested SOL fees (persisted)
+  liveCumFeesUsdc: number               — cumulative harvested USDC fees (persisted)
+  liveRealizedIl: number                — cumulative realized IL USD (persisted)
+  lastHoldLogTime: number               — last HOLD decision log time
+  currentLiveData: LiveData | null      — latest dashboard data snapshot
+  lastPendingFeesCheck: number          — last on-chain fee query time
+  cachedPendingFeesSol: number          — cached pending SOL fees
+  cachedPendingFeesUsdc: number         — cached pending USDC fees
+  cachedPendingFeesTotal: number        — cached pending total USD fees
+  liveLastAutoDeployTime: number        — last auto-deploy execution time
+  liveLastAutoDeployCheck: number       — last auto-deploy check time
+  liveLastHarvestCheck: number          — last harvest check time
+  autoDeployEnabled: boolean            — auto-deploy toggle (from DB)
+  liveFlashCrashCooldownUntil: number   — flash crash cooldown end (persisted to DB)
+  liveRecentPrices: number[]            — last 10 prices (flash crash window)
+  consecutiveTxFailures: number         — TX failure counter for backoff
+  txBackoffUntil: number                — backoff expiry timestamp
+  lastIdleRebalanceRegime: string|null  — last regime that triggered idle rebalance
+  lastIdleRebalanceTime: number         — last idle rebalance timestamp
+  idleRebalancePending: boolean         — flag to trigger idle rebalance after reopen
+  rule2Enabled: boolean                 — Rule 2 proximity exit toggle (from DB)
+  botPaused: boolean                    — dashboard pause state
+  cycleRunning: boolean                 — re-entrance guard for decision loop
+  lastPruneTime: number                 — last DB pruning timestamp
+  lastPnlDate: string                   — last daily P&L date tracked
+  dailySummaryCumInjected: number       — daily cumulative capital injections
+  dailyRebalanceCount: number           — daily rebalance counter
+  prevWalletSol/Usdc: number            — previous wallet balances (injection detection)
+  prevPositionSol/Usdc: number          — previous position composition
+
+
+================================================================================
+8. ERROR HANDLING & SAFETY (Process P6)
+================================================================================
+
+--- 8.1: TX FAILURE -> EXPONENTIAL BACKOFF ---
+
+  Variables: consecutiveTxFailures, txBackoffUntil
+
+  On any TX failure (open or close):
+    consecutiveTxFailures++
+    backoffSec = min(300, 60 * 2^(failures-1))
+    txBackoffUntil = now + backoffSec * 1000
+
+  Backoff schedule:
+    1st failure:  60s
+    2nd failure: 120s
+    3rd failure: 240s
+    4th+ failure: 300s (5min cap)
+
+  Reset on success: consecutiveTxFailures = 0, txBackoffUntil = 0
+
+  Check before any position operation:
+    if (Date.now() < txBackoffUntil) -> skip with log
+
+--- 8.2: TRANSIENT TX RETRY ---
+
+  In executor.execTx():
+    If TX fails with "Blockhash not found" / "timeout" / "429":
+      Wait 3s, retry once
+    Other errors: throw immediately
+
+--- 8.3: FLASH CRASH DETECTION ---
+
+  isFlashCrash(prices): max peak-to-trough drawdown >= flashCrashPct (5%)
+  Computed over last 10 price samples (~10 minutes at 60s intervals).
+
+  Two trigger points:
+  1. During pullback watch: resets peak, resets timeout, enters cooldown
+  2. During OOR_BELOW: closes position without reopen, enters cooldown
+
+  Cooldown: flashCrashWaitMinutes (default 15min)
+  Persisted: flashCrashCooldownUntil saved to DB config table
+  (survives bot restart)
+
+--- 8.4: CIRCUIT BREAKERS ---
+
+  Defined in constants.ts RISK:
+    DAILY_LOSS_LIMIT_PCT:      5%
+    WEEKLY_DRAWDOWN_LIMIT_PCT: 15%
+    MAX_IL_PCT:                8%
+    REBALANCE_LOOP_LIMIT:      10 per hour
+
+  Rebalance rate limit: enforced in runLiveCycle()
+    if liveRebalancesThisHour >= rebalanceLoopLimit -> return
+    Counter resets every hour.
+
+  Note: Daily/weekly loss limits and MAX_IL_PCT are defined but not
+  programmatically enforced as auto-halt triggers in current code.
+  They serve as operator monitoring thresholds.
+
+--- 8.5: CRASH RECOVERY FROM DB ---
+
+  On startup (src/main.ts, main()):
+
+  1. Restore bot state from bot_state table (row id=1):
+     - liveBotState, liveRegime, liveCumFeesSol, liveCumFeesUsdc,
+       liveRealizedIl, gas stats
+     - pullback state: pullback_active, pullback_peak, pullback_start
+     - liveLastHarvestTime
+
+  2. Restore position from position_json:
+     - If valid JSON with positionMint: reconstruct LivePosition
+     - Set liveBotState = ACTIVE
+     - Log RESTORED decision
+
+  3. Orphaned position recovery:
+     - If no position in DB: scan all wallet token accounts
+     - Look for NFT-like tokens (amount=1, decimals=0) that are
+       Whirlpool position PDAs
+     - Close any found orphans, log recovery
+
+  4. Flash crash cooldown restored from DB config table
+
+  Critical safety: closeAndReopen saves position to DB IMMEDIATELY
+  after reopen (before next cycle), preventing orphan recovery from
+  killing a legitimate new position.
+
+--- 8.6: GRACEFUL SHUTDOWN (SIGINT) ---
+
+  On Ctrl+C:
+    1. clearInterval(decisionLoop)
+    2. oracle.stop(), marketData.stop(), reporter.stop(), dashboard.stop()
+    3. Save current state to DB (position, fees, IL, gas, pullback)
+    4. process.exit(0)
+
+  Emergency Stop (dashboard):
+    1. Stop all intervals and services
+    2. Close position if open (with fee collection)
+    3. Save state to DB
+    4. Exit after 3s
+
+
+================================================================================
+9. CONFIGURATION FLOW (Process P7)
+================================================================================
+
+Source: src/config.ts
+
+--- CONFIGURATION HIERARCHY ---
+
+  1. Hardcoded defaults (constants.ts REGIME_PARAMS, RISK, REENTRY)
+  2. Environment variables (process.env at startup)
+  3. Database config table (applied after DB init, overrides env vars)
+  4. Dashboard /config page (writes to DB, triggers hot reload)
+
+--- RUNTIME CONFIG OBJECT ---
+
+  src/config.ts exports `runtime` — a mutable object holding all config.
+
+  Key config groups:
+  - Decision loop: decisionIntervalSeconds [10-600], regimeWindowDays [1-30],
+    trendThreshold [0.05-0.95]
+  - Oracle: pythMaxConfidencePct [0.1-5], pythMaxStalenessSec [10-300]
+  - Capital: maxLiveCapitalUsdc [10-1M], solReserve [0.01-10], usdcReserve [0-100]
+  - Auto deploy: checkMinutes [1-60], cooldownMinutes [1-1440], minIdleUsdc, etc.
+  - Re-entry: pullbackThresholdPct [0.1-20], timeoutHours [0.05-48],
+    flashCrashPct [1-30], flashCrashWaitMinutes [1-120]
+  - Circuit breakers: dailyLossLimitPct [1-50], weeklyDrawdownLimitPct [1-80],
+    maxIlPct [1-50], rebalanceLoopLimit [1-100]
+  - Swap: slippageBps [10-500], bufferPct [0-10], provider [jupiter|orca|jupiter-fallback]
+  - Enhanced regime: all threshold params
+  - Per-regime params: rangeWidthPct, skewDown, skewUp, proxThresholds,
+    deployPct, solReentrySplit, harvestIntervalDays, harvestSolConvertPct
+
+--- VALIDATION ---
+
+  applyConfigFromDb(dbConfig):
+    Uses nv(key, min, max) — validated number parser.
+    Rejects values outside bounds with warning log.
+    Only applies if value is not null/undefined and within range.
+
+  Regime param bounds:
+    rangeWidthPct [0.1, 20], skewDown/Up [0, 1],
+    proxThresholds [0.1, 1], deployPct [0.01, 1],
+    solReentrySplit [0, 1], harvestIntervalDays [0.1, 30],
+    harvestSolConvertPct [0, 1]
+
+--- HOT RELOAD FLOW ---
+
+  /config page (dashboard) -> HTTP POST -> setConfigBatch(db, entries)
+                                        -> applyConfigFromDb(getConfig(db))
+                                        -> runtime object updated in-memory
+
+  All config keys stored as: config table {key TEXT PK, value TEXT, updated_at INTEGER}
+
+  exportConfig(): serializes all runtime values back to flat key-value map.
+
+
+================================================================================
+10. REPORTING & MONITORING (Process P8)
+================================================================================
+
+--- 10.1: TELEGRAM REPORTS ---
+
+  Source: src/output/telegram.ts
+  Interval: configurable via REPORT_INTERVAL_MINUTES env var (default 20min)
+  First report: 2min after startup
+
+  Report content (buildReport function):
+    - Bot state, regime, price
+    - Position range, entry price, IL
+    - Wallet balances, total value
+    - Pending + cumulative fees
+    - Recent rebalance events
+    - Regime history
+    - Market signals (if available)
+
+  Delivery: Telegram Bot API sendMessage with HTML parse_mode
+
+--- 10.2: DASHBOARD DATA FLOW ---
+
+  Source: src/output/dashboard.ts
+  Port: configurable via DASHBOARD_PORT env var (default 3000)
+
+  Updated every decision cycle:
+    - Rebalance events (last 50)
+    - Bot state, daily P&L
+    - Live data: wallet, position, fees, IL, gas, yield estimates, market signals
+
+  Dashboard controls (callback handlers):
+    onPause() / onResume()     — toggle botPaused flag
+    onToggleRule2(enabled)     — toggle rule2Enabled, persist to DB
+    onToggleAutoDeploy(enabled)— toggle autoDeployEnabled, persist to DB
+    onAddLiquidityPreview()    — compute preview without executing
+    onAddLiquidity()           — execute manual liquidity add
+    onHarvest()                — manual fee collection
+    onClosePosition()          — close position, pause bot
+    onEmergencyStop()          — close position, stop all services, exit
+
+--- 10.3: ANALYSIS AGENT (WEEKLY) ---
+
+  Source: src/main.ts (setInterval, line 726)
+  Schedule: Sunday midnight Berlin time (checked hourly)
+
+  Prerequisites:
+    - analysisAgent rule toggle enabled in DB
+    - Not already run within 24h (checked via analysisLastRunTime in config)
+
+  Execution:
+    execSync('node scripts/weekly-analysis.cjs --days=7 --telegram')
+    Results stored in config table: analysisLastReport, analysisLastRunTime
+
+--- 10.4: LIVE SNAPSHOTS ---
+
+  Recorded every decision cycle to live_snapshots table:
+    - price, wallet balances, total value
+    - pending + cumulative fees
+    - IL, in-range status
+    - regime, position info
+
+  Used for: in-range percentage calculation, historical tracking,
+  dashboard charts.
+
+--- 10.5: DECISION LOG ---
+
+  Every significant decision recorded to decision_log table:
+    - timestamp, price, regime, bot_state
+    - proximity values, in-range flag
+    - decision type (HOLD, REGIME_CHANGE, T1_DOWNSIDE, etc.)
+    - detailed reasoning text
+    - optional params JSON
+
+  Log frequencies:
+    - HOLD: every 30 minutes
+    - REGIME_EVAL: every 1 hour (or immediately on change)
+    - All other events: immediately
+
+--- 10.6: HEALTH CHECKS ---
+
+  Monitored via:
+    - Oracle badPriceCount (stale/invalid price rejections)
+    - Market data fetchCount and error arrays
+    - Pool service fetchCount
+    - TX failure count and backoff state
+    - Dashboard live data freshness
+
+
+================================================================================
+APPENDIX A: DATABASE SCHEMA
+================================================================================
+
+Source: src/db/sqlite.ts
+
+Tables (10):
+
+  price_ticks         — 30s-60s price ticks from oracle (pruned at 30 days)
+  rebalance_events    — all position operations with pre/post balances
+  daily_pnl           — daily P&L summary (legacy)
+  daily_summary       — daily portfolio summary with injection tracking
+  bot_state           — single-row crash recovery state (id=1)
+  live_snapshots      — per-cycle wallet+position snapshots
+  decision_log        — detailed decision reasoning log
+  regime_history      — regime change events
+  rule_toggles        — rule on/off toggles (rule2, autoDeploy, analysisAgent)
+  config              — key-value runtime configuration store
+
+Key relationships:
+  - bot_state.position_json -> serialized LivePosition (crash recovery)
+  - bot_state.pullback_* -> pullback watch state (crash recovery)
+  - bot_state.last_harvest_time -> harvest timer (crash recovery)
+  - config.flashCrashCooldownUntil -> flash crash cooldown (crash recovery)
+  - rebalance_events.position_id -> links events to specific positions
+  - rebalance_events.rule2_active -> A/B testing flag for Rule 2
+
+
+================================================================================
+APPENDIX B: SWAP SYSTEM
+================================================================================
+
+Source: src/live/swapper.ts, src/live/jupiter.ts
+
+Provider strategy (runtime.swapProvider):
+  'jupiter'          — Jupiter V6 aggregator only
+  'orca'             — Orca Whirlpool swap only
+  'jupiter-fallback' — Jupiter first, Orca fallback (DEFAULT)
+
+Jupiter:
+  - Quote API: https://api.jup.ag/swap/v1/quote
+  - Swap API: https://api.jup.ag/swap/v1/swap
+  - Timeout: 10s, max 1 retry with 2s delay
+  - Slippage: runtime.swapSlippageBps (default 6 bps = 0.06%)
+  - Gas tracked separately (feeLamports from TX confirmation)
+
+Orca:
+  - Direct pool swap via swapQuoteByInputToken + whirlpool.swap
+  - Gas tracked via execTx() wrapper
+  - Slippage: same as Jupiter
+
+Swap use cases:
+  1. Pre-open swap: balance wallet before position opening
+  2. Add liquidity swap: match position ratio before deposit
+  3. Harvest SOL conversion: convert harvested SOL fees to USDC
+  4. Idle wallet rebalance: maintain target SOL/USDC split
+
+
+================================================================================
+APPENDIX C: TIMING SUMMARY
+================================================================================
+
+  Interval/Frequency              | Default  | Configurable
+  --------------------------------|----------|------------------
+  Decision loop                   | 60s      | [10, 600]s
+  Oracle poll                     | 2s       | No
+  Market data refresh             | 15min    | No
+  Pool state cache TTL            | 10s      | No
+  Regime check                    | 1h       | No (hardcoded)
+  Regime eval log                 | 1h       | No (hardcoded)
+  HOLD decision log               | 30min    | No (hardcoded)
+  Pending fees query (RPC)        | 2min     | No (hardcoded)
+  Auto-deploy check               | 5min     | [1, 60]min
+  Auto-deploy cooldown            | 30min    | [1, 1440]min
+  Idle rebalance cooldown         | 30min    | No (hardcoded)
+  Fee harvest check               | 1h       | No (hardcoded)
+  Telegram report                 | 20min    | REPORT_INTERVAL_MINUTES
+  Analysis agent check            | 1h       | No (hardcoded)
+  Daily P&L write                 | per cycle| No
+  DB prune                        | 24h      | No (hardcoded)
+  Flash crash cooldown            | 15min    | [1, 120]min
+  Pullback timeout                | 4h       | [0.05, 48]h
+
+================================================================================
+END OF DOCUMENT
+================================================================================
