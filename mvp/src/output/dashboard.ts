@@ -2312,6 +2312,13 @@ ${buildDailyFeesChart(data.snapshots7d)}
     <span id="fee-day-total" style="color:#ffd700;font-size:13px;font-weight:bold"></span>
     <span id="fee-day-avg" style="color:#8b949e;font-size:11px"></span>
   </div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;color:#8b949e">
+    <span><span style="display:inline-block;width:10px;height:10px;background:#ffd700;border-radius:2px;vertical-align:middle"></span> &gt;$2/hr (high)</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:2px;vertical-align:middle"></span> $0.50-$2/hr</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#8b949e;border-radius:2px;vertical-align:middle"></span> &lt;$0.50/hr</span>
+    <span>|</span>
+    <span>IR%: <span style="color:#22c55e">&#9679;</span> &gt;90% <span style="color:#eab308">&#9679;</span> 50-90% <span style="color:#ef4444">&#9679;</span> &lt;50%</span>
+  </div>
   <div id="fee-hourly-table" style="overflow-x:auto;-webkit-overflow-scrolling:touch">
     <div style="color:#8b949e;text-align:center;padding:16px">Loading...</div>
   </div>
