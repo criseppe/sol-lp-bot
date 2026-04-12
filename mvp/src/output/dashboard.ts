@@ -967,7 +967,7 @@ export function startDashboard(port: number): DashboardServer {
     res.json({ paused: isPaused, botState: currentBotState });
   });
 
-  server = app.listen(port, () => {
+  server = app.listen(port, '127.0.0.1', () => {
     console.log(JSON.stringify({
       level: 'info',
       msg: `dashboard running on http://localhost:${port}`,
