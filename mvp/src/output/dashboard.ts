@@ -3358,7 +3358,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 <div class="s">
 <div class="nav">
   <a href="/">WALLET</a><a href="/insights">INSIGHTS</a><a href="/config">CONFIG</a>
-  <a href="/strategy">STRATEGY</a><a href="/health">HEALTH</a><a href="/arcade" class="on">ARCADE</a>
+  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/arcade" class="on">ARCADE</a>
 </div>
 <div class="title">METAL LP</div>
 <div class="sub">MISSION: PROVIDE LIQUIDITY</div>
