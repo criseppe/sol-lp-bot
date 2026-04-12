@@ -1374,7 +1374,22 @@ ${NAV_HTML}
     <h2>Total Portfolio Value</h2>
     <div class="big-number">
       <div class="val" style="color:#58a6ff">$${fmt(live.totalValueWithPosition)}</div>
-      <div class="sub">Wallet + Liquidity Position</div>
+      ${(() => {
+        const totalSol = (live.solBalance + live.positionSol) * live.solPrice;
+        const totalUsdc = live.usdcBalance + live.positionUsdc;
+        const totalAll = totalSol + totalUsdc;
+        const solPct = totalAll > 0 ? (totalSol / totalAll * 100) : 0;
+        const usdcPct = totalAll > 0 ? (totalUsdc / totalAll * 100) : 0;
+        const targetPct = live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50;
+        const walletSolVal = live.solBalance * live.solPrice;
+        const walletTotal = walletSolVal + live.usdcBalance;
+        const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
+        return `<div class="sub">
+          <span style="color:#22c55e">${fmt(solPct, 0)}% SOL</span> / <span style="color:#58a6ff">${fmt(usdcPct, 0)}% USDC</span>
+          <span style="color:#8b949e;margin-left:8px">|</span>
+          <span style="color:#8b949e;margin-left:8px">Wallet: <span style="color:${Math.abs(walletSolPct - targetPct) > 15 ? '#eab308' : '#22c55e'}">${fmt(walletSolPct, 0)}% SOL</span> (target ${targetPct}%)</span>
+        </div>`;
+      })()}
     </div>
     <div class="wallet-split">
       <div class="wallet-half">
