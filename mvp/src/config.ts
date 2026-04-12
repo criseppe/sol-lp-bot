@@ -52,6 +52,16 @@ export const runtime = {
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
+  // Enhanced regime detection (market data signals)
+  useEnhancedRegime: true,
+  vol1hExtremeThreshold: 0.06,
+  vol4hExtremeThreshold: 0.05,
+  volumeSpikeMultiple: 3,
+  trendDeltaThreshold: 4,
+  btcCorrelationThreshold: 3,
+  fearGreedExtremeLow: 25,
+  fearGreedExtremeHigh: 75,
+
   // Regime params (mutable copies)
   regimeParams: {
     RANGING: { ...REGIME_PARAMS.RANGING },
@@ -125,6 +135,16 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vBuf = nv('swapBufferPct', 0, 10); if (vBuf != null) runtime.swapBufferPct = vBuf;
   const vProv = g('swapProvider'); if (vProv === 'jupiter' || vProv === 'orca' || vProv === 'jupiter-fallback') runtime.swapProvider = vProv;
 
+  // Enhanced regime
+  const vUseEnh = g('useEnhancedRegime'); if (vUseEnh === 'true' || vUseEnh === 'false') runtime.useEnhancedRegime = vUseEnh === 'true';
+  const vV1h = nv('vol1hExtremeThreshold', 0.01, 0.5); if (vV1h != null) runtime.vol1hExtremeThreshold = vV1h;
+  const vV4h = nv('vol4hExtremeThreshold', 0.01, 0.5); if (vV4h != null) runtime.vol4hExtremeThreshold = vV4h;
+  const vVSpike = nv('volumeSpikeMultiple', 1, 20); if (vVSpike != null) runtime.volumeSpikeMultiple = vVSpike;
+  const vTrDelta = nv('trendDeltaThreshold', 1, 20); if (vTrDelta != null) runtime.trendDeltaThreshold = vTrDelta;
+  const vBtcCorr = nv('btcCorrelationThreshold', 1, 20); if (vBtcCorr != null) runtime.btcCorrelationThreshold = vBtcCorr;
+  const vFGLow = nv('fearGreedExtremeLow', 0, 50); if (vFGLow != null) runtime.fearGreedExtremeLow = vFGLow;
+  const vFGHigh = nv('fearGreedExtremeHigh', 50, 100); if (vFGHigh != null) runtime.fearGreedExtremeHigh = vFGHigh;
+
   const rwo = g('rangeWidthOverride');
   if (rwo != null) runtime.rangeWidthOverride = rwo === 'null' || rwo === '' ? null : parseFloat(rwo);
 
@@ -178,6 +198,14 @@ export function exportConfig(): Record<string, string> {
   out['swapBufferPct'] = String(runtime.swapBufferPct);
   out['swapProvider'] = runtime.swapProvider;
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
+  out['useEnhancedRegime'] = String(runtime.useEnhancedRegime);
+  out['vol1hExtremeThreshold'] = String(runtime.vol1hExtremeThreshold);
+  out['vol4hExtremeThreshold'] = String(runtime.vol4hExtremeThreshold);
+  out['volumeSpikeMultiple'] = String(runtime.volumeSpikeMultiple);
+  out['trendDeltaThreshold'] = String(runtime.trendDeltaThreshold);
+  out['btcCorrelationThreshold'] = String(runtime.btcCorrelationThreshold);
+  out['fearGreedExtremeLow'] = String(runtime.fearGreedExtremeLow);
+  out['fearGreedExtremeHigh'] = String(runtime.fearGreedExtremeHigh);
 
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {

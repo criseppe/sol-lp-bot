@@ -98,6 +98,18 @@ export interface LiveData {
   regime: string;
   botState: BotState;
   liveEvents: RebalanceEvent[];
+  marketSignals?: {
+    vol1h: number | null;
+    vol4h: number | null;
+    solDelta24h: number | null;
+    btcDelta24h: number | null;
+    btcPrice: number | null;
+    volumeRatio4h: number | null;
+    fearGreedIndex: number | null;
+    fearGreedLabel: string | null;
+    lastUpdated: number;
+    errors: string[];
+  };
 }
 
 export interface DashboardServer {
@@ -214,6 +226,10 @@ export function startDashboard(port: number): DashboardServer {
 
   app.get('/api/live', (_req, res) => {
     res.json(currentLive);
+  });
+
+  app.get('/api/market-signals', (_req, res) => {
+    res.json(currentLive?.marketSignals ?? null);
   });
 
   // Data export and analysis endpoints
@@ -2220,6 +2236,36 @@ ${(() => {
 </div>`;
 })()}
 
+<div class="section-title">Market Signals (Enhanced Regime)</div>
+<div class="card" style="margin-bottom:16px" id="market-signals-card">
+  <div style="color:#8b949e;font-size:12px">Loading market signals...</div>
+</div>
+<script>
+(function() {
+  fetch('/api/market-signals').then(r => r.json()).then(s => {
+    const card = document.getElementById('market-signals-card');
+    if (!s || !card) { if(card) card.innerHTML = '<div style="color:#8b949e;font-size:12px">No market data available yet. Enhanced regime detection will use daily closes only.</div>'; return; }
+    const fmt = (v, d) => v != null ? Number(v).toFixed(d) : 'n/a';
+    const pct = (v) => v != null ? (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%' : 'n/a';
+    const col = (v) => v == null ? '#8b949e' : v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#c9d1d9';
+    const volCol = (v, t) => v == null ? '#8b949e' : v > t ? '#ef4444' : v > t * 0.7 ? '#eab308' : '#22c55e';
+    const fgCol = (v) => v == null ? '#8b949e' : v < 25 ? '#ef4444' : v < 40 ? '#eab308' : v > 75 ? '#22c55e' : v > 60 ? '#22c55e' : '#c9d1d9';
+    const age = s.lastUpdated ? Math.floor((Date.now() - s.lastUpdated) / 60000) : '?';
+    card.innerHTML = \`
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;font-size:12px">
+        <div><span style="color:#8b949e">Vol 1h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol1h, 0.06)}">\${fmt(s.vol1h, 4)}</span></div>
+        <div><span style="color:#8b949e">Vol 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol4h, 0.05)}">\${fmt(s.vol4h, 4)}</span></div>
+        <div><span style="color:#8b949e">SOL 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.solDelta24h)}">\${pct(s.solDelta24h)}</span></div>
+        <div><span style="color:#8b949e">BTC 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.btcDelta24h)}">\${pct(s.btcDelta24h)}</span></div>
+        <div><span style="color:#8b949e">Vol Ratio 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${s.volumeRatio4h > 3 ? '#ef4444' : s.volumeRatio4h > 2 ? '#eab308' : '#c9d1d9'}">\${fmt(s.volumeRatio4h, 1)}x</span></div>
+        <div><span style="color:#8b949e">Fear & Greed</span><br><span style="font-size:16px;font-weight:bold;color:\${fgCol(s.fearGreedIndex)}">\${s.fearGreedIndex != null ? s.fearGreedIndex + ' (' + (s.fearGreedLabel || '') + ')' : 'n/a'}</span></div>
+      </div>
+      <div style="margin-top:8px;font-size:10px;color:#8b949e">Updated \${age}m ago\${s.errors && s.errors.length > 0 ? ' · Errors: ' + s.errors.join(', ') : ''}</div>
+    \`;
+  }).catch(() => {});
+})();
+</script>
+
 <div class="section-title">In-Range Performance</div>
 <div class="gauge-row">
   <div class="card">${gauge(data.inRangePct1h, 'Last 1 Hour')}</div>
@@ -2479,6 +2525,33 @@ ${NAV_HTML}
       <td style="padding:6px 8px;color:#8b949e;font-size:11px">Routing strategy for token swaps.</td>
       <td style="padding:6px 8px;color:#8b949e;font-size:11px">jupiter-fallback: best price via Jupiter, Orca if Jupiter is down.</td>
     </tr>
+  </table>
+</div>
+
+<!-- SECTION 4c: Enhanced Regime Detection -->
+<div class="cfg-section">
+  <h3>4c. Enhanced Regime (Market Data)</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px">Enable enhanced regime</td>
+      <td style="padding:6px 8px;color:#30363d;font-size:11px">true</td>
+      <td style="padding:6px 8px">
+        <select class="cfg-input" data-key="useEnhancedRegime" style="width:80px">
+          <option value="true" ${c.useEnhancedRegime ? 'selected' : ''}>On</option>
+          <option value="false" ${!c.useEnhancedRegime ? 'selected' : ''}>Off</option>
+        </select>
+      </td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Use external market data (vol, BTC, F&G) to enhance regime detection. Off = daily closes only.</td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Off: conservative, no API deps. On: smarter regime with market context.</td>
+    </tr>
+    ${field('vol1hExtremeThreshold', c.vol1hExtremeThreshold, 0.06, '1h vol → EXTREME', '1h log-return stddev above this triggers EXTREME override.', 'At 0.04: more sensitive. At 0.08: only fires on major moves.')}
+    ${field('vol4hExtremeThreshold', c.vol4hExtremeThreshold, 0.05, '4h vol → EXTREME', '4h vol above this + volume spike → EXTREME override.', 'At 0.03: triggers more often. At 0.07: only extreme events.')}
+    ${field('volumeSpikeMultiple', c.volumeSpikeMultiple, 3, 'Volume spike (x)', 'Current 4h volume / 7d avg above this = volume spike.', 'At 2: more sensitive. At 5: only massive volume events.')}
+    ${field('trendDeltaThreshold', c.trendDeltaThreshold, 4, 'Trend delta (%)', 'SOL 24h change % above this + volume → trend override.', 'At 3: catches smaller moves. At 6: only strong trends.')}
+    ${field('btcCorrelationThreshold', c.btcCorrelationThreshold, 3, 'BTC correlation (%)', 'BTC 24h move above this % = macro event (boosts confidence).', 'At 2: more events qualify. At 5: only BTC crashes/pumps.')}
+    ${field('fearGreedExtremeLow', c.fearGreedExtremeLow, 25, 'F&G fear threshold', 'Fear & Greed below this = extreme fear, biases toward BEARISH.', 'At 20: only deep fear. At 30: catches more fear events.')}
+    ${field('fearGreedExtremeHigh', c.fearGreedExtremeHigh, 75, 'F&G greed threshold', 'Fear & Greed above this = extreme greed, confirms BULLISH.', 'At 70: catches more greed. At 80: only euphoria.')}
   </table>
 </div>
 

@@ -9,7 +9,8 @@ import { LiveExecutor, type LivePosition } from './live/executor.js';
 import { startTelegramReporter } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
-import { detectRegime, detectRegimeWithMetrics, getRegimeParams } from './engine/regime.js';
+import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, getRegimeParams } from './engine/regime.js';
+import { MarketDataService } from './data/market.js';
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
 import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
@@ -93,6 +94,7 @@ let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detectio
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
 const oracle = new OracleService(PYTH_SOL_USD_FEED, runtime.pythMaxConfidencePct, runtime.pythMaxStalenessSec);
+const marketData = new MarketDataService();
 const dashboard = startDashboard(DASHBOARD_PORT);
 dashboard.setDb(db);
 
@@ -128,6 +130,7 @@ function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof 
 
 async function main() {
   await oracle.start();
+  await marketData.start();
   await pool.fetchState();
 
   // Cold start backfill
@@ -451,6 +454,7 @@ async function main() {
             regime: liveRegime,
             botState: liveBotState,
             liveEvents: [],
+            marketSignals: marketData.getSignals() ?? undefined,
           };
           currentLiveData = liveDataUpdate;
           dashboard.updateLiveData(liveDataUpdate);
@@ -643,6 +647,7 @@ async function main() {
       console.log(JSON.stringify({ level: 'warn', msg: 'EMERGENCY STOP triggered from dashboard', timestamp: Date.now() }));
       clearInterval(decisionLoop);
       oracle.stop();
+      marketData.stop();
 
       if (executor.getCurrentPosition()) {
         const emergencyPosId = executor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
@@ -701,6 +706,7 @@ async function main() {
     console.log(JSON.stringify({ level: 'info', msg: 'Shutting down...', timestamp: Date.now() }));
     clearInterval(decisionLoop);
     oracle.stop();
+    marketData.stop();
     reporter?.stop();
     dashboard.stop();
 
@@ -737,16 +743,41 @@ async function runLiveCycle(price: number): Promise<void> {
   if (now - liveLastRegimeCheck > 3_600_000) {
     const closes = getDailyCloses(db, runtime.regimeWindowDays);
     const MIN_CLOSES_FOR_REGIME_CHANGE = 5;
-    const result = closes.length >= 3
-      ? detectRegimeWithMetrics(closes, runtime.trendThreshold)
-      : { regime: 'RANGING' as const, dirRatio: 0, realisedVol: 0, priceCount: closes.length };
+
+    // Use enhanced regime detection if enabled and market data available
+    const mktSignals = runtime.useEnhancedRegime ? marketData.getSignals() : null;
+    const enhancedResult = detectRegimeEnhanced(closes, runtime.trendThreshold, mktSignals, {
+      vol1hExtremeThreshold: runtime.vol1hExtremeThreshold,
+      vol4hExtremeThreshold: runtime.vol4hExtremeThreshold,
+      volumeSpikeMultiple: runtime.volumeSpikeMultiple,
+      trendDeltaThreshold: runtime.trendDeltaThreshold,
+      btcCorrelationThreshold: runtime.btcCorrelationThreshold,
+      fearGreedExtremeLow: runtime.fearGreedExtremeLow,
+      fearGreedExtremeHigh: runtime.fearGreedExtremeHigh,
+    });
+
+    const result = enhancedResult;
 
     // Determine thresholds for reasoning
     const volStatus = result.realisedVol > 0.08 ? 'ABOVE 0.08 threshold → EXTREME' : `${result.realisedVol.toFixed(4)} (below 0.08 threshold)`;
     const dirStatus = result.dirRatio > runtime.trendThreshold ? `ABOVE ${runtime.trendThreshold} threshold → trending` : `${result.dirRatio.toFixed(3)} (below ${runtime.trendThreshold} threshold → ranging)`;
     const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
-    // Suppress regime changes on thin data to prevent flapping
-    const changed = result.regime !== liveRegime && closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE;
+
+    // Build market signals summary for logging
+    const sig = result.signals;
+    const mktParts: string[] = [];
+    if (sig.vol1h != null) mktParts.push(`vol1h=${sig.vol1h.toFixed(4)}`);
+    if (sig.vol4h != null) mktParts.push(`vol4h=${sig.vol4h.toFixed(4)}`);
+    if (sig.solDelta24h != null) mktParts.push(`SOL24h=${sig.solDelta24h > 0 ? '+' : ''}${sig.solDelta24h.toFixed(1)}%`);
+    if (sig.btcDelta24h != null) mktParts.push(`BTC24h=${sig.btcDelta24h > 0 ? '+' : ''}${sig.btcDelta24h.toFixed(1)}%`);
+    if (sig.volumeRatio4h != null) mktParts.push(`volRatio=${sig.volumeRatio4h.toFixed(1)}x`);
+    if (sig.fearGreedIndex != null) mktParts.push(`F&G=${sig.fearGreedIndex}`);
+    const mktSummary = mktParts.length > 0 ? ` Market signals: ${mktParts.join(', ')}.` : ' No market data available.';
+    const overrideNote = result.overrideReason ? ` OVERRIDE: ${result.overrideReason} (base was ${result.baseRegime}).` : '';
+    const confidenceNote = ` Confidence: ${result.confidence}/5.`;
+
+    // Suppress regime changes on thin data to prevent flapping (only for base-regime changes)
+    const changed = result.regime !== liveRegime && (closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE || result.overrideReason != null);
 
     // Log regime changes immediately; unchanged evals only every 1 hour
     if (changed || now - liveLastRegimeEvalLog >= 3_600_000) {
@@ -754,24 +785,30 @@ async function runLiveCycle(price: number): Promise<void> {
       insertDecisionLog(db, { timestamp: now, price, regime: result.regime, bot_state: liveBotState,
         prox_lower: null, prox_upper: null, in_range: null,
         decision: changed ? 'REGIME_CHANGE' : 'REGIME_EVAL',
-        reasoning: `Regime evaluation: ${result.priceCount} daily closes analyzed over ${runtime.regimeWindowDays} days. ` +
+        reasoning: `Regime evaluation: ${result.priceCount} daily closes over ${runtime.regimeWindowDays} days. ` +
           `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
-          `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'} ` +
-          `Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
-        params_json: JSON.stringify({ dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount, trendThreshold: runtime.trendThreshold }) });
+          `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'}` +
+          mktSummary + overrideNote + confidenceNote +
+          ` Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
+        params_json: JSON.stringify({
+          dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount,
+          trendThreshold: runtime.trendThreshold, baseRegime: result.baseRegime,
+          overrideReason: result.overrideReason, confidence: result.confidence,
+          ...result.signals,
+        }) });
     }
 
     if (changed) {
       const oldRegime = liveRegime;
       liveRegime = result.regime;
-      console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: result.regime, dirRatio: result.dirRatio.toFixed(3), vol: result.realisedVol.toFixed(4), timestamp: now }));
+      console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: result.regime, base: result.baseRegime, override: result.overrideReason ?? 'none', confidence: result.confidence, dirRatio: result.dirRatio.toFixed(3), vol: result.realisedVol.toFixed(4), timestamp: now }));
       insertRegimeChange(db, {
         timestamp: now, old_regime: oldRegime, new_regime: result.regime, price,
         dir_ratio: result.dirRatio, realised_vol: result.realisedVol, price_count: result.priceCount,
       });
       insertRebalanceEventWithRule2(db, {
         timestamp: now, eventType: 'REGIME_CHANGE', price, regime: result.regime,
-        note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${runtime.trendThreshold}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
+        note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${runtime.trendThreshold}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.${mktSummary}${overrideNote}${confidenceNote}\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
     }
