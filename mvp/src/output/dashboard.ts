@@ -3214,547 +3214,351 @@ ${NAV_HTML}
 }
 
 // ── ARCADE PAGE ──────────────────────────────────────────────────────────
+// Metal Slug themed, mobile-first, character changes with bot state
 
 function renderArcadeHtml(): string {
   return `<!DOCTYPE html>
-<html>
-<head>
+<html><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LP BOT ARCADE</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>METAL LP — ARCADE</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #000;
-    color: #0f0;
-    font-family: 'Press Start 2P', monospace;
-    font-size: 10px;
-    overflow-x: hidden;
-    image-rendering: pixelated;
-  }
-  /* CRT scanline effect */
-  body::after {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 1px, transparent 1px, transparent 2px);
-    pointer-events: none;
-    z-index: 9999;
-  }
-  body::before {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.6) 100%);
-    pointer-events: none;
-    z-index: 9998;
-  }
-  .screen {
-    max-width: 700px;
-    margin: 0 auto;
-    padding: 16px;
-    min-height: 100vh;
-  }
-  /* Blinking cursor */
-  @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-  @keyframes rainbow { 0%{color:#f00} 16%{color:#ff0} 33%{color:#0f0} 50%{color:#0ff} 66%{color:#00f} 83%{color:#f0f} 100%{color:#f00} }
-  @keyframes slideIn { from { transform: translateX(-100%); opacity:0; } to { transform: translateX(0); opacity:1; } }
-  @keyframes coinSpin { 0%{transform:scaleX(1)} 50%{transform:scaleX(0.1)} 100%{transform:scaleX(1)} }
-  @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
-  .blink { animation: blink 1s infinite; }
-  .pulse { animation: pulse 2s infinite; }
-  .rainbow { animation: rainbow 3s linear infinite; }
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a18;color:#ddd;font-family:'Press Start 2P',monospace;font-size:9px;overflow-x:hidden;-webkit-tap-highlight-color:transparent}
+body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0.12) 0px,rgba(0,0,0,0.12) 1px,transparent 1px,transparent 3px);pointer-events:none;z-index:9999}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes walk{0%{transform:scaleX(1) translateY(0)}25%{transform:scaleX(1) translateY(-4px)}50%{transform:scaleX(1) translateY(0)}75%{transform:scaleX(1) translateY(-2px)}}
+@keyframes idle{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
+@keyframes explode{0%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:0.8}100%{transform:scale(0.8);opacity:0.6}}
+@keyframes coinFloat{0%{transform:translateY(0) rotate(0)}50%{transform:translateY(-8px) rotate(180deg)}100%{transform:translateY(0) rotate(360deg)}}
+@keyframes hpPulse{0%,100%{box-shadow:0 0 4px rgba(0,255,0,0.3)}50%{box-shadow:0 0 12px rgba(0,255,0,0.8)}}
+.s{max-width:480px;margin:0 auto;padding:8px}
+.nav{display:flex;flex-wrap:wrap;justify-content:center;gap:4px;margin-bottom:8px}
+.nav a{color:#666;text-decoration:none;font-size:7px;padding:3px 6px;border:1px solid #333;border-radius:2px}
+.nav a:hover,.nav a.on{color:#ff0;border-color:#ff0}
 
-  .title {
-    text-align: center;
-    font-size: 18px;
-    color: #ff0;
-    text-shadow: 3px 3px #800, 0 0 20px #ff0;
-    margin: 20px 0 8px;
-    letter-spacing: 4px;
-  }
-  .subtitle {
-    text-align: center;
-    font-size: 8px;
-    color: #888;
-    margin-bottom: 24px;
-  }
+/* Title */
+.title{text-align:center;font-size:14px;color:#ff4136;text-shadow:2px 2px #000,0 0 10px #f00;margin:10px 0 2px;letter-spacing:2px}
+.sub{text-align:center;font-size:7px;color:#666;margin-bottom:12px}
 
-  /* Score bar */
-  .score-bar {
-    display: flex;
-    justify-content: space-between;
-    padding: 8px 12px;
-    border: 2px solid #333;
-    background: #111;
-    margin-bottom: 16px;
-  }
-  .score-item { text-align: center; }
-  .score-label { color: #888; font-size: 7px; margin-bottom: 4px; }
-  .score-value { color: #0f0; font-size: 14px; text-shadow: 0 0 8px #0f0; }
-  .score-value.gold { color: #ffd700; text-shadow: 0 0 8px #ffd700; }
-  .score-value.red { color: #f44; text-shadow: 0 0 8px #f44; }
+/* HUD bar - 2x2 grid on mobile */
+.hud{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px}
+.hud-item{background:#111;border:1px solid #333;padding:6px;text-align:center;border-radius:2px}
+.hud-label{color:#888;font-size:6px;margin-bottom:3px;text-transform:uppercase}
+.hud-val{font-size:12px;text-shadow:0 0 6px currentColor}
+.gold{color:#ffd700}.grn{color:#0f0}.red{color:#f44}.cyan{color:#0ff}
 
-  /* Character area */
-  .character-zone {
-    position: relative;
-    height: 140px;
-    border: 2px solid #333;
-    background: #0a0a0a;
-    margin-bottom: 16px;
-    overflow: hidden;
-  }
-  .ground {
-    position: absolute;
-    bottom: 0;
-    left: 0; right: 0;
-    height: 20px;
-    background: repeating-linear-gradient(90deg, #1a3a1a 0px, #1a3a1a 16px, #0d2a0d 16px, #0d2a0d 32px);
-    border-top: 2px solid #2a5a2a;
-  }
-  .bot-char {
-    position: absolute;
-    bottom: 22px;
-    font-size: 32px;
-    transition: left 2s ease;
-    animation: float 3s ease-in-out infinite;
-    filter: drop-shadow(0 0 8px rgba(0,255,0,0.5));
-  }
-  .range-zone {
-    position: absolute;
-    bottom: 0;
-    height: 100%;
-    background: rgba(0,255,0,0.06);
-    border-left: 2px dashed #0a0;
-    border-right: 2px dashed #0a0;
-  }
-  .range-label {
-    position: absolute;
-    top: 4px;
-    font-size: 7px;
-    color: #0a0;
-  }
-  .price-line {
-    position: absolute;
-    bottom: 22px;
-    width: 2px;
-    height: 90px;
-    background: #ff0;
-    box-shadow: 0 0 6px #ff0;
-  }
-  .price-tag {
-    position: absolute;
-    top: 4px;
-    font-size: 7px;
-    color: #ff0;
-    white-space: nowrap;
-  }
+/* Arena */
+.arena{position:relative;height:120px;background:linear-gradient(180deg,#0a0a2a 0%,#0a1a0a 70%,#1a2a1a 100%);border:2px solid #333;margin-bottom:8px;overflow:hidden;border-radius:4px;touch-action:none}
+.arena .sky{position:absolute;top:8px;right:8px;font-size:7px;color:#555}
+.arena .ground{position:absolute;bottom:0;left:0;right:0;height:18px;background:repeating-linear-gradient(90deg,#2a3a1a 0px,#2a3a1a 12px,#1a2a0a 12px,#1a2a0a 24px);border-top:2px solid #4a6a2a}
+.arena .range{position:absolute;bottom:0;height:100%;border-left:2px solid #0a0;border-right:2px solid #0a0;background:rgba(0,180,0,0.05)}
+.arena .range-lbl{position:absolute;bottom:20px;font-size:6px;color:#0a0}
+.arena .range-lbl.lo{left:2px}.arena .range-lbl.hi{right:2px}
+.arena .pline{position:absolute;bottom:18px;width:2px;height:70px;background:#ff0;box-shadow:0 0 8px #ff0}
+.arena .ptag{position:absolute;top:6px;font-size:7px;color:#ff0;white-space:nowrap}
+.arena .soldier{position:absolute;bottom:20px;font-size:36px;transition:left 2s ease;z-index:10;filter:drop-shadow(0 0 6px rgba(255,200,0,0.4))}
+.arena .soldier.walk{animation:walk 0.6s steps(4) infinite}
+.arena .soldier.idle{animation:idle 2s ease-in-out infinite}
+.arena .soldier.shake{animation:shake 0.3s ease infinite}
+.arena .soldier.explode{animation:explode 1s ease infinite}
+.arena .speech{position:absolute;bottom:62px;background:#111;border:1px solid #666;padding:3px 6px;font-size:6px;color:#fff;border-radius:4px;white-space:nowrap;z-index:11}
+.arena .speech::after{content:'';position:absolute;bottom:-5px;left:12px;border:4px solid transparent;border-top-color:#666}
+/* Enemies (IL, OOR) */
+.arena .enemy{position:absolute;bottom:20px;font-size:24px;opacity:0.7;transition:left 2s ease}
+.arena .coins{position:absolute;font-size:14px;animation:coinFloat 2s ease-in-out infinite}
 
-  /* Stats boxes */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-bottom: 16px;
-  }
-  .stat-box {
-    border: 2px solid #333;
-    background: #0a0a0a;
-    padding: 10px;
-  }
-  .stat-box h3 {
-    color: #ff0;
-    font-size: 8px;
-    margin-bottom: 8px;
-    text-shadow: 0 0 6px #880;
-  }
-  .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
-  .stat-key { color: #888; }
-  .stat-val { color: #0f0; }
-  .stat-val.gold { color: #ffd700; }
-  .stat-val.bad { color: #f44; }
+/* HP / XP bars */
+.bars{margin-bottom:8px}
+.bar-row{display:flex;align-items:center;gap:4px;margin-bottom:4px}
+.bar-row .lbl{width:28px;font-size:6px;color:#888;flex-shrink:0}
+.bar-bg{flex:1;height:10px;background:#1a1a1a;border:1px solid #333;border-radius:1px;overflow:hidden}
+.bar-fill{height:100%;transition:width 1s ease;position:relative}
+.bar-fill::after{content:'';position:absolute;inset:0;background:repeating-linear-gradient(90deg,rgba(255,255,255,0.08) 0px,rgba(255,255,255,0.08) 3px,transparent 3px,transparent 6px)}
+.bar-row .val{width:40px;font-size:7px;text-align:right;flex-shrink:0}
 
-  /* XP / Level bar */
-  .xp-section {
-    border: 2px solid #333;
-    background: #0a0a0a;
-    padding: 10px;
-    margin-bottom: 16px;
-  }
-  .xp-section h3 { color: #f0f; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #808; }
-  .xp-bar-bg {
-    height: 16px;
-    background: #1a1a1a;
-    border: 1px solid #333;
-    position: relative;
-    margin-bottom: 4px;
-  }
-  .xp-bar-fill {
-    height: 100%;
-    transition: width 1s ease;
-    position: relative;
-  }
-  .xp-bar-fill::after {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: repeating-linear-gradient(90deg, rgba(255,255,255,0.1) 0px, rgba(255,255,255,0.1) 4px, transparent 4px, transparent 8px);
-  }
-  .xp-text { text-align: center; font-size: 7px; color: #888; margin-top: 2px; }
+/* Stats grid */
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px}
+.stat-box{background:#111;border:1px solid #333;padding:6px;border-radius:2px}
+.stat-box h3{font-size:7px;margin-bottom:6px;text-shadow:0 0 4px currentColor}
+.stat-box .r{display:flex;justify-content:space-between;margin-bottom:3px}
+.stat-box .k{color:#888;font-size:7px}.stat-box .v{font-size:8px}
 
-  /* Achievements */
-  .achievements {
-    border: 2px solid #333;
-    background: #0a0a0a;
-    padding: 10px;
-    margin-bottom: 16px;
-  }
-  .achievements h3 { color: #0ff; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #088; }
-  .badge { display: inline-block; margin: 4px; padding: 4px 8px; border: 1px solid; font-size: 7px; }
-  .badge.earned { border-color: #ffd700; color: #ffd700; background: rgba(255,215,0,0.1); }
-  .badge.locked { border-color: #333; color: #444; }
+/* Mood */
+.mood{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px}
+.mood h3{font-size:7px;color:#f0f;margin-bottom:4px}
+.mood-bar{display:flex;height:8px;border:1px solid #333;overflow:hidden;border-radius:1px;margin-bottom:2px}
+.mood-seg{flex:1;height:100%}
+.mood-labels{display:flex;justify-content:space-between;font-size:6px}
 
-  /* Event log as game messages */
-  .game-log {
-    border: 2px solid #333;
-    background: #0a0a0a;
-    padding: 10px;
-    margin-bottom: 16px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-  .game-log h3 { color: #f80; font-size: 8px; margin-bottom: 8px; text-shadow: 0 0 6px #840; }
-  .log-line { margin-bottom: 4px; color: #888; }
-  .log-line .time { color: #555; }
-  .log-line .action { color: #0f0; }
-  .log-line .warning { color: #ff0; }
-  .log-line .danger { color: #f44; }
-  .log-line .loot { color: #ffd700; }
+/* Badges */
+.badges{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px}
+.badges h3{font-size:7px;color:#0ff;margin-bottom:6px}
+.badge{display:inline-block;margin:2px;padding:3px 5px;border:1px solid;font-size:6px;border-radius:2px}
+.badge.yes{border-color:#ffd700;color:#ffd700;background:rgba(255,215,0,0.08)}
+.badge.no{border-color:#222;color:#333}
 
-  /* Nav */
-  .nav { text-align: center; margin-bottom: 16px; }
-  .nav a { color: #888; text-decoration: none; margin: 0 8px; font-size: 8px; }
-  .nav a:hover { color: #0f0; }
-  .nav a.active { color: #ff0; }
+/* Log */
+.log{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px;max-height:180px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.log h3{font-size:7px;color:#f80;margin-bottom:6px}
+.log .ln{margin-bottom:3px;font-size:7px;line-height:1.4}
+.log .t{color:#444}.log .a{color:#0f0}.log .w{color:#ff0}.log .d{color:#f44}.log .l{color:#ffd700}
 
-  /* Insert coin */
-  .insert-coin {
-    text-align: center;
-    font-size: 10px;
-    color: #888;
-    margin: 20px 0;
-    animation: blink 1.5s infinite;
-  }
-
-  /* Market mood */
-  .mood-bar {
-    border: 2px solid #333;
-    background: #0a0a0a;
-    padding: 10px;
-    margin-bottom: 16px;
-  }
-  .mood-bar h3 { color: #f0f; font-size: 8px; margin-bottom: 8px; }
-  .mood-meter {
-    display: flex;
-    height: 12px;
-    border: 1px solid #333;
-    overflow: hidden;
-    margin-bottom: 4px;
-  }
-  .mood-segment { height: 100%; }
-</style>
-</head>
-<body>
-<div class="screen">
-
+.blink{animation:blink 1.5s infinite}
+.footer{text-align:center;font-size:7px;color:#444;margin:12px 0}
+</style></head><body>
+<div class="s">
 <div class="nav">
-  <a href="/">WALLET</a>
-  <a href="/insights">INSIGHTS</a>
-  <a href="/config">CONFIG</a>
-  <a href="/strategy">STRATEGY</a>
-  <a href="/health">HEALTH</a>
-  <a href="/arcade" class="active">ARCADE</a>
+  <a href="/">WALLET</a><a href="/insights">INSIGHTS</a><a href="/config">CONFIG</a>
+  <a href="/strategy">STRATEGY</a><a href="/health">HEALTH</a><a href="/arcade" class="on">ARCADE</a>
+</div>
+<div class="title">METAL LP</div>
+<div class="sub">MISSION: PROVIDE LIQUIDITY</div>
+
+<div id="ld" style="text-align:center;color:#0f0;padding:30px">LOADING<span class="blink">...</span></div>
+<div id="gm" style="display:none">
+
+<div class="hud">
+  <div class="hud-item"><div class="hud-label">SCORE</div><div class="hud-val gold" id="sc">$0</div></div>
+  <div class="hud-item"><div class="hud-label">HP</div><div class="hud-val grn" id="hp">$0</div></div>
+  <div class="hud-item"><div class="hud-label">LVL</div><div class="hud-val cyan" id="lv">1</div></div>
+  <div class="hud-item"><div class="hud-label">STATUS</div><div class="hud-val" id="st">---</div></div>
 </div>
 
-<div class="title">LP BOT ARCADE</div>
-<div class="subtitle">- INSERT LIQUIDITY TO PLAY -</div>
-
-<div id="loading" style="text-align:center;color:#0f0;padding:40px">
-  LOADING<span class="blink">...</span>
-</div>
-
-<div id="game" style="display:none">
-
-<!-- SCORE BAR -->
-<div class="score-bar">
-  <div class="score-item"><div class="score-label">SCORE (FEES)</div><div class="score-value gold" id="score">$0.00</div></div>
-  <div class="score-item"><div class="score-label">HP (VALUE)</div><div class="score-value" id="hp">$0</div></div>
-  <div class="score-item"><div class="score-label">LEVEL</div><div class="score-value" id="level">1</div></div>
-  <div class="score-item"><div class="score-label">STATUS</div><div class="score-value" id="status">---</div></div>
-</div>
-
-<!-- CHARACTER ZONE -->
-<div class="character-zone" id="arena">
-  <div class="range-zone" id="rangeZone"></div>
-  <div class="price-line" id="priceLine"></div>
-  <div class="price-tag" id="priceTag"></div>
-  <div class="bot-char" id="botChar">🤖</div>
+<div class="arena" id="ar">
+  <div class="sky" id="sky"></div>
+  <div class="range" id="rz"></div>
+  <div class="range-lbl lo" id="rl"></div>
+  <div class="range-lbl hi" id="rh"></div>
+  <div class="pline" id="pl"></div>
+  <div class="ptag" id="pt"></div>
+  <div class="soldier idle" id="ch">🔫</div>
+  <div class="speech" id="sp" style="display:none"></div>
+  <div class="enemy" id="en" style="display:none">👾</div>
+  <div class="coins" id="co" style="display:none">🪙</div>
   <div class="ground"></div>
 </div>
 
-<!-- XP BAR (in-range %) -->
-<div class="xp-section">
-  <h3>⚡ IN-RANGE XP BAR</h3>
-  <div class="xp-bar-bg">
-    <div class="xp-bar-fill" id="xpBar" style="width:0%;background:linear-gradient(90deg,#0f0,#0ff)"></div>
-  </div>
-  <div class="xp-text" id="xpText">0% IN RANGE — EARN XP BY STAYING IN BOUNDS!</div>
+<div class="bars">
+  <div class="bar-row"><span class="lbl" style="color:#0f0">XP</span><div class="bar-bg"><div class="bar-fill" id="xp" style="width:0%;background:linear-gradient(90deg,#0f0,#0ff)"></div></div><span class="val grn" id="xpt">0%</span></div>
+  <div class="bar-row"><span class="lbl" style="color:#f44">HP</span><div class="bar-bg"><div class="bar-fill" id="hpb" style="width:100%;background:linear-gradient(90deg,#f44,#0f0)"></div></div><span class="val" id="hpt">100%</span></div>
 </div>
 
-<!-- STATS -->
-<div class="stats-grid">
-  <div class="stat-box">
-    <h3>💰 LOOT CHEST</h3>
-    <div class="stat-row"><span class="stat-key">PENDING</span><span class="stat-val gold" id="pendFees">$0</span></div>
-    <div class="stat-row"><span class="stat-key">HARVESTED</span><span class="stat-val gold" id="harvFees">$0</span></div>
-    <div class="stat-row"><span class="stat-key">TOTAL LOOT</span><span class="stat-val gold" id="totalFees">$0</span></div>
-    <div class="stat-row"><span class="stat-key">DAILY LOOT</span><span class="stat-val gold" id="estDaily">$0</span></div>
+<div class="stats">
+  <div class="stat-box"><h3 style="color:#ffd700">💰 LOOT</h3>
+    <div class="r"><span class="k">PEND</span><span class="v gold" id="pf">$0</span></div>
+    <div class="r"><span class="k">HARV</span><span class="v gold" id="hf">$0</span></div>
+    <div class="r"><span class="k">TOTAL</span><span class="v gold" id="tf">$0</span></div>
+    <div class="r"><span class="k">/DAY</span><span class="v gold" id="df">$0</span></div>
   </div>
-  <div class="stat-box">
-    <h3>⚔️ BATTLE STATS</h3>
-    <div class="stat-row"><span class="stat-key">IL DAMAGE</span><span class="stat-val bad" id="ilDmg">$0</span></div>
-    <div class="stat-row"><span class="stat-key">GAS BURNED</span><span class="stat-val bad" id="gasCost">$0</span></div>
-    <div class="stat-row"><span class="stat-key">NET PNL</span><span class="stat-val" id="netPnl">$0</span></div>
-    <div class="stat-row"><span class="stat-key">REBALANCES</span><span class="stat-val" id="txCount">0</span></div>
+  <div class="stat-box"><h3 style="color:#f44">⚔️ BATTLE</h3>
+    <div class="r"><span class="k">IL DMG</span><span class="v red" id="il">$0</span></div>
+    <div class="r"><span class="k">GAS</span><span class="v red" id="gs">$0</span></div>
+    <div class="r"><span class="k">NET</span><span class="v" id="nt">$0</span></div>
+    <div class="r"><span class="k">TXS</span><span class="v cyan" id="tx">0</span></div>
   </div>
 </div>
 
-<!-- MARKET MOOD -->
-<div class="mood-bar">
-  <h3>🎮 MARKET MOOD</h3>
-  <div class="mood-meter" id="moodMeter"></div>
-  <div style="display:flex;justify-content:space-between;font-size:7px"><span style="color:#f44">EXTREME FEAR</span><span style="color:#888" id="moodLabel">---</span><span style="color:#0f0">EXTREME GREED</span></div>
-</div>
+<div class="mood"><h3>🎮 BATTLEFIELD MOOD</h3><div class="mood-bar" id="mb"></div><div class="mood-labels"><span style="color:#f44">FEAR</span><span id="ml" style="color:#888">---</span><span style="color:#0f0">GREED</span></div></div>
 
-<!-- ACHIEVEMENTS -->
-<div class="achievements">
-  <h3>🏆 ACHIEVEMENTS</h3>
-  <div id="badges"></div>
-</div>
+<div class="badges"><h3>🏆 MEDALS</h3><div id="bd"></div></div>
 
-<!-- GAME LOG -->
-<div class="game-log">
-  <h3>📜 ADVENTURE LOG</h3>
-  <div id="gameLog"></div>
-</div>
+<div class="log"><h3>📜 MISSION LOG</h3><div id="lg"></div></div>
 
-<div class="insert-coin">— AUTO-REFRESH 30s —</div>
-
-</div><!-- /game -->
-</div><!-- /screen -->
+<div class="footer blink">— MISSION IN PROGRESS — AUTO-REFRESH 30s —</div>
+</div></div>
 
 <script>
-const TZ = 'Europe/Berlin';
+const TZ='Europe/Berlin';
+const fmt=(n,d=2)=>Math.abs(n).toFixed(d);
 
-function fmt(n, d=2) { return Math.abs(n).toFixed(d); }
+// Metal Slug characters by state
+const CHARS = {
+  ACTIVE_SAFE:    '🔫',  // soldier shooting — in range, all good
+  ACTIVE_CLOSE:   '🏃',  // running — getting close to bounds
+  ACTIVE_DANGER:  '😰',  // sweating — very close to bounds
+  OOR:            '💥',  // explosion — out of range
+  HALTED:         '☠️',  // skull — circuit breaker
+  IDLE:           '😴',  // sleeping — no position
+  PULLBACK:       '🎯',  // crosshair — waiting for pullback
+  HARVESTING:     '💰',  // money bag — collecting fees
+  DEPLOYING:      '🚀',  // rocket — deploying capital
+};
 
-function getLevel(totalFees) {
-  if (totalFees >= 500) return { lvl: 10, title: 'LP GOD', next: Infinity };
-  if (totalFees >= 200) return { lvl: 9, title: 'WHALE RIDER', next: 500 };
-  if (totalFees >= 100) return { lvl: 8, title: 'FEE MACHINE', next: 200 };
-  if (totalFees >= 50) return { lvl: 7, title: 'POOL SHARK', next: 100 };
-  if (totalFees >= 25) return { lvl: 6, title: 'RANGE RIDER', next: 50 };
-  if (totalFees >= 10) return { lvl: 5, title: 'LIQUIDITY MAGE', next: 25 };
-  if (totalFees >= 5) return { lvl: 4, title: 'FEE HUNTER', next: 10 };
-  if (totalFees >= 2) return { lvl: 3, title: 'POOL PADAWAN', next: 5 };
-  if (totalFees >= 0.5) return { lvl: 2, title: 'NOOB FARMER', next: 2 };
-  return { lvl: 1, title: 'FRESH SPAWN', next: 0.5 };
+const SPEECHES = {
+  ACTIVE_SAFE:    ['MISSION PROCEEDING!', 'EARNING FEES SIR!', 'IN RANGE, ALL CLEAR!', 'HOLDING THE LINE!', 'RANGE IS SECURE!'],
+  ACTIVE_CLOSE:   ['APPROACHING BOUNDARY!', 'WATCH YOUR STEP!', 'GETTING HOT!', 'STAY FOCUSED!'],
+  ACTIVE_DANGER:  ['MAYDAY MAYDAY!', 'TAKING IL DAMAGE!', 'NEED BACKUP!', 'ALMOST OOR!'],
+  OOR:            ['MAN DOWN!', 'WE LOST THE RANGE!', 'RETREAT!!', 'ZERO FEES!'],
+  HALTED:         ['GAME OVER', 'INSERT COIN', 'CIRCUIT BREAKER!'],
+  IDLE:           ['ZZZ...', 'WAITING ORDERS...', 'STANDBY...'],
+  PULLBACK:       ['SCOUTING...', 'WAITING FOR PULLBACK', 'PATIENCE...', 'TARGET ACQUIRED?'],
+};
+
+function getState(live) {
+  if (!live) return 'IDLE';
+  if (live.botState === 'HALTED') return 'HALTED';
+  if (live.botState === 'WAITING_PULLBACK') return 'PULLBACK';
+  if (!live.positionMint) return 'IDLE';
+  if (live.positionRange) {
+    const p = live.solPrice, lo = live.positionRange.lower, hi = live.positionRange.upper;
+    if (p < lo || p > hi) return 'OOR';
+    const c = (lo+hi)/2, hw = (hi-lo)/2;
+    const prox = Math.max(Math.max(0,(c-p)/hw), Math.max(0,(p-c)/hw));
+    if (prox > 0.7) return 'ACTIVE_DANGER';
+    if (prox > 0.4) return 'ACTIVE_CLOSE';
+  }
+  return 'ACTIVE_SAFE';
 }
 
-function getBadges(data) {
-  const d = data;
-  const badges = [];
-  const totalFees = d.totalFeesUsdc || 0;
-  const ir24 = d._inRange24h || 0;
-  const txs = d.txCount || 0;
-
-  badges.push({ name: '🌱 FIRST LP', desc: 'Open first position', earned: !!d.positionMint });
-  badges.push({ name: '💰 $1 FEES', desc: 'Earn $1 in fees', earned: totalFees >= 1 });
-  badges.push({ name: '💎 $10 FEES', desc: 'Earn $10 in fees', earned: totalFees >= 10 });
-  badges.push({ name: '👑 $50 FEES', desc: 'Earn $50 in fees', earned: totalFees >= 50 });
-  badges.push({ name: '🔥 $100 CLUB', desc: 'Earn $100 in fees', earned: totalFees >= 100 });
-  badges.push({ name: '🎯 SNIPER', desc: '90%+ in-range 24h', earned: ir24 >= 90 });
-  badges.push({ name: '📏 RULER', desc: '95%+ in-range 24h', earned: ir24 >= 95 });
-  badges.push({ name: '⚡ ACTIVE', desc: '10+ transactions', earned: txs >= 10 });
-  badges.push({ name: '🏗️ BUILDER', desc: '50+ transactions', earned: txs >= 50 });
-  badges.push({ name: '🐋 WHALE', desc: '$5000+ total value', earned: (d.totalValueWithPosition || 0) >= 5000 });
-  return badges;
+function getLevel(f) {
+  if(f>=500)return{l:10,t:'GENERAL',n:999};if(f>=200)return{l:9,t:'COLONEL',n:500};
+  if(f>=100)return{l:8,t:'MAJOR',n:200};if(f>=50)return{l:7,t:'CAPTAIN',n:100};
+  if(f>=25)return{l:6,t:'SERGEANT',n:50};if(f>=10)return{l:5,t:'CORPORAL',n:25};
+  if(f>=5)return{l:4,t:'PRIVATE 1ST',n:10};if(f>=2)return{l:3,t:'PRIVATE',n:5};
+  if(f>=0.5)return{l:2,t:'RECRUIT',n:2};return{l:1,t:'CADET',n:0.5};
 }
 
-function statusEmoji(state) {
-  if (state === 'ACTIVE') return '🟢 ACTIVE';
-  if (state === 'WAITING_PULLBACK') return '⏳ PULLBACK';
-  if (state === 'HALTED') return '💀 HALTED';
-  if (state === 'IDLE') return '😴 IDLE';
-  return '❓ ' + state;
-}
+let lastSpeechTime = 0;
 
 async function refresh() {
   try {
-    const [liveRes, snapRes] = await Promise.all([
-      fetch('/api/live'), fetch('/api/snapshots?hours=24')
-    ]);
-    const live = await liveRes.json();
-    const snaps = await snapRes.json();
+    const [lr, sr, mr] = await Promise.all([fetch('/api/live'), fetch('/api/snapshots?hours=24'), fetch('/api/market-signals').catch(()=>null)]);
+    const live = await lr.json(); const snaps = await sr.json();
+    const mkt = mr ? await mr.json() : null;
     if (!live) return;
 
-    // In-range 24h
-    const total = snaps.length;
-    const inRange = snaps.filter(s => s.in_range).length;
-    const ir24 = total > 0 ? (inRange/total*100) : 0;
-    live._inRange24h = ir24;
+    const ir24 = snaps.length > 0 ? (snaps.filter(s=>s.in_range).length/snaps.length*100) : 0;
+    const st = getState(live);
 
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('game').style.display = 'block';
+    document.getElementById('ld').style.display='none';
+    document.getElementById('gm').style.display='';
 
-    // Score
-    const totalFees = live.totalFeesUsdc || 0;
-    document.getElementById('score').textContent = '$' + fmt(totalFees);
+    // HUD
+    const fees = live.totalFeesUsdc||0;
+    const lvl = getLevel(fees);
+    document.getElementById('sc').textContent = '$'+fmt(fees);
+    document.getElementById('hp').textContent = '$'+fmt(live.totalValueWithPosition||0,0);
+    document.getElementById('lv').innerHTML = lvl.l+' <span style="font-size:6px;color:#888">'+lvl.t+'</span>';
+    const stEl = document.getElementById('st');
+    const stColors = {ACTIVE_SAFE:'#0f0',ACTIVE_CLOSE:'#ff0',ACTIVE_DANGER:'#f80',OOR:'#f44',HALTED:'#f44',IDLE:'#888',PULLBACK:'#0ff'};
+    const stNames = {ACTIVE_SAFE:'FIGHTING',ACTIVE_CLOSE:'CAUTION',ACTIVE_DANGER:'DANGER!',OOR:'MAN DOWN',HALTED:'KIA',IDLE:'STANDBY',PULLBACK:'SCOUTING'};
+    stEl.textContent = stNames[st]||st;
+    stEl.style.color = stColors[st]||'#fff';
 
-    // HP
-    const hp = live.totalValueWithPosition || 0;
-    document.getElementById('hp').textContent = '$' + fmt(hp, 0);
+    // Arena
+    const ch = document.getElementById('ch');
+    ch.textContent = CHARS[st]||'🔫';
+    ch.className = 'soldier ' + (st==='ACTIVE_SAFE'?'walk':st==='OOR'?'shake':st==='HALTED'?'explode':'idle');
 
-    // Level
-    const lvl = getLevel(totalFees);
-    document.getElementById('level').innerHTML = lvl.lvl + ' <span style="font-size:7px;color:#888">' + lvl.title + '</span>';
+    // Speech bubble — change every 10s
+    const now = Date.now();
+    const sp = document.getElementById('sp');
+    if (now - lastSpeechTime > 10000) {
+      lastSpeechTime = now;
+      const lines = SPEECHES[st] || ['...'];
+      sp.textContent = lines[Math.floor(Math.random()*lines.length)];
+      sp.style.display = '';
+    }
 
-    // Status
-    const statusEl = document.getElementById('status');
-    statusEl.innerHTML = statusEmoji(live.botState);
+    // Enemy (IL monster) and coins
+    const en = document.getElementById('en');
+    const co = document.getElementById('co');
+    const totalIL = (live.ilUsdc||0) + (live.realizedIlUsdc||0);
+    if (Math.abs(totalIL) > 1) { en.style.display=''; en.textContent = totalIL < -5 ? '👹' : '👾'; } else en.style.display='none';
+    if (live.pendingFeesTotal > 0.5) { co.style.display=''; } else co.style.display='none';
+
+    if (live.positionRange) {
+      const lo=live.positionRange.lower, hi=live.positionRange.upper;
+      const pad=(hi-lo)*0.3, vMin=lo-pad, vMax=hi+pad, vW=vMax-vMin;
+      const rz=document.getElementById('rz');
+      rz.style.left=((lo-vMin)/vW*100)+'%'; rz.style.width=((hi-lo)/vW*100)+'%';
+      document.getElementById('rl').textContent='$'+fmt(lo); document.getElementById('rl').style.left=((lo-vMin)/vW*100)+'%';
+      document.getElementById('rh').textContent='$'+fmt(hi); document.getElementById('rh').style.right=(100-(hi-vMin)/vW*100)+'%';
+      const pp=((live.solPrice-vMin)/vW*100);
+      document.getElementById('pl').style.left=Math.max(1,Math.min(99,pp))+'%';
+      const pt=document.getElementById('pt'); pt.style.left=Math.max(1,Math.min(85,pp))+'%'; pt.textContent='$'+fmt(live.solPrice);
+      ch.style.left=Math.max(2,Math.min(88,pp-4))+'%';
+      sp.style.left=Math.max(2,Math.min(75,pp-2))+'%';
+      // Enemy on the closer boundary
+      const c=(lo+hi)/2;
+      if (live.solPrice < c) { en.style.left='8%'; en.style.display=Math.abs(totalIL)>1?'':'none'; }
+      else { en.style.left='85%'; }
+      co.style.left=Math.max(10,Math.min(80,pp+5))+'%'; co.style.top='15px';
+    }
+
+    document.getElementById('sky').textContent = live.regime + ' | $' + fmt(live.solPrice);
 
     // XP bar (in-range)
-    const xpBar = document.getElementById('xpBar');
-    const xpPct = Math.min(ir24, 100);
-    xpBar.style.width = xpPct + '%';
-    xpBar.style.background = xpPct > 90 ? 'linear-gradient(90deg,#0f0,#ffd700)' : xpPct > 60 ? 'linear-gradient(90deg,#0f0,#0ff)' : 'linear-gradient(90deg,#f44,#ff0)';
-    document.getElementById('xpText').textContent = fmt(ir24, 0) + '% IN RANGE 24H — ' + (ir24 > 95 ? 'LEGENDARY!' : ir24 > 80 ? 'EXCELLENT!' : ir24 > 50 ? 'KEEP GOING!' : 'DANGER ZONE!');
+    const xp=document.getElementById('xp');
+    xp.style.width=Math.min(ir24,100)+'%';
+    xp.style.background=ir24>90?'linear-gradient(90deg,#0f0,#ffd700)':ir24>60?'linear-gradient(90deg,#0f0,#0ff)':'linear-gradient(90deg,#f44,#ff0)';
+    document.getElementById('xpt').textContent=fmt(ir24,0)+'%';
+    document.getElementById('xpt').style.color=ir24>90?'#ffd700':ir24>60?'#0f0':'#f44';
 
-    // Character position in range
-    if (live.positionRange) {
-      const lower = live.positionRange.lower;
-      const upper = live.positionRange.upper;
-      const padding = (upper - lower) * 0.3;
-      const viewMin = lower - padding;
-      const viewMax = upper + padding;
-      const viewWidth = viewMax - viewMin;
-      const arena = document.getElementById('arena');
-      const w = arena.offsetWidth;
+    // HP bar (net PnL relative to position value)
+    const net=fees+totalIL-(live.gasUsdc||0);
+    const posVal=live.totalValueWithPosition||1;
+    const hpPct=Math.max(0,Math.min(100,50+net/posVal*5000));
+    document.getElementById('hpb').style.width=hpPct+'%';
+    document.getElementById('hpb').style.background=hpPct>70?'linear-gradient(90deg,#0a0,#0f0)':hpPct>30?'linear-gradient(90deg,#ff0,#0f0)':'linear-gradient(90deg,#f44,#ff0)';
+    document.getElementById('hpt').textContent=(net>=0?'+':'')+fmt(net,0);
+    document.getElementById('hpt').style.color=net>=0?'#0f0':'#f44';
 
-      // Range zone
-      const rz = document.getElementById('rangeZone');
-      const rzLeft = ((lower - viewMin) / viewWidth * 100);
-      const rzWidth = ((upper - lower) / viewWidth * 100);
-      rz.style.left = rzLeft + '%';
-      rz.style.width = rzWidth + '%';
+    // Loot
+    document.getElementById('pf').textContent='$'+fmt(live.pendingFeesTotal||0);
+    document.getElementById('hf').textContent='$'+fmt(fees-(live.pendingFeesTotal||0));
+    document.getElementById('tf').textContent='$'+fmt(fees);
+    document.getElementById('df').textContent='$'+fmt(live.estDailyFeesUsdc||0)+'/d';
 
-      // Price line
-      const pricePct = ((live.solPrice - viewMin) / viewWidth * 100);
-      const pl = document.getElementById('priceLine');
-      pl.style.left = Math.max(2, Math.min(98, pricePct)) + '%';
-      const pt = document.getElementById('priceTag');
-      pt.style.left = Math.max(2, Math.min(85, pricePct)) + '%';
-      pt.textContent = '$' + fmt(live.solPrice);
+    // Battle
+    document.getElementById('il').textContent='-$'+fmt(Math.abs(totalIL));
+    document.getElementById('gs').textContent='-$'+fmt(live.gasUsdc||0);
+    const ntEl=document.getElementById('nt');
+    ntEl.textContent=(net>=0?'+':'-')+'$'+fmt(Math.abs(net));
+    ntEl.className='v '+(net>=0?'gold':'red');
+    document.getElementById('tx').textContent=live.txCount||0;
 
-      // Bot character follows price
-      const bc = document.getElementById('botChar');
-      bc.style.left = Math.max(2, Math.min(90, pricePct - 3)) + '%';
-
-      // Change bot emoji based on state
-      if (live.botState === 'HALTED') bc.textContent = '💀';
-      else if (!live.positionMint) bc.textContent = '😴';
-      else if (live.solPrice < lower || live.solPrice > upper) bc.textContent = '😱';
-      else bc.textContent = '🤖';
+    // Mood
+    if (mkt && mkt.fearGreedIndex!=null) {
+      const f=mkt.fearGreedIndex, mb=document.getElementById('mb');
+      mb.innerHTML='';
+      const cs=['#f44','#f44','#f80','#f80','#ff0','#ff0','#8f0','#0f0','#0f0','#0f0'];
+      for(let i=0;i<10;i++){const s=document.createElement('div');s.className='mood-seg';s.style.background=i<Math.floor(f/10)?cs[i]:'#1a1a1a';mb.appendChild(s);}
+      document.getElementById('ml').textContent=f+'/100 '+(mkt.fearGreedLabel||'');
+      document.getElementById('ml').style.color=f<25?'#f44':f>75?'#0f0':'#888';
     }
 
-    // Loot chest
-    document.getElementById('pendFees').textContent = '$' + fmt(live.pendingFeesTotal || 0);
-    document.getElementById('harvFees').textContent = '$' + fmt((live.totalFeesUsdc || 0) - (live.pendingFeesTotal || 0));
-    document.getElementById('totalFees').textContent = '$' + fmt(totalFees);
-    document.getElementById('estDaily').textContent = '$' + fmt(live.estDailyFeesUsdc || 0) + '/day';
+    // Badges
+    const ir=ir24, tx=live.txCount||0, tv=live.totalValueWithPosition||0;
+    const badges=[
+      {n:'🌱 1ST LP',e:!!live.positionMint},{n:'💰 $1',e:fees>=1},{n:'💎 $10',e:fees>=10},
+      {n:'👑 $50',e:fees>=50},{n:'🔥 $100',e:fees>=100},{n:'🎯 90%IR',e:ir>=90},
+      {n:'📏 95%IR',e:ir>=95},{n:'⚡ 10TX',e:tx>=10},{n:'🏗️ 50TX',e:tx>=50},{n:'🐋 $5K',e:tv>=5000}
+    ];
+    document.getElementById('bd').innerHTML=badges.map(b=>'<span class="badge '+(b.e?'yes':'no')+'">'+b.n+(b.e?'':' 🔒')+'</span>').join('');
 
-    // Battle stats
-    const totalIL = (live.ilUsdc || 0) + (live.realizedIlUsdc || 0);
-    const net = totalFees + totalIL - (live.gasUsdc || 0);
-    document.getElementById('ilDmg').textContent = '$' + fmt(Math.abs(totalIL));
-    document.getElementById('gasCost').textContent = '$' + fmt(live.gasUsdc || 0);
-    const netEl = document.getElementById('netPnl');
-    netEl.textContent = (net >= 0 ? '+' : '-') + '$' + fmt(Math.abs(net));
-    netEl.className = 'stat-val ' + (net >= 0 ? 'gold' : 'bad');
-    document.getElementById('txCount').textContent = live.txCount || 0;
-
-    // Market mood
-    const mktRes = await fetch('/api/market-signals').catch(() => null);
-    const mkt = mktRes ? await mktRes.json() : null;
-    if (mkt && mkt.fearGreedIndex != null) {
-      const fgi = mkt.fearGreedIndex;
-      const meter = document.getElementById('moodMeter');
-      meter.innerHTML = '';
-      const colors = ['#f44','#f44','#f80','#f80','#ff0','#ff0','#0f0','#0f0','#0f0','#0f0'];
-      for (let i = 0; i < 10; i++) {
-        const seg = document.createElement('div');
-        seg.className = 'mood-segment';
-        seg.style.flex = '1';
-        seg.style.background = i < Math.floor(fgi/10) ? colors[i] : '#1a1a1a';
-        if (i === Math.floor(fgi/10)) seg.style.boxShadow = '0 0 8px ' + colors[i];
-        meter.appendChild(seg);
-      }
-      document.getElementById('moodLabel').textContent = fgi + '/100 ' + (mkt.fearGreedLabel || '');
-    }
-
-    // Achievements
-    const badges = getBadges(live);
-    const badgesEl = document.getElementById('badges');
-    badgesEl.innerHTML = badges.map(b =>
-      '<div class="badge ' + (b.earned ? 'earned' : 'locked') + '" title="' + b.desc + '">' +
-      b.name + (b.earned ? '' : ' 🔒') + '</div>'
-    ).join('');
-
-    // Game log from recent events
-    const eventsRes = await fetch('/api/events');
-    const events = await eventsRes.json();
-    const logEl = document.getElementById('gameLog');
-    const eventMessages = {
-      'POSITION_OPENED': { cls: 'action', msg: '⚔️ ENTERED THE POOL!' },
-      'POSITION_CLOSED': { cls: 'warning', msg: '🏃 RETREATED FROM POOL' },
-      'T1_DOWNSIDE': { cls: 'danger', msg: '🛡️ DOWNSIDE SHIELD ACTIVATED!' },
-      'T1_UPSIDE': { cls: 'warning', msg: '🚀 UPSIDE EXIT — WATCHING FOR PULLBACK' },
-      'OOR_BELOW': { cls: 'danger', msg: '💥 HIT BELOW — OUT OF RANGE!' },
-      'OOR_ABOVE': { cls: 'warning', msg: '🌙 MOONED OUT OF RANGE!' },
-      'FEE_HARVEST': { cls: 'loot', msg: '💰 LOOT COLLECTED!' },
-      'AUTO_DEPLOY': { cls: 'action', msg: '🏗️ REINFORCEMENTS DEPLOYED!' },
-      'REGIME_CHANGE': { cls: 'warning', msg: '🌊 WORLD EVENT — REGIME SHIFT!' },
-      'PULLBACK_REENTRY': { cls: 'action', msg: '🎯 PULLBACK CAUGHT — RE-ENTERING!' },
-      'PULLBACK_TIMEOUT': { cls: 'warning', msg: '⏰ TIMEOUT — FORCED RE-ENTRY' },
-      'LIQUIDITY_ADDED': { cls: 'loot', msg: '💎 EXTRA LIQUIDITY INJECTED!' },
+    // Log
+    const er=await fetch('/api/events'); const ev=await er.json();
+    const msgs={
+      POSITION_OPENED:{c:'a',m:'⚔️ DEPLOYED TO BATTLE!'},POSITION_CLOSED:{c:'w',m:'🏃 TACTICAL RETREAT!'},
+      T1_DOWNSIDE:{c:'d',m:'🛡️ SHIELD ACTIVATED!'},T1_UPSIDE:{c:'w',m:'🚀 UPSIDE EVACUATION!'},
+      OOR_BELOW:{c:'d',m:'💥 AMBUSHED FROM BELOW!'},OOR_ABOVE:{c:'w',m:'🌙 OVEREXTENDED UP!'},
+      FEE_HARVEST:{c:'l',m:'💰 LOOT DROPPED!'},AUTO_DEPLOY:{c:'a',m:'🚀 REINFORCEMENTS!'},
+      REGIME_CHANGE:{c:'w',m:'🌊 WEATHER CHANGED!'},PULLBACK_REENTRY:{c:'a',m:'🎯 TARGET HIT!'},
+      PULLBACK_TIMEOUT:{c:'w',m:'⏰ PATIENCE EXPIRED!'},LIQUIDITY_ADDED:{c:'l',m:'💎 POWER UP!'}
     };
-    logEl.innerHTML = events.slice(0, 15).map(e => {
-      const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: TZ });
-      const em = eventMessages[e.eventType] || { cls: '', msg: e.eventType };
-      return '<div class="log-line"><span class="time">[' + t + ']</span> <span class="' + em.cls + '">' + em.msg + '</span> <span style="color:#555">$' + fmt(e.price) + '</span></div>';
+    document.getElementById('lg').innerHTML=ev.slice(0,12).map(e=>{
+      const t=new Date(e.timestamp).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',timeZone:TZ});
+      const m=msgs[e.eventType]||{c:'',m:e.eventType};
+      return '<div class="ln"><span class="t">['+t+']</span> <span class="'+m.c+'">'+m.m+'</span> <span class="t">$'+fmt(e.price)+'</span></div>';
     }).join('');
 
-  } catch (err) {
-    console.error('Arcade refresh failed:', err);
-  }
+  } catch(e) { console.error('Arcade:',e); }
 }
-
-refresh();
-setInterval(refresh, 30000);
-</script>
-</body>
-</html>`;
+refresh(); setInterval(refresh,30000);
+</script></body></html>`;
 }
 
