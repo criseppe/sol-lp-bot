@@ -1511,19 +1511,19 @@ ${NAV_HTML}
     <h2>Bot Controls</h2>
     <div class="ctrl-grid">
       <div>
-        <button id="harvest-btn" class="ctrl-btn ctrl-blue" onclick="harvestFees()">
+        <button id="harvest-btn" class="ctrl-btn ctrl-blue" onclick="showConfirmAction('Harvest fees?','Collect all pending fees from the position to your wallet.','harvestFees()')">
           Harvest Fees
         </button>
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Collect pending fees from position to wallet.</div>
       </div>
       <div>
-        <button id="pause-btn" class="ctrl-btn ctrl-amber" onclick="controlBot('pause')">
+        <button id="pause-btn" class="ctrl-btn ctrl-amber" onclick="showConfirmAction('Pause bot?','Decision loop will stop. Position stays open and earns fees.','controlBot(\\'pause\\')')">
           Pause Bot
         </button>
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Stops decision loop. Position stays open.</div>
       </div>
       <div>
-        <button id="resume-btn" class="ctrl-btn ctrl-green" onclick="controlBot('resume')">
+        <button id="resume-btn" class="ctrl-btn ctrl-green" onclick="showConfirmAction('Resume bot?','Decision loop will restart. Bot will monitor and rebalance.','controlBot(\\'resume\\')')">
           Resume Bot
         </button>
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Restarts decision loop and rebalancing.</div>
@@ -1541,7 +1541,7 @@ ${NAV_HTML}
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">Closes position, withdraws all, shuts down.</div>
       </div>
       <div>
-        <button id="rule2-btn" class="ctrl-btn ${rule2Enabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="toggleRule2()">
+        <button id="rule2-btn" class="ctrl-btn ${rule2Enabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="showConfirmAction('${rule2Enabled ? 'Disable' : 'Enable'} Rule 2?','${rule2Enabled ? 'Positions will only close on full OOR (no early proximity exit).' : 'Enable proximity-based early exit to reduce IL.'}','toggleRule2()')">
           ${rule2Enabled ? 'Disable' : 'Enable'} Rule 2
         </button>
         <div style="font-size:10px;margin-top:4px;text-align:center"><span id="rule2-status" style="color:${rule2Enabled ? '#22c55e' : '#f97316'};font-weight:600">${rule2Enabled ? 'ACTIVE' : 'BYPASSED'}</span> <span style="color:#8b949e">— Proximity early exit.</span></div>
@@ -1553,7 +1553,7 @@ ${NAV_HTML}
         <div style="font-size:10px;color:#8b949e;margin-top:4px;text-align:center">${live?.positionMint ? 'Add wallet balance to open position.' : 'No open position.'}</div>
       </div>
       <div>
-        <button id="autodeploy-btn" class="ctrl-btn ${autoDeployEnabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="toggleAutoDeploy()">
+        <button id="autodeploy-btn" class="ctrl-btn ${autoDeployEnabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="showConfirmAction('${autoDeployEnabled ? 'Disable' : 'Enable'} Auto Deploy?','${autoDeployEnabled ? 'Idle wallet funds will NOT be deployed automatically.' : 'Idle funds will be deployed into the position up to the regime cap.'}','toggleAutoDeploy()')">
           ${autoDeployEnabled ? 'Disable' : 'Enable'} Auto Deploy
         </button>
         <div style="font-size:10px;margin-top:4px;text-align:center"><span id="autodeploy-status" style="color:${autoDeployEnabled ? '#22c55e' : '#f97316'};font-weight:600">${autoDeployEnabled ? 'ENABLED' : 'DISABLED'}</span> <span style="color:#8b949e">— Auto capital deployment.</span></div>
@@ -1595,11 +1595,26 @@ ${NAV_HTML}
     </div>
   </div>
 
+  <div class="stop-confirm" id="generic-confirm" style="display:none">
+    <p id="generic-confirm-title" style="color:#58a6ff;font-weight:bold;margin-bottom:8px"></p>
+    <p id="generic-confirm-desc" style="color:#8b949e;font-size:12px;margin-bottom:12px"></p>
+    <button class="ctrl-btn ctrl-blue" style="width:100%" id="generic-confirm-btn">Confirm</button>
+    <button style="background:#30363d;color:#c9d1d9;border:none;padding:10px 24px;border-radius:8px;font-size:13px;cursor:pointer;font-family:inherit;width:100%;margin-top:8px" onclick="document.getElementById('generic-confirm').style.display='none'">Cancel</button>
+  </div>
 
 </div>
 
 <script>
 window.__LIVE_DATA__ = ${JSON.stringify(live)};
+
+function showConfirmAction(title, desc, action) {
+  var d = document.getElementById('generic-confirm');
+  document.getElementById('generic-confirm-title').textContent = title;
+  document.getElementById('generic-confirm-desc').textContent = desc;
+  var btn = document.getElementById('generic-confirm-btn');
+  btn.onclick = function() { d.style.display = 'none'; eval(action); };
+  d.style.display = 'block';
+}
 
 function stopAutoRefresh() {
   var meta = document.getElementById('auto-refresh');
