@@ -188,9 +188,9 @@ function populateAll() {
   var dailyFees = buildDailyFees(snaps);
 
   populateFeesToday(hourlyFees);
-  populateFeesDaily(dailyFees);
+  populateFeesDaily(DATA.dailySummaries || []);
   populateFeeHeatmap(hourlyFees);
-  populateCumFees(snaps);
+  populateCumFees(DATA.dailySummaries || []);
   populateFeesRegime(snaps);
   populateFeesWeekday(snaps);
   populatePosDuration(positions);
@@ -314,9 +314,10 @@ function populateFeesToday(hf) {
   makeChart('fees-today',{type:'bar',data:{labels:labels,datasets:[{label:'Fees ($)',data:data,backgroundColor:data.map(function(d){return d>2?COLORS.gold:d>0.5?COLORS.green:COLORS.gray+'80';})}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(2);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}});
 }
 
-function populateFeesDaily(df) {
-  var labels = df.map(function(d){return d[0].slice(5);});
-  var data = df.map(function(d){return d[1];});
+function populateFeesDaily(summaries) {
+  if (!summaries || summaries.length === 0) { makeTable('fees-daily','<div style="color:#8b949e;padding:12px">No daily data yet</div>'); return; }
+  var labels = summaries.map(function(s){return s.date.slice(5);});
+  var data = summaries.map(function(s){return s.fees_earned_usdc || 0;});
   var avg = data.reduce(function(s,v){return s+v;},0)/data.length;
   makeChart('fees-daily',{type:'bar',data:{labels:labels,datasets:[{label:'Daily Fees ($)',data:data,backgroundColor:COLORS.green+'80'},{label:'Average',data:data.map(function(){return avg;}),type:'line',borderColor:COLORS.amber,borderDash:[4,4],pointRadius:0}]},options:{plugins:{legend:{labels:{color:COLORS.gray,font:{size:10}}}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(0);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}});
 }
@@ -341,11 +342,11 @@ function populateFeeHeatmap(hf) {
   makeTable('fee-heatmap',html);
 }
 
-function populateCumFees(snaps) {
-  var step = Math.max(1, Math.floor(snaps.length/200));
-  var labels = [], data = [];
-  for(var i=0;i<snaps.length;i+=step){var s=snaps[i];labels.push(new Date(s.timestamp).toLocaleString('en-US',{timeZone:TZ,month:'short',day:'numeric',hour:'2-digit',hour12:false}));data.push(totalFees(s));}
-  makeChart('cum-fees',{type:'line',data:{labels:labels,datasets:[{label:'Cumulative Fees ($)',data:data,borderColor:COLORS.gold,backgroundColor:COLORS.gold+'20',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(0);}},grid:{color:'#21262d'}},x:{display:false}}}});
+function populateCumFees(summaries) {
+  if (!summaries || summaries.length === 0) { makeTable('cum-fees','<div style="color:#8b949e;padding:12px">No data</div>'); return; }
+  var labels = summaries.map(function(s){return s.date.slice(5);});
+  var data = summaries.map(function(s){return s.cum_fees_usdc || 0;});
+  makeChart('cum-fees',{type:'line',data:{labels:labels,datasets:[{label:'Cumulative Fees ($)',data:data,borderColor:COLORS.gold,backgroundColor:COLORS.gold+'20',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(0);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}});
 }
 
 function populateFeesRegime(snaps) {
