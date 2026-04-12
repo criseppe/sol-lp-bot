@@ -2044,20 +2044,27 @@ ${(() => {
   }
 
   // Compute per-day: portfolio change, SOL price impact, organic growth
+  // Organic = fees earned that day (not portfolio change minus SOL impact,
+  // because LP composition shift inflates the SOL impact calculation)
   const pnlPoints: Array<{ date: string; pnl: number; solImpact: number; organic: number }> = [];
+  const sortedFeeDates = Array.from(feeDailyMap2.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   days.forEach(([date, val], i) => {
     const injToday = dailyInjections.get(date) ?? 0;
     const solImpact = dailySolImpact.get(date) ?? 0;
+
+    // Daily fees = cumulative fees today - cumulative fees yesterday
+    const todayFees = feeDailyMap2.get(date) ?? 0;
+    const prevDayDate = i > 0 ? days[i - 1][0] : null;
+    const prevDayFees = prevDayDate ? (feeDailyMap2.get(prevDayDate) ?? 0) : 0;
+    const dailyFees = i === 0 ? todayFees : Math.max(0, todayFees - prevDayFees);
+
     if (i === 0) {
-      // First day: change = closing value - injections (no previous day to compare)
       const change = val.total - injToday;
-      const organic = change - solImpact;
-      pnlPoints.push({ date, pnl: change, solImpact, organic });
+      pnlPoints.push({ date, pnl: change, solImpact, organic: dailyFees });
     } else {
       const prev = days[i - 1][1];
       const change = val.total - prev.total - injToday;
-      const organic = change - solImpact;
-      pnlPoints.push({ date, pnl: change, solImpact, organic });
+      pnlPoints.push({ date, pnl: change, solImpact, organic: dailyFees });
     }
   });
 
