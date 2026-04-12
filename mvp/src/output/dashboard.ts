@@ -754,7 +754,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Menlo,monospace;font
 .banner h1{font-size:16px;color:#58a6ff}
 .banner .mode{font-size:11px;text-transform:uppercase;letter-spacing:2px}
 .nav{display:flex;gap:6px;justify-content:center;margin-bottom:12px;flex-wrap:wrap}
-.nav a{color:#8b949e;text-decoration:none;padding:8px 14px;border:1px solid #30363d;border-radius:6px;font-size:12px;transition:all 0.2s;white-space:nowrap}
+.nav a{color:#8b949e;text-decoration:none;padding:8px 14px;border:1px solid #30363d;border-radius:6px;font-size:12px;transition:all 0.2s;white-space:nowrap;text-align:center}
 .nav a:hover,.nav a.active{color:#c9d1d9;border-color:#58a6ff;background:#161b22}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
@@ -785,7 +785,8 @@ td:last-child{color:#8b949e;font-size:11px;line-height:1.4;max-width:500px}
   .card h2{font-size:12px;margin-bottom:8px}
   .banner{padding:10px}
   .banner h1{font-size:15px}
-  .nav a{padding:8px 10px;font-size:11px;flex:1;text-align:center;min-width:0}
+  .nav{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:10px}
+  .nav a{padding:8px 4px;font-size:11px;text-align:center;min-width:0}
   .big-number .val{font-size:22px}
   .row{font-size:12px}
   .row .value{font-size:12px}
