@@ -485,6 +485,21 @@ export function startDashboard(port: number): DashboardServer {
     res.send(csv);
   });
 
+  // Simulation data download
+  app.get('/api/simulation-data.json', async (_req, res) => {
+    try {
+      const { readFileSync, existsSync } = await import('fs');
+      const filePath = process.cwd() + '/data/simulation-data-compact.json';
+      if (existsSync(filePath)) {
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename="simulation-data.json"');
+        res.send(readFileSync(filePath, 'utf8'));
+      } else {
+        res.status(404).json({ error: 'Generate first: node scripts/generate-simulation-data.cjs' });
+      }
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+
   // Health check state
   interface HealthCheck {
     name: string;

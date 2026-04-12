@@ -92,7 +92,9 @@ let liveFlashCrashCooldownUntil = parseInt(getConfig(db)['flashCrashCooldownUnti
 let liveRecentPrices: number[] = []; // last ~10 prices for flash crash detection
 let consecutiveTxFailures = 0; // exponential backoff on repeated TX failures
 let txBackoffUntil = 0; // timestamp: skip position operations until this time
-let lastIdleRebalanceRegime: string | null = null; // track which regime last triggered idle rebalance (cooldown: once per regime change)
+let lastIdleRebalanceRegime: string | null = null; // track which regime last triggered idle rebalance
+let lastIdleRebalanceTime = 0; // timestamp of last idle rebalance (30-min cooldown)
+let idleRebalancePending = false; // set true after position reopen to trigger check
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
@@ -912,12 +914,14 @@ async function runLiveCycle(price: number): Promise<void> {
           ? `Rule 3 pullback re-entry: price pulled back ${pullPct}% from peak $${livePullbackPeak.toFixed(2)} (threshold: ${runtime.pullbackThresholdPct}%). Waited ${waitH}h.`
           : `Rule 3 timeout re-entry: waited ${waitH}h without sufficient pullback (${pullPct}% vs ${runtime.pullbackThresholdPct}% threshold).`;
         await liveOpenPosition(price, 'PULLBACK_REENTRY', reason);
+        idleRebalancePending = true; // trigger idle rebalance check on next cycle
       } else {
         if (price > livePullbackPeak) livePullbackPeak = price;
       }
       return;
     }
     await liveOpenPosition(price, 'POSITION_OPENED', `No open position detected. Bot is idle. Opening new position.`);
+    idleRebalancePending = true;
     return;
   }
 
@@ -1127,8 +1131,11 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Rule 8: Idle wallet rebalance — maintain target SOL/USDC split per regime
-  // Triggers once per regime change (not every cycle) to avoid repeated swaps
-  if (runtime.idleRebalanceEnabled && lastIdleRebalanceRegime !== liveRegime) {
+  // Triggers on: regime change OR after position reopen (idleRebalancePending)
+  // Cooldown: 30 minutes between rebalances to prevent spam during rapid close/reopen
+  const idleRebalanceCooldownMs = 30 * 60_000;
+  const idleRebalanceDue = lastIdleRebalanceRegime !== liveRegime || (idleRebalancePending && now - lastIdleRebalanceTime >= idleRebalanceCooldownMs);
+  if (runtime.idleRebalanceEnabled && idleRebalanceDue) {
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
       const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
@@ -1180,7 +1187,7 @@ async function runLiveCycle(price: number): Promise<void> {
           }
 
           if (swapResult) {
-            lastIdleRebalanceRegime = liveRegime;
+            lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
             await new Promise(r => setTimeout(r, 4000));
             const balAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
             const newSolPct = (Math.max(0, balAfter.sol - runtime.idleRebalanceSolKeep) * price) / idleTotal;
@@ -1197,20 +1204,20 @@ async function runLiveCycle(price: number): Promise<void> {
             });
           } else if (swapDirection) {
             // Mark as done to prevent retrying every 60s during persistent API outage
-            lastIdleRebalanceRegime = liveRegime;
+            lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
             console.log(JSON.stringify({ level: 'warn', msg: 'Idle rebalance swap failed — will retry on next regime change', timestamp: now }));
           } else {
             // Deviation exists but swap amount too small — mark as done
-            lastIdleRebalanceRegime = liveRegime;
+            lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
           }
         } else {
           // Wallet already near target — mark as done for this regime
-          lastIdleRebalanceRegime = liveRegime;
+          lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
           console.log(JSON.stringify({ level: 'info', msg: `Idle wallet already near target: SOL ${(currentSolPct * 100).toFixed(0)}% vs target ${(targetSolPct * 100).toFixed(0)}% (deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < ${(runtime.idleRebalanceDeviationPct * 100).toFixed(0)}% threshold)`, timestamp: now }));
         }
       } else {
         // Not enough idle capital to bother — mark as done
-        lastIdleRebalanceRegime = liveRegime;
+        lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
@@ -1365,6 +1372,7 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
   }
 
   await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after ${eventType}. Previous position closed due to: ${triggerReason ?? eventType}.`);
+  idleRebalancePending = true; // trigger idle rebalance check on next cycle (with cooldown)
 
   // Save position to DB immediately — prevents orphan recovery from killing
   // a legitimate position if bot crashes before the next cycle save
