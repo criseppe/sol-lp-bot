@@ -722,6 +722,37 @@ async function main() {
     console.log(JSON.stringify({ level: 'info', msg: 'telegram reporter disabled (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable)', timestamp: Date.now() }));
   }
 
+  // Analysis agent — weekly auto-run (Sunday midnight Berlin, if enabled)
+  let lastAnalysisCheck = 0;
+  setInterval(async () => {
+    const now = Date.now();
+    if (now - lastAnalysisCheck < 3600_000) return; // check once per hour
+    lastAnalysisCheck = now;
+    try {
+      const enabled = getRuleEnabled(db, 'analysisAgent');
+      if (!enabled) return;
+      const d = new Date(now);
+      const berlinHour = parseInt(d.toLocaleString('en-US', { timeZone: 'Europe/Berlin', hour: 'numeric', hour12: false }));
+      const berlinDay = d.toLocaleDateString('en-US', { timeZone: 'Europe/Berlin', weekday: 'short' });
+      if (berlinDay === 'Sun' && berlinHour === 0) {
+        // Check if already ran today
+        const { getConfig: gc } = await import('./db/sqlite.js');
+        const cfg = gc(db);
+        const lastRun = parseInt(cfg['analysisLastRunTime'] ?? '0');
+        if (now - lastRun < 86400_000) return; // already ran within 24h
+        console.log(JSON.stringify({ level: 'info', msg: 'Analysis agent: running weekly report', timestamp: now }));
+        const { execSync } = await import('child_process');
+        const output = execSync('node scripts/weekly-analysis.cjs --days=7 --telegram', { cwd: process.cwd(), timeout: 60000 }).toString();
+        const { setConfig: sc } = await import('./db/sqlite.js');
+        sc(db, 'analysisLastReport', output);
+        sc(db, 'analysisLastRunTime', String(now));
+        console.log(JSON.stringify({ level: 'info', msg: 'Analysis agent: report complete + sent to Telegram', timestamp: now }));
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'error', msg: 'Analysis agent failed', error: String(err), timestamp: now }));
+    }
+  }, 60_000);
+
   // Graceful shutdown
   process.on('SIGINT', async () => {
     console.log(JSON.stringify({ level: 'info', msg: 'Shutting down...', timestamp: Date.now() }));

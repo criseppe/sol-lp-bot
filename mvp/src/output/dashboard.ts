@@ -314,6 +314,39 @@ export function startDashboard(port: number): DashboardServer {
     res.type('html').send(renderArcadeHtml());
   });
 
+  // Analysis agent page + API
+  app.get('/analysis', (_req, res) => {
+    if (!dbRef) { res.type('html').send('<h1>DB not ready</h1>'); return; }
+    const enabled = (() => { try { const r = dbRef.prepare("SELECT enabled FROM rule_toggles WHERE rule_name = 'analysisAgent'").get() as any; return r?.enabled === 1; } catch { return false; } })();
+    const lastReport = (() => { try { const r = dbRef.prepare("SELECT value FROM config WHERE key = 'analysisLastReport'").get() as any; return r?.value ?? null; } catch { return null; } })();
+    const lastRunTime = (() => { try { const r = dbRef.prepare("SELECT value FROM config WHERE key = 'analysisLastRunTime'").get() as any; return r?.value ? parseInt(r.value) : null; } catch { return null; } })();
+    res.type('html').send(renderAnalysisHtml(enabled, lastReport, lastRunTime));
+  });
+
+  app.post('/api/analysis/toggle', (req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    const enabled = req.body?.enabled === true;
+    dbRef.prepare("INSERT INTO rule_toggles (rule_name, enabled, updated_at) VALUES ('analysisAgent', ?, ?) ON CONFLICT(rule_name) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at")
+      .run(enabled ? 1 : 0, Date.now());
+    console.log(JSON.stringify({ level: 'info', msg: 'Analysis agent ' + (enabled ? 'ENABLED' : 'DISABLED'), timestamp: Date.now() }));
+    res.json({ success: true, enabled });
+  });
+
+  app.post('/api/analysis/run', async (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const { execSync } = await import('child_process');
+      const output = execSync('node scripts/weekly-analysis.cjs --days=7', { cwd: process.cwd(), timeout: 30000 }).toString();
+      dbRef.prepare("INSERT INTO config (key, value, updated_at) VALUES ('analysisLastReport', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+        .run(output, Date.now());
+      dbRef.prepare("INSERT INTO config (key, value, updated_at) VALUES ('analysisLastRunTime', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+        .run(String(Date.now()), Date.now());
+      res.json({ success: true, report: output });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
   // Config page + API
   app.get('/config', (_req, res) => {
     res.type('html').send(renderConfigHtml());
@@ -796,8 +829,8 @@ td:last-child{color:#8b949e;font-size:11px;line-height:1.4;max-width:500px}
   .card h2{font-size:12px;margin-bottom:8px}
   .banner{padding:10px}
   .banner h1{font-size:15px}
-  .nav{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:10px}
-  .nav a{padding:8px 4px;font-size:11px;text-align:center;min-width:0}
+  .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:10px}
+  .nav a{padding:7px 3px;font-size:10px;text-align:center;min-width:0}
   .big-number .val{font-size:22px}
   .row{font-size:12px}
   .row .value{font-size:12px}
@@ -814,6 +847,7 @@ const NAV_HTML = `
   <a href="/strategy" id="nav-strategy">Strategy</a>
   <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
+  <a href="/analysis" id="nav-analysis">Analysis</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
@@ -3570,7 +3604,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 <div class="s">
 <div class="nav">
   <a href="/">WALLET</a><a href="/insights">INSIGHTS</a><a href="/config">CONFIG</a>
-  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/arcade" class="on">ARCADE</a>
+  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/analysis">ANALYSIS</a><a href="/arcade" class="on">ARCADE</a>
 </div>
 <div class="title">METAL LP</div>
 <div class="sub">MISSION: PROVIDE LIQUIDITY</div>
@@ -3871,3 +3905,133 @@ refresh(); setInterval(refresh,30000);
 </script></body></html>`;
 }
 
+// ── ANALYSIS AGENT PAGE ─────────────────────────────────────────────────
+
+function renderAnalysisHtml(enabled: boolean, lastReport: string | null, lastRunTime: number | null): string {
+  const TZ = 'Europe/Berlin';
+  const lastRunStr = lastRunTime ? new Date(lastRunTime).toLocaleString('en-US', { timeZone: TZ, dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
+
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOL/USDC LP Bot - Analysis Agent</title>
+<style>${SHARED_STYLES}
+.agent-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
+.agent-card h2{color:#a855f7;font-size:16px;margin-bottom:8px}
+.agent-card h3{color:#58a6ff;font-size:13px;margin:12px 0 6px}
+.toggle-row{display:flex;align-items:center;gap:12px;margin:12px 0}
+.toggle-btn{padding:10px 24px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer;transition:all 0.2s}
+.toggle-on{background:#238636;color:#fff}
+.toggle-off{background:#da3633;color:#fff}
+.run-btn{background:#58a6ff;color:#000;padding:10px 24px;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer}
+.run-btn:disabled{opacity:0.5;cursor:not-allowed}
+.report-box{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:16px;font-family:'SF Mono',Menlo,monospace;font-size:11px;line-height:1.6;color:#c9d1d9;white-space:pre-wrap;overflow-x:auto;max-height:600px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.how-it-works{font-size:12px;color:#8b949e;line-height:1.6}
+.how-it-works li{margin-bottom:6px}
+.status-badge{display:inline-block;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:bold}
+.badge-on{background:#23863620;color:#238636;border:1px solid #238636}
+.badge-off{background:#da363320;color:#da3633;border:1px solid #da3633}
+#run-status{font-size:12px;margin-top:8px}
+@media(max-width:700px){
+  .agent-card{padding:12px}
+  .agent-card h2{font-size:14px}
+  .report-box{font-size:10px;padding:10px;max-height:400px}
+  .toggle-btn,.run-btn{padding:10px 16px;font-size:13px}
+}
+</style></head><body>
+<div class="banner">
+  <div class="mode" style="color:#a855f7">Analysis Agent</div>
+  <h1>SOL/USDC LP Bot</h1>
+  <div style="color:#8b949e;font-size:11px">Execution pattern analysis & optimization suggestions</div>
+</div>
+${NAV_HTML}
+<script>document.getElementById('nav-analysis').classList.add('active')</script>
+
+<div class="agent-card">
+  <h2>🔬 Analysis Agent</h2>
+  <p style="font-size:12px;color:#8b949e;margin-bottom:12px">
+    Reads execution data from the last 7 days and produces optimization suggestions.
+    <b>Read-only</b> — never modifies bot state, config, or positions. Only observes and recommends.
+  </p>
+
+  <div class="toggle-row">
+    <span style="color:#8b949e;font-size:12px">Weekly Auto-Report:</span>
+    <span class="status-badge ${enabled ? 'badge-on' : 'badge-off'}" id="status-badge">${enabled ? 'ENABLED' : 'DISABLED'}</span>
+    <button class="toggle-btn ${enabled ? 'toggle-off' : 'toggle-on'}" id="toggle-btn" onclick="toggleAgent()">${enabled ? 'Disable' : 'Enable'}</button>
+  </div>
+  <div style="font-size:11px;color:#8b949e">When enabled, runs automatically every Sunday midnight (Berlin) and sends report via Telegram.</div>
+
+  <div style="margin-top:16px">
+    <button class="run-btn" id="run-btn" onclick="runNow()">▶ Run Analysis Now</button>
+    <div style="font-size:11px;color:#8b949e;margin-top:4px">Last run: ${lastRunStr}</div>
+    <div id="run-status"></div>
+  </div>
+</div>
+
+<div class="agent-card">
+  <h3>📋 How It Works</h3>
+  <ul class="how-it-works">
+    <li><b>Position Duration:</b> Tracks how long positions stay open. If most die in &lt;1 hour, the range may be too tight or proximity thresholds too aggressive.</li>
+    <li><b>Fee Rate by Regime:</b> Compares $/hr earned in RANGING vs BEARISH vs BULLISH. Identifies which regime generates the most value.</li>
+    <li><b>Peak Fee Hours:</b> Analyzes fee income by hour of day (Berlin time). Finds the best and worst hours for fee generation — useful for timing manual operations.</li>
+    <li><b>Weekday vs Weekend:</b> Compares fee rates. Weekend volume is typically 40-60% of weekday on Solana DEXes.</li>
+    <li><b>Exit Efficiency:</b> Detects "unnecessary" T1 exits where price bounced back within 30 minutes. These burn gas without preventing real IL.</li>
+    <li><b>Gas Efficiency:</b> Measures the fee-to-gas ratio. Higher is better. Below 10x means rebalancing costs are eating into profits.</li>
+    <li><b>Suggestions:</b> Based on all the above, produces specific parameter change recommendations with estimated impact.</li>
+  </ul>
+</div>
+
+<div class="agent-card">
+  <h3>📊 Latest Report</h3>
+  <div class="report-box" id="report-box">${lastReport ? lastReport.replace(/</g, '&lt;').replace(/>/g, '&gt;') : 'No report yet. Click "Run Analysis Now" to generate one.'}</div>
+</div>
+
+<script>
+function toggleAgent() {
+  var btn = document.getElementById('toggle-btn');
+  var badge = document.getElementById('status-badge');
+  var isOn = badge.classList.contains('badge-on');
+  var newState = !isOn;
+  btn.disabled = true;
+  fetch('/api/analysis/toggle', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: newState})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.success) {
+      badge.textContent = newState ? 'ENABLED' : 'DISABLED';
+      badge.className = 'status-badge ' + (newState ? 'badge-on' : 'badge-off');
+      btn.textContent = newState ? 'Disable' : 'Enable';
+      btn.className = 'toggle-btn ' + (newState ? 'toggle-off' : 'toggle-on');
+    }
+    btn.disabled = false;
+  }).catch(function() { btn.disabled = false; });
+}
+
+function runNow() {
+  var btn = document.getElementById('run-btn');
+  var status = document.getElementById('run-status');
+  var box = document.getElementById('report-box');
+  btn.disabled = true;
+  status.textContent = 'Running analysis...';
+  status.style.color = '#eab308';
+  fetch('/api/analysis/run', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.success) {
+        box.textContent = d.report;
+        status.textContent = 'Report generated at ' + new Date().toLocaleTimeString();
+        status.style.color = '#22c55e';
+      } else {
+        status.textContent = 'Error: ' + (d.error || 'unknown');
+        status.style.color = '#ef4444';
+      }
+      btn.disabled = false;
+    }).catch(function(err) {
+      status.textContent = 'Error: ' + err;
+      status.style.color = '#ef4444';
+      btn.disabled = false;
+    });
+}
+</script>
+</body></html>`;
+}
