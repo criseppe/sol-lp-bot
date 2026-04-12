@@ -767,7 +767,18 @@ export class LiveExecutor {
     // Refresh pool data after swap
     await whirlpool.refreshData();
 
-    // Quote with updated balances
+    // Cap available capital at maxDeployUsdc (same fix as openPosition)
+    if (maxDeployUsdc != null) {
+      const availValue = solAvailable * currentPrice + usdcAvailable;
+      if (availValue > maxDeployUsdc) {
+        const capRatio = maxDeployUsdc / availValue;
+        solAvailable = solAvailable * capRatio;
+        usdcAvailable = usdcAvailable * capRatio;
+        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity deploy cap: available $${availValue.toFixed(2)} capped to $${maxDeployUsdc.toFixed(2)} (${(capRatio * 100).toFixed(0)}%)`, timestamp: Date.now() }));
+      }
+    }
+
+    // Quote with capped balances
     let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
       solMint, new Decimal(solAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
