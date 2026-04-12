@@ -2337,25 +2337,55 @@ ${(() => {
 </div>
 <script>
 (function() {
-  fetch('/api/market-signals').then(r => r.json()).then(s => {
+  Promise.all([
+    fetch('/api/market-signals').then(r => r.json()),
+    fetch('/api/decisions?limit=20').then(r => r.json())
+  ]).then(([s, decisions]) => {
     const card = document.getElementById('market-signals-card');
-    if (!s || !card) { if(card) card.innerHTML = '<div style="color:#8b949e;font-size:12px">No market data available yet. Enhanced regime detection will use daily closes only.</div>'; return; }
+    if (!card) return;
+    if (!s) { card.innerHTML = '<div style="color:#8b949e;font-size:12px">No market data available yet.</div>'; return; }
     const fmt = (v, d) => v != null ? Number(v).toFixed(d) : 'n/a';
     const pct = (v) => v != null ? (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%' : 'n/a';
     const col = (v) => v == null ? '#8b949e' : v > 0 ? '#22c55e' : v < 0 ? '#ef4444' : '#c9d1d9';
     const volCol = (v, t) => v == null ? '#8b949e' : v > t ? '#ef4444' : v > t * 0.7 ? '#eab308' : '#22c55e';
     const fgCol = (v) => v == null ? '#8b949e' : v < 25 ? '#ef4444' : v < 40 ? '#eab308' : v > 75 ? '#22c55e' : v > 60 ? '#22c55e' : '#c9d1d9';
     const age = s.lastUpdated ? Math.floor((Date.now() - s.lastUpdated) / 60000) : '?';
+
+    // Extract base regime data from last REGIME_EVAL decision
+    var base = null;
+    if (decisions && Array.isArray(decisions)) {
+      var evalD = decisions.find(d => (d.decision === 'REGIME_EVAL' || d.decision === 'REGIME_CHANGE') && d.params_json);
+      if (evalD && evalD.params_json) {
+        try { base = JSON.parse(evalD.params_json); } catch(e) {}
+      }
+    }
+
+    const regimeColors = { RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7' };
+    const dirCol = base ? (base.dirRatio > 0.35 ? '#eab308' : '#22c55e') : '#8b949e';
+    const dailyVolCol = base ? (base.realisedVol > 0.08 ? '#ef4444' : base.realisedVol > 0.05 ? '#eab308' : '#22c55e') : '#8b949e';
+    const baseCol = base ? (regimeColors[base.baseRegime] || '#8b949e') : '#8b949e';
+    const finalRegime = base ? (base.overrideReason ? 'OVERRIDDEN' : base.baseRegime) : null;
+
     card.innerHTML = \`
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;font-size:12px">
-        <div><span style="color:#8b949e">Vol 1h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol1h, 0.06)}">\${fmt(s.vol1h, 4)}</span></div>
-        <div><span style="color:#8b949e">Vol 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol4h, 0.05)}">\${fmt(s.vol4h, 4)}</span></div>
-        <div><span style="color:#8b949e">SOL 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.solDelta24h)}">\${pct(s.solDelta24h)}</span></div>
-        <div><span style="color:#8b949e">BTC 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.btcDelta24h)}">\${pct(s.btcDelta24h)}</span></div>
-        <div><span style="color:#8b949e">Vol Ratio</span><br><span style="font-size:16px;font-weight:bold;color:\${s.volumeRatio4h > 3 ? '#ef4444' : s.volumeRatio4h > 2 ? '#eab308' : '#c9d1d9'}">\${s.volumeRatio4h != null ? fmt(s.volumeRatio4h, 1) + 'x' : 'building...'}</span></div>
+      <div style="font-size:11px;color:#58a6ff;font-weight:bold;margin-bottom:6px">Base Regime (Daily Closes)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;font-size:12px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #21262d">
+        <div><span style="color:#8b949e">Base Regime</span><br><span style="font-size:16px;font-weight:bold;color:\${baseCol}">\${base ? base.baseRegime : 'n/a'}</span></div>
+        <div><span style="color:#8b949e">Dir Ratio</span><br><span style="font-size:16px;font-weight:bold;color:\${dirCol}">\${base ? fmt(base.dirRatio, 4) : 'n/a'}</span><br><span style="font-size:9px;color:#555">\${base && base.dirRatio > 0.35 ? '> 0.35 → trending' : '< 0.35 → ranging'}</span></div>
+        <div><span style="color:#8b949e">Daily Vol</span><br><span style="font-size:16px;font-weight:bold;color:\${dailyVolCol}">\${base ? fmt(base.realisedVol, 4) : 'n/a'}</span><br><span style="font-size:9px;color:#555">\${base && base.realisedVol > 0.08 ? '> 0.08 → EXTREME' : 'normal'}</span></div>
+        <div><span style="color:#8b949e">Daily Closes</span><br><span style="font-size:16px;font-weight:bold;color:#c9d1d9">\${base ? base.priceCount : 'n/a'}</span><br><span style="font-size:9px;color:#555">over \${base ? base.trendThreshold : '?'} threshold</span></div>
+      </div>
+      <div style="font-size:11px;color:#58a6ff;font-weight:bold;margin-bottom:6px">Market Signals (Overrides)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;font-size:12px">
+        <div><span style="color:#8b949e">Vol 1h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol1h, 0.06)}">\${fmt(s.vol1h, 4)}</span><br><span style="font-size:9px;color:#555">\${s.vol1h > 0.06 ? '→ EXTREME' : 'calm'}</span></div>
+        <div><span style="color:#8b949e">Vol 4h</span><br><span style="font-size:16px;font-weight:bold;color:\${volCol(s.vol4h, 0.05)}">\${fmt(s.vol4h, 4)}</span><br><span style="font-size:9px;color:#555">\${s.vol4h > 0.05 ? '→ EXTREME' : 'calm'}</span></div>
+        <div><span style="color:#8b949e">SOL 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.solDelta24h)}">\${pct(s.solDelta24h)}</span><br><span style="font-size:9px;color:#555">\${s.solDelta24h && Math.abs(s.solDelta24h) > 4 ? '→ trend override' : 'no override'}</span></div>
+        <div><span style="color:#8b949e">BTC 24h</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.btcDelta24h)}">\${pct(s.btcDelta24h)}</span><br><span style="font-size:9px;color:#555">\${s.btcDelta24h && Math.abs(s.btcDelta24h) > 3 ? 'macro event' : 'no macro'}</span></div>
+        <div><span style="color:#8b949e">Vol Ratio</span><br><span style="font-size:16px;font-weight:bold;color:\${s.volumeRatio4h > 3 ? '#ef4444' : s.volumeRatio4h > 2 ? '#eab308' : '#c9d1d9'}">\${s.volumeRatio4h != null ? fmt(s.volumeRatio4h, 1) + 'x' : 'n/a'}</span><br><span style="font-size:9px;color:#555">\${s.volumeRatio4h > 3 ? 'SPIKE' : s.volumeRatio4h > 2 ? 'elevated' : 'normal'}</span></div>
         <div><span style="color:#8b949e">SOL Vol 24h</span><br><span style="font-size:16px;font-weight:bold;color:#c9d1d9">\${s.solVolume24h != null ? '$' + (s.solVolume24h / 1e6).toFixed(0) + 'M' : 'n/a'}</span></div>
         <div><span style="color:#8b949e">Fear & Greed</span><br><span style="font-size:16px;font-weight:bold;color:\${fgCol(s.fearGreedIndex)}">\${s.fearGreedIndex != null ? s.fearGreedIndex + ' (' + (s.fearGreedLabel || '') + ')' : 'n/a'}</span></div>
+        <div><span style="color:#8b949e">Confidence</span><br><span style="font-size:16px;font-weight:bold;color:\${base && base.confidence >= 3 ? '#22c55e' : base && base.confidence >= 2 ? '#eab308' : '#8b949e'}">\${base ? base.confidence + '/5' : 'n/a'}</span></div>
       </div>
+      \${base && base.overrideReason ? '<div style="margin-top:8px;padding:6px 10px;background:#ef444415;border-left:3px solid #ef4444;border-radius:0 4px 4px 0;font-size:11px;color:#ef4444"><b>Override:</b> ' + base.overrideReason + '</div>' : ''}
       <div style="margin-top:8px;font-size:10px;color:#8b949e">Updated \${age}m ago\${s.errors && s.errors.length > 0 ? ' · Errors: ' + s.errors.join(', ') : ''}</div>
       <div id="mkt-commentary" style="margin-top:12px;padding:10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:12px;line-height:1.6;color:#c9d1d9"></div>
     \`;
