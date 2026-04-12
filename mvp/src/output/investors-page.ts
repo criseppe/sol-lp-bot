@@ -131,19 +131,24 @@ function loadData() {
     }
 
     var html = '<div style="overflow-x:auto"><table>';
-    html += '<tr><th>Name</th><th style="text-align:right">Invested</th><th style="text-align:center">Date</th><th style="text-align:right">Share</th><th style="text-align:right">Return</th><th style="text-align:right">Return %</th><th></th></tr>';
+    html += '<tr><th>Name</th><th style="text-align:right">Invested</th><th style="text-align:center">Date</th><th style="text-align:right">Share</th><th style="text-align:right">Capital Avail.</th><th style="text-align:right">Return</th><th style="text-align:right">Return %</th><th></th></tr>';
 
+    var totalCapAvail = 0;
     investors.forEach(function(inv) {
       var share = totalInvested > 0 ? (inv.amount_usdc / totalInvested) : 0;
       var returnUsdc = totalFees * share;
       var returnPct = inv.amount_usdc > 0 ? (returnUsdc / inv.amount_usdc * 100) : 0;
+      var capAvail = (share * totalPortfolio) - inv.amount_usdc;
+      totalCapAvail += capAvail;
       var shareCol = share > 0.5 ? '#a855f7' : '#c9d1d9';
+      var capCol = capAvail >= 0 ? '#22c55e' : '#ef4444';
 
       html += '<tr>';
       html += '<td style="font-weight:bold">' + inv.name + '</td>';
       html += '<td style="text-align:right;color:#58a6ff">$' + fmt(inv.amount_usdc, 2) + '</td>';
       html += '<td style="text-align:center;color:#8b949e">' + inv.invest_date + '</td>';
       html += '<td style="text-align:right;color:' + shareCol + ';font-weight:bold">' + fmt(share * 100, 1) + '%</td>';
+      html += '<td style="text-align:right;color:' + capCol + ';font-weight:bold">' + (capAvail >= 0 ? '+' : '-') + '$' + fmt(Math.abs(capAvail), 2) + '</td>';
       html += '<td style="text-align:right;color:#ffd700;font-weight:bold">$' + fmt(returnUsdc, 2) + '</td>';
       html += '<td style="text-align:right;color:#22c55e">' + fmt(returnPct, 2) + '%</td>';
       html += '<td><button class="del-btn" onclick="deleteInvestor(' + inv.id + ',\\'' + inv.name.replace(/'/g, "\\\\'") + '\\')">✕</button></td>';
@@ -151,11 +156,13 @@ function loadData() {
     });
 
     // Totals row
+    var totalCapCol = totalCapAvail >= 0 ? '#22c55e' : '#ef4444';
     html += '<tr style="border-top:2px solid #30363d;font-weight:bold">';
     html += '<td>TOTAL</td>';
     html += '<td style="text-align:right;color:#58a6ff">$' + fmt(totalInvested, 2) + '</td>';
     html += '<td></td>';
     html += '<td style="text-align:right">100%</td>';
+    html += '<td style="text-align:right;color:' + totalCapCol + '">' + (totalCapAvail >= 0 ? '+' : '-') + '$' + fmt(Math.abs(totalCapAvail), 2) + '</td>';
     html += '<td style="text-align:right;color:#ffd700">$' + fmt(totalFees, 2) + '</td>';
     html += '<td style="text-align:right;color:#22c55e">' + (totalInvested > 0 ? fmt(totalFees / totalInvested * 100, 2) : '0.00') + '%</td>';
     html += '<td></td>';
