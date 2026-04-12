@@ -1823,16 +1823,27 @@ function renderInsightsHtml(data: InsightsData): string {
   }
   const totalInjected = detectedInjections.reduce((sum, inj) => sum + inj.amount, 0);
 
-  // Build adjusted values: subtract cumulative injections to show organic growth
+  // Build adjusted values: subtract cumulative injections AND SOL price impact
+  // to show pure bot performance (fees - IL - gas only).
+  // SOL impact = sum of (totalSolHoldings * priceChange) between consecutive snapshots.
   let cumInjected = 0;
+  let cumSolImpact = 0;
   const injectionMap = new Map(detectedInjections.map(inj => [inj.timestamp, inj.amount]));
   const adjustedValues: number[] = [];
   const rawValues: number[] = [];
-  for (const s of snaps) {
+  for (let i = 0; i < snaps.length; i++) {
+    const s = snaps[i];
     const raw = s.total_with_position ?? s.total_value_usdc;
     rawValues.push(raw);
     if (injectionMap.has(s.timestamp)) cumInjected += injectionMap.get(s.timestamp)!;
-    adjustedValues.push(raw - cumInjected);
+    // SOL price impact: how much the portfolio changed purely due to SOL price movement
+    if (i > 0) {
+      const prev = snaps[i - 1];
+      const totalSol = (prev.sol_balance ?? 0) + (prev.position_sol ?? 0);
+      const priceDelta = s.price - prev.price;
+      cumSolImpact += totalSol * priceDelta;
+    }
+    adjustedValues.push(raw - cumInjected - cumSolImpact);
   }
 
   let chartSvg = '<text x="200" y="40" text-anchor="middle" fill="#8b949e" font-size="12">Collecting data...</text>';
@@ -2076,19 +2087,31 @@ ${(() => {
   }).join('');
 
   // PnL line overlay
+  // Organic line (net of SOL price impact + injections) = true bot performance
+  const orgVals = pnlPoints.map(p => p.organic);
   const pnlVals = pnlPoints.map(p => p.pnl);
-  const pnlMin = Math.min(...pnlVals, 0);
-  const pnlMax = Math.max(...pnlVals, 0);
+  const allLineVals = [...orgVals, ...pnlVals];
+  const pnlMin = Math.min(...allLineVals, 0);
+  const pnlMax = Math.max(...allLineVals, 0);
   const pnlRange = pnlMax - pnlMin || 1;
+  const lineY = (val: number) => baseY - ((val - pnlMin) / pnlRange) * chartH * 0.7 - chartH * 0.05;
+
+  const organicLinePoints = pnlPoints.map((p, i) => {
+    const x = i * (barW + 8) + 50 + barW / 2;
+    return `${x},${lineY(p.organic)}`;
+  }).join(' ');
   const pnlLinePoints = pnlPoints.map((p, i) => {
     const x = i * (barW + 8) + 50 + barW / 2;
-    const y = baseY - ((p.pnl - pnlMin) / pnlRange) * chartH * 0.7 - chartH * 0.05;
-    return `${x},${y}`;
+    return `${x},${lineY(p.pnl)}`;
   }).join(' ');
+
+  const lastOrganic = pnlPoints[pnlPoints.length - 1]?.organic ?? 0;
   const lastPnl = pnlPoints[pnlPoints.length - 1]?.pnl ?? 0;
-  const pnlColor = lastPnl >= 0 ? '#22c55e' : '#ef4444';
-  const lastPnlX = (pnlPoints.length - 1) * (barW + 8) + 50 + barW / 2;
-  const lastPnlY = baseY - ((lastPnl - pnlMin) / pnlRange) * chartH * 0.7 - chartH * 0.05;
+  const organicColor = lastOrganic >= 0 ? '#22c55e' : '#ef4444';
+  const pnlColor = lastPnl >= 0 ? '#8b949e' : '#8b949e';
+  const lastX = (pnlPoints.length - 1) * (barW + 8) + 50 + barW / 2;
+  const lastOrgY = lineY(lastOrganic);
+  const lastPnlY = lineY(lastPnl);
 
   const hasInjections = dailyInjections.size > 0;
   return `<div class="card" style="margin-bottom:16px">
@@ -2097,7 +2120,8 @@ ${(() => {
     <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e80;border-radius:2px;vertical-align:middle"></span> Wallet</span>
     <span><span style="display:inline-block;width:10px;height:10px;background:#58a6ff;border-radius:2px;vertical-align:middle"></span> Position</span>
     ${hasInjections ? '<span><span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:2px;vertical-align:middle"></span> Injections</span>' : ''}
-    <span><span style="display:inline-block;width:16px;height:2px;background:${pnlColor};vertical-align:middle"></span> Portfolio Change: <b style="color:${pnlColor}">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</b></span>
+    <span><span style="display:inline-block;width:16px;height:2px;background:${organicColor};vertical-align:middle"></span> Organic: <b style="color:${organicColor}">${lastOrganic >= 0 ? '+' : ''}$${fmt(lastOrganic, 2)}</b> <span style="color:#555">(fees - IL - gas)</span></span>
+    <span><span style="display:inline-block;width:16px;height:2px;background:#8b949e;vertical-align:middle;opacity:0.4"></span> Raw: <span style="color:#8b949e">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</span></span>
   </div>
   <svg width="100%" height="170" viewBox="0 0 600 170" preserveAspectRatio="xMidYMid meet">
     <line x1="45" y1="${topPad}" x2="45" y2="${baseY}" stroke="#21262d" stroke-width="1"/>
@@ -2105,9 +2129,10 @@ ${(() => {
     <text x="5" y="${topPad + 5}" fill="#8b949e" font-size="9">$${fmt(maxVal, 0)}</text>
     <text x="5" y="${baseY}" fill="#8b949e" font-size="9">$0</text>
     ${bars}
-    <polyline points="${pnlLinePoints}" fill="none" stroke="${pnlColor}" stroke-width="2" stroke-dasharray="4,2"/>
-    <circle cx="${lastPnlX}" cy="${lastPnlY}" r="3" fill="${pnlColor}"/>
-    <text x="${lastPnlX + 6}" y="${lastPnlY + 4}" fill="${pnlColor}" font-size="9" font-weight="bold">${lastPnl >= 0 ? '+' : ''}$${fmt(lastPnl, 2)}</text>
+    <polyline points="${pnlLinePoints}" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+    <polyline points="${organicLinePoints}" fill="none" stroke="${organicColor}" stroke-width="2"/>
+    <circle cx="${lastX}" cy="${lastOrgY}" r="3" fill="${organicColor}"/>
+    <text x="${lastX + 6}" y="${lastOrgY + 4}" fill="${organicColor}" font-size="9" font-weight="bold">${lastOrganic >= 0 ? '+' : ''}$${fmt(lastOrganic, 2)}</text>
   </svg>
   <div style="overflow-x:auto;margin-top:8px">
   <table style="width:100%;border-collapse:collapse;font-size:11px">
