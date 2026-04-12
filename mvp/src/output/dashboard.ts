@@ -167,6 +167,14 @@ export function startDashboard(port: number): DashboardServer {
     console.log(JSON.stringify({ level: 'info', msg: 'dashboard auth enabled', timestamp: Date.now() }));
   }
 
+  // Prevent browser caching of HTML pages (ensures fresh content after deploys)
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
+
   let currentEvents: RebalanceEvent[] = [];
   let currentBotState: BotState = 'IDLE';
   let currentDailyPnl: DailyPnlRow[] = [];
