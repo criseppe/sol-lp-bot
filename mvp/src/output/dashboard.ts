@@ -2939,17 +2939,39 @@ signals all point to the same conclusion.</div>
     <div class="cell header" style="color:#22c55e">Bullish</div>
     <div class="cell header" style="color:#ef4444">Bearish</div>
     <div class="cell header" style="color:#a855f7">Extreme</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Range Width (R1)</div><div class="cell" style="color:#4a9eff">1.5%</div><div class="cell" style="color:#22c55e">3%</div><div class="cell" style="color:#ef4444">4%</div><div class="cell" style="color:#a855f7">6%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Range Width (R1)</div><div class="cell" style="color:#4a9eff">1.5%</div><div class="cell" style="color:#22c55e">3%</div><div class="cell" style="color:#ef4444">2.5%</div><div class="cell" style="color:#a855f7">6%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Skew down/up (R1)</div><div class="cell">30/70</div><div class="cell">20/80</div><div class="cell">40/60</div><div class="cell">50/50</div>
     <div class="cell" style="text-align:left;color:#8b949e">Downside Exit (R2)</div><div class="cell">65%</div><div class="cell">70%</div><div class="cell">55%</div><div class="cell">50%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Upside Exit (R2)</div><div class="cell">88%</div><div class="cell">92%</div><div class="cell">82%</div><div class="cell">80%</div>
     <div class="cell" style="text-align:left;color:#8b949e">SOL Re-entry (R4)</div><div class="cell">50%</div><div class="cell">50%</div><div class="cell">30%</div><div class="cell">20%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Capital Deploy (R5)</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">50%</div><div class="cell" style="color:#ef4444">25%</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Capital Deploy (R5)</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">75%</div><div class="cell" style="color:#ef4444">25%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Harvest (R6)</div><div class="cell">7d</div><div class="cell">4d</div><div class="cell">2d</div><div class="cell">1d</div>
     <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Auto Deploy (R7)</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#ef4444">Blocked</div><div class="cell" style="color:#ef4444">Blocked</div>
   </div></div>
-  <div style="font-size:11px;color:#8b949e;margin-top:4px">Ranging = tight range, max fees. Trending = wider, less risk. Extreme = widest, minimal exposure. (Rn) = which rule uses the parameter.</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">Pool fee tier: <b>0.04%</b> (Orca SOL/USDC, tick spacing 4). Fee density matters &#x2014; tighter range = more concentrated liquidity = more fees per dollar at 0.04%.</div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h2>Regime Rationale</h2>
+  <div style="font-size:12px;color:#c9d1d9;line-height:1.6">
+    <div style="margin-bottom:12px;padding:10px;background:#4a9eff10;border-left:3px solid #4a9eff;border-radius:0 6px 6px 0">
+      <b style="color:#4a9eff">RANGING</b> &#x2014; Maximize fee earnings<br>
+      Tight 1.5% range concentrates all capital into a narrow band, maximizing fee capture per dollar on a 0.04% pool. 100% capital deployed. Harvest weekly (fees accumulate slowly at 0.04%). Keep harvested SOL (no conversion needed &#x2014; price is stable). Risk: frequent OOR exits if price drifts, but close+reopen is cheap on Solana.
+    </div>
+    <div style="margin-bottom:12px;padding:10px;background:#22c55e10;border-left:3px solid #22c55e;border-radius:0 6px 6px 0">
+      <b style="color:#22c55e">BULLISH_TREND</b> &#x2014; Ride the trend, protect downside<br>
+      Wider 3% range with upward skew (20% down / 80% up) gives room for price to rise. 85% deployed &#x2014; small reserve for gas. Harvest every 4 days, convert 70% of SOL fees to USDC to lock gains as price rises. Auto-deploy enabled: idle capital gets added as price moves up within range.
+    </div>
+    <div style="margin-bottom:12px;padding:10px;background:#ef444410;border-left:3px solid #ef4444;border-radius:0 6px 6px 0">
+      <b style="color:#ef4444">BEARISH_TREND</b> &#x2014; Stay deployed, protect aggressively<br>
+      Moderate 2.5% range &#x2014; wider than RANGING for safety but not so wide that fee density collapses. 75% capital deployed (25% reserve). The real protection: harvest every 2 days + convert 100% of SOL to USDC immediately. This locks gains before price drops further and reduces SOL exposure. Auto-deploy blocked &#x2014; don't add capital into a falling market. Downward skew (40/60) gives more room below.
+    </div>
+    <div style="padding:10px;background:#a855f710;border-left:3px solid #a855f7;border-radius:0 6px 6px 0">
+      <b style="color:#a855f7">EXTREME</b> &#x2014; Survival mode<br>
+      Widest 6% range, symmetric (50/50). Only 25% capital deployed &#x2014; 75% parked as USDC. Harvest daily, convert everything to USDC. Auto-deploy blocked. This is for crisis events (crashes, liquidation cascades, >8% daily vol). Goal: stay alive, minimize losses, keep earning some fees with minimal exposure.
+    </div>
+  </div>
 </div>
 
 <!-- ── THE 7 RULES ──────────────────────────────────────────────────── -->

@@ -58,7 +58,7 @@ describe('getRegimeParams', () => {
   it('returns correct params for each regime', () => {
     expect(getRegimeParams('RANGING').rangeWidthPct).toBe(1.5);
     expect(getRegimeParams('BULLISH_TREND').rangeWidthPct).toBe(3);
-    expect(getRegimeParams('BEARISH_TREND').rangeWidthPct).toBe(4);
+    expect(getRegimeParams('BEARISH_TREND').rangeWidthPct).toBe(2.5);
     expect(getRegimeParams('EXTREME').rangeWidthPct).toBe(6);
   });
 });

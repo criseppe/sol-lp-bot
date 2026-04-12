@@ -19,13 +19,13 @@ describe('Rule 1: calcRange', () => {
     expect(range.priceUpper).toBeCloseTo(151.575, 1);
   });
 
-  it('SOL=$150, BEARISH → lower=$147.60, upper=$153.60', () => {
+  it('SOL=$150, BEARISH → lower=$148.50, upper=$152.25', () => {
     const params = REGIME_PARAMS.BEARISH_TREND;
-    // lower = 150 * (1 - 0.04 * 0.40) = 150 * 0.984 = 147.60
-    // upper = 150 * (1 + 0.04 * 0.60) = 150 * 1.024 = 153.60
+    // lower = 150 * (1 - 0.025 * 0.40) = 150 * 0.99 = 148.50
+    // upper = 150 * (1 + 0.025 * 0.60) = 150 * 1.015 = 152.25
     const range = calcRange(150, params, identity);
-    expect(range.priceLower).toBeCloseTo(147.60, 2);
-    expect(range.priceUpper).toBeCloseTo(153.60, 2);
+    expect(range.priceLower).toBeCloseTo(148.50, 2);
+    expect(range.priceUpper).toBeCloseTo(152.25, 2);
   });
 });
 
@@ -141,11 +141,11 @@ describe('Rule 4: Re-entry Split', () => {
 });
 
 describe('Rule 5: Position Sizing', () => {
-  it('$1000 capital, BEARISH (deployPct=0.50) → deploy=$500, reserve=$500', () => {
+  it('$1000 capital, BEARISH (deployPct=0.75) → deploy=$750, reserve=$250', () => {
     const params = REGIME_PARAMS.BEARISH_TREND;
     const result = getDeployAmount(1000, params);
-    expect(result.deployUsdc).toBe(500);
-    expect(result.reserveUsdc).toBe(500);
+    expect(result.deployUsdc).toBe(750);
+    expect(result.reserveUsdc).toBe(250);
   });
 
   it('$1000 capital, RANGING (deployPct=1.00) → deploy=$1000, reserve=$0', () => {
