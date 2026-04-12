@@ -284,48 +284,37 @@ export function startDashboard(port: number): DashboardServer {
     const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range FROM live_snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC').all(fetchFrom, fetchTo) as any[];
     const daySnaps = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
 
-    // Build hourly fees
-    const hours: Record<number, { first: number; last: number; inRange: number; total: number }> = {};
-    for (let h = 0; h < 24; h++) hours[h] = { first: -1, last: 0, inRange: 0, total: 0 };
+    // Build hourly fees by summing ONLY positive deltas between consecutive snapshots.
+    // This avoids counting drops from rebalances (when pending fees reset) as negative.
+    const hours: Record<number, { fees: number; inRange: number; total: number }> = {};
+    for (let h = 0; h < 24; h++) hours[h] = { fees: 0, inRange: 0, total: 0 };
 
-    daySnaps.forEach((s: any) => {
+    const feesOf = (s: any) => {
+      const p = (s.pending_fees_sol || 0) * s.price + (s.pending_fees_usdc || 0);
+      return (s.cum_fees_sol || 0) * s.price + (s.cum_fees_usdc || 0) + (p > 1000 ? 0 : p);
+    };
+
+    for (let i = 0; i < daySnaps.length; i++) {
+      const s = daySnaps[i] as any;
       const d = new Date(s.timestamp);
-      // Extract hour in Berlin timezone
       const hStr = d.toLocaleString('en-US', { timeZone: 'Europe/Berlin', hour: 'numeric', hour12: false });
       const h = parseInt(hStr) % 24;
-      const totalFees = (s.cum_fees_sol * s.price + s.cum_fees_usdc) +
-        ((s.pending_fees_sol * s.price + s.pending_fees_usdc) > 1000 ? 0 : (s.pending_fees_sol * s.price + s.pending_fees_usdc));
-      if (hours[h].first < 0) hours[h].first = totalFees;
-      hours[h].last = totalFees;
       if (s.in_range) hours[h].inRange++;
       hours[h].total++;
-    });
-
-    // Find previous day's last total for the first hour delta
-    const prevDaySnaps = allSnaps.filter((s: any) => {
-      const d = new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
-      return d < date;
-    });
-    const prevDayLastFees = prevDaySnaps.length > 0 ? (() => {
-      const last = prevDaySnaps[prevDaySnaps.length - 1] as any;
-      return (last.cum_fees_sol * last.price + last.cum_fees_usdc) +
-        ((last.pending_fees_sol * last.price + last.pending_fees_usdc) > 1000 ? 0 : (last.pending_fees_sol * last.price + last.pending_fees_usdc));
-    })() : 0;
+      // Sum positive fee deltas within the hour (skip drops from rebalances)
+      if (i > 0) {
+        const delta = feesOf(s) - feesOf(daySnaps[i - 1]);
+        if (delta > 0 && delta < 50) hours[h].fees += delta;
+      }
+    }
 
     const hourlyData: Array<{ hour: number; fees: number; cumulative: number; inRangePct: number }> = [];
-    let prevTotal = prevDayLastFees;
     let dayCum = 0;
     for (let h = 0; h < 24; h++) {
       const entry = hours[h];
-      if (entry.first < 0) {
-        hourlyData.push({ hour: h, fees: 0, cumulative: dayCum, inRangePct: 0 });
-        continue;
-      }
-      const fees = prevTotal > 0 ? Math.max(0, entry.last - prevTotal) : 0;
-      dayCum += fees;
+      dayCum += entry.fees;
       const irPct = entry.total > 0 ? (entry.inRange / entry.total * 100) : 0;
-      hourlyData.push({ hour: h, fees, cumulative: dayCum, inRangePct: irPct });
-      prevTotal = entry.last;
+      hourlyData.push({ hour: h, fees: entry.fees, cumulative: dayCum, inRangePct: irPct });
     }
 
     // Get events for this day
