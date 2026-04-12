@@ -398,6 +398,33 @@ export function startDashboard(port: number): DashboardServer {
     res.type('html').send(renderArcadeHtml());
   });
 
+  // Analytics page
+  app.get('/analytics', async (_req, res) => {
+    const { renderAnalyticsPageHtml } = await import('./analytics-page.js');
+    res.type('html').send(renderAnalyticsPageHtml());
+  });
+
+  // Analytics data API — returns all data needed for widgets
+  app.get('/api/analytics-data', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const days = parseInt((_req.query as any).days ?? '7');
+      const since = Date.now() - days * 86400000;
+
+      const snaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range, regime, position_value, sol_balance, usdc_balance, position_sol, position_usdc, total_with_position FROM live_snapshots WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
+
+      const events = dbRef.prepare('SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, sol_before, usdc_before, sol_after, usdc_after, note, regime FROM rebalance_events WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
+
+      const regimeHist = dbRef.prepare('SELECT timestamp, old_regime, new_regime, price FROM regime_history WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
+
+      const dailySummaries = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date ASC').all() as any[];
+
+      const state = dbRef.prepare('SELECT * FROM bot_state WHERE id=1').get() as any;
+
+      res.json({ snaps, events, regimeHist, dailySummaries, state, days });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+
   // Analysis agent page + API
   app.get('/analysis', (_req, res) => {
     if (!dbRef) { res.type('html').send('<h1>DB not ready</h1>'); return; }
@@ -951,7 +978,8 @@ const NAV_HTML = `
   <a href="/strategy" id="nav-strategy">Strategy</a>
   <a href="/config" id="nav-config">Config</a>
   <a href="/status" id="nav-status">Status</a>
-  <a href="/analysis" id="nav-analysis">Analysis</a>
+  <a href="/analytics" id="nav-analytics">Analytics</a>
+  <a href="/analysis" id="nav-analysis">Agent</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
@@ -4000,7 +4028,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 <div class="s">
 <div class="nav">
   <a href="/">WALLET</a><a href="/insights">INSIGHTS</a><a href="/config">CONFIG</a>
-  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/analysis">ANALYSIS</a><a href="/arcade" class="on">ARCADE</a>
+  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/analytics">ANALYTICS</a><a href="/arcade" class="on">ARCADE</a>
 </div>
 <div class="title">METAL LP</div>
 <div class="sub">MISSION: PROVIDE LIQUIDITY</div>
