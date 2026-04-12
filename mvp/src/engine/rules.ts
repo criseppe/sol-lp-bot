@@ -205,8 +205,9 @@ export function checkAutoDeploy(opts: {
     return { shouldDeploy: false, reason: 'DEPLOY_SKIPPED_DISABLED', ...base };
   }
 
-  // BR-3: Never deploy in BEARISH_TREND or EXTREME
-  if (regime === 'BEARISH_TREND' || regime === 'EXTREME') {
+  // BR-3: Block auto-deploy in EXTREME only (survival mode, 25% cap is deliberate)
+  // BEARISH is allowed — deploy cap (75%) limits exposure, protection comes from fast harvest + SOL→USDC
+  if (regime === 'EXTREME') {
     return { shouldDeploy: false, reason: `DEPLOY_SKIPPED_REGIME: ${regime} blocks additional deployment`, ...base };
   }
 

@@ -2947,7 +2947,7 @@ signals all point to the same conclusion.</div>
     <div class="cell" style="text-align:left;color:#8b949e">Capital Deploy (R5)</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">75%</div><div class="cell" style="color:#ef4444">25%</div>
     <div class="cell" style="text-align:left;color:#8b949e">Harvest (R6)</div><div class="cell">7d</div><div class="cell">4d</div><div class="cell">2d</div><div class="cell">1d</div>
     <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Auto Deploy (R7)</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#ef4444">Blocked</div><div class="cell" style="color:#ef4444">Blocked</div>
+    <div class="cell" style="text-align:left;color:#8b949e">Auto Deploy (R7)</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#ef4444">Blocked</div>
   </div></div>
   <div style="font-size:11px;color:#8b949e;margin-top:4px">Pool fee tier: <b>0.04%</b> (Orca SOL/USDC, tick spacing 4). Fee density matters &#x2014; tighter range = more concentrated liquidity = more fees per dollar at 0.04%.</div>
 </div>
@@ -2965,7 +2965,7 @@ signals all point to the same conclusion.</div>
     </div>
     <div style="margin-bottom:12px;padding:10px;background:#ef444410;border-left:3px solid #ef4444;border-radius:0 6px 6px 0">
       <b style="color:#ef4444">BEARISH_TREND</b> &#x2014; Stay deployed, protect aggressively<br>
-      Moderate 2.5% range &#x2014; wider than RANGING for safety but not so wide that fee density collapses. 75% capital deployed (25% reserve). The real protection: harvest every 2 days + convert 100% of SOL to USDC immediately. This locks gains before price drops further and reduces SOL exposure. Auto-deploy blocked &#x2014; don't add capital into a falling market. Downward skew (40/60) gives more room below.
+      Moderate 2.5% range &#x2014; wider than RANGING for safety but not so wide that fee density collapses. 75% capital deployed (25% reserve). The real protection: harvest every 2 days + convert 100% of SOL to USDC immediately. This locks gains before price drops further and reduces SOL exposure. Auto-deploy enabled &#x2014; idle capital should reach the 75% cap efficiently; the deploy cap itself limits exposure. Downward skew (40/60) gives more room below.
     </div>
     <div style="padding:10px;background:#a855f710;border-left:3px solid #a855f7;border-radius:0 6px 6px 0">
       <b style="color:#a855f7">EXTREME</b> &#x2014; Survival mode<br>
