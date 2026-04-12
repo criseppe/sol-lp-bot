@@ -45,7 +45,7 @@ export const runtime = {
   rebalanceLoopLimit: RISK.REBALANCE_LOOP_LIMIT as number,
 
   // Swap config
-  swapSlippageBps: 10,                                                    // 0.10%
+  swapSlippageBps: 6,                                                     // 0.06%
   swapBufferPct: 3,                                                       // 3% over-request
   swapProvider: 'jupiter-fallback' as 'jupiter' | 'orca' | 'jupiter-fallback',
 
