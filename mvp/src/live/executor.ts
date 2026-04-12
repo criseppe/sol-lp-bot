@@ -9,16 +9,16 @@ import {
 } from '@orca-so/whirlpools-sdk';
 import { Percentage } from '@orca-so/common-sdk';
 import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
-import BN from 'bn.js';
 import DecimalImport from 'decimal.js';
 const Decimal = DecimalImport as unknown as typeof DecimalImport.default;
 import { MINTS } from '../constants.js';
 import type { RangeBounds, Regime } from '../types.js';
+import { executeSwap, type SwapResult } from './swapper.js';
 
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
-const SLIPPAGE = Percentage.fromFraction(50, 10000); // 0.5% slippage
-const SWAP_BUFFER = 1.03;   // 3% buffer on swap amounts for slippage
+function getSlippage(): Percentage { return Percentage.fromFraction(runtime.swapSlippageBps, 10000); }
+function getSwapBuffer(): number { return 1 + runtime.swapBufferPct / 100; }
 
 // Dynamic reserves — read from runtime config (updated via /config page)
 import { runtime } from '../config.js';
@@ -108,6 +108,26 @@ export class LiveExecutor {
     this.client = buildWhirlpoolClient(this.ctx);
   }
 
+  /**
+   * Execute a swap via Jupiter (with Orca fallback).
+   * Updates cumGasLamports/txCount for Jupiter swaps.
+   */
+  private async doSwap(inputMint: string, outputMint: string, amountRaw: number, reason: string): Promise<SwapResult | null> {
+    const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
+    const result = await executeSwap(
+      this.connection,
+      this.wallet.payer,
+      { inputMint, outputMint, amountRaw, slippageBps: runtime.swapSlippageBps, reason },
+      { whirlpool, fetcher: this.client.getFetcher(), execTx: (tx) => this.execTx(tx) },
+    );
+    // Track gas for Jupiter swaps (Orca gas is tracked via execTx already)
+    if (result && result.provider === 'jupiter') {
+      this.cumGasLamports += result.feeLamports;
+      this.txCount++;
+    }
+    return result;
+  }
+
   async openPosition(
     range: RangeBounds,
     currentPrice: number,
@@ -116,34 +136,76 @@ export class LiveExecutor {
   ): Promise<LivePosition | null> {
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
 
-    // Initialize tick arrays if needed
-    const initTx = await whirlpool.initTickArrayForTicks([range.tickLower, range.tickUpper]);
-    if (initTx) {
-      console.log(JSON.stringify({ level: 'info', msg: 'initializing tick arrays', timestamp: Date.now() }));
-      await this.execTx(initTx);
+    // Initialize tick arrays if needed — retry once if it fails (429 can cause false negatives)
+    try {
+      const initTx = await whirlpool.initTickArrayForTicks([range.tickLower, range.tickUpper]);
+      if (initTx) {
+        console.log(JSON.stringify({ level: 'info', msg: 'initializing tick arrays', timestamp: Date.now() }));
+        await this.execTx(initTx);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: `Tick array init failed (may already exist): ${err instanceof Error ? err.message : String(err)}`, timestamp: Date.now() }));
     }
-
-    // Get actual balances — no swap here; auto-deploy (Rule 7) will top up later
-    const solBal = await this.getSolBalance();
-    const usdcBal = await this.getUsdcBalance();
-    const solAvailable = Math.max(0, solBal - getSolReserve());
-    const usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
 
     const usdcMint = new PublicKey(MINTS.USDC);
     const solMint = new PublicKey(MINTS.SOL);
 
+    // Get balances and compute ideal ratio for the range
+    let solBal = await this.getSolBalance();
+    let usdcBal = await this.getUsdcBalance();
+    let solAvailable = Math.max(0, solBal - getSolReserve());
+    let usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+
+    // Pre-open swap: if wallet is heavily imbalanced (one side < $5), swap to match
+    // the ideal ratio for the LP range. This prevents "no valid quote" after downside exits.
+    const ratioQuote = increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(1), range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+    );
+    const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
+    const totalValueUsdc = solAvailable * currentPrice + usdcAvailable;
+    const idealSol = totalValueUsdc / (currentPrice + usdcPer1Sol);
+    const idealUsdc = idealSol * usdcPer1Sol;
+
+    if (usdcAvailable < 5 && solAvailable > 0.1 && idealUsdc > 10) {
+      // Wallet is mostly SOL — swap some to USDC
+      const solToSwap = Math.min((idealUsdc - usdcAvailable) / currentPrice * getSwapBuffer(), solAvailable - 0.05);
+      if (solToSwap > 0.01) {
+        console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${solToSwap.toFixed(4)} SOL -> USDC (wallet imbalanced)`, timestamp: Date.now() }));
+        await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Pre-open: SOL -> USDC to enable position opening`);
+        await new Promise(r => setTimeout(r, 4000));
+        solBal = await this.getSolBalance();
+        usdcBal = await this.getUsdcBalance();
+        solAvailable = Math.max(0, solBal - getSolReserve());
+        usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+      }
+    } else if (solAvailable < 0.01 && usdcAvailable > 10 && idealSol > 0.05) {
+      // Wallet is mostly USDC — swap some to SOL
+      const usdcToSwap = Math.min((idealSol - solAvailable) * currentPrice * getSwapBuffer(), usdcAvailable - 2);
+      if (usdcToSwap > 1) {
+        console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${usdcToSwap.toFixed(2)} USDC -> SOL (wallet imbalanced)`, timestamp: Date.now() }));
+        await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL to enable position opening`);
+        await new Promise(r => setTimeout(r, 4000));
+        solBal = await this.getSolBalance();
+        usdcBal = await this.getUsdcBalance();
+        solAvailable = Math.max(0, solBal - getSolReserve());
+        usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+      }
+    }
+
     console.log(JSON.stringify({
       level: 'info',
-      msg: `Open position: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail). Deploy target: $${usdcToDeposit.toFixed(2)}. No pre-swap — auto-deploy will top up.`,
+      msg: `Open position: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail). Deploy target: $${usdcToDeposit.toFixed(2)}.`,
       timestamp: Date.now(),
     }));
 
-    // Quote with the constraining token — deposit what we can without swapping
-    // Try SOL first, then USDC. The position opens with partial capital;
-    // Rule 7 auto-deploy will add the remaining idle funds within 5 minutes.
-    let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(solAvailable),
-      range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+    // Quote with the constraining token — deposit what we can
+    // Auto-deploy (Rule 7) will add remaining idle funds within minutes.
+    // Reserve 0.02 SOL extra for position account rent + TX fees
+    const solForQuote = Math.max(0, solAvailable - 0.02);
+    let quote = solForQuote > 0.01 ? increaseLiquidityQuoteByInputToken(
+      solMint, new Decimal(solForQuote),
+      range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
     let quotedBy = 'SOL';
 
@@ -153,7 +215,7 @@ export class LiveExecutor {
         // SOL quote needs more USDC than available — try USDC quote instead
         quote = usdcAvailable > 0.5 ? increaseLiquidityQuoteByInputToken(
           usdcMint, new Decimal(usdcAvailable),
-          range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+          range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
         ) : null;
         quotedBy = 'USDC';
         if (quote) {
@@ -165,7 +227,7 @@ export class LiveExecutor {
       // No SOL available — try USDC-only quote
       quote = increaseLiquidityQuoteByInputToken(
         usdcMint, new Decimal(usdcAvailable),
-        range.tickLower, range.tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
       quotedBy = 'USDC';
       if (quote) {
@@ -287,7 +349,7 @@ export class LiveExecutor {
 
     const txBuilders = await whirlpool.closePosition(
       this.currentPosition.positionAddress,
-      SLIPPAGE,
+      getSlippage(),
       this.wallet.publicKey,
       this.wallet.publicKey,
       this.wallet.publicKey,
@@ -364,24 +426,23 @@ export class LiveExecutor {
     if (solToSwap < 0.0005) return null; // dust threshold
 
     try {
-      const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
-      const solMint = new PublicKey(MINTS.SOL);
-      const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
-      const swapQuote = await swapQuoteByInputToken(
-        whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
-        SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
-      );
       const solBefore = await this.getSolBalance();
       const usdcBefore = await this.getUsdcBalance();
-      const swapTx = await whirlpool.swap(swapQuote);
-      await this.execTx(swapTx);
-      await new Promise(r => setTimeout(r, 1500));
+      const swapResult = await this.doSwap(
+        MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
+        `Harvest SOL→USDC conversion: ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.`,
+      );
+      if (!swapResult) {
+        console.log(JSON.stringify({ level: 'warn', msg: 'Harvest SOL conversion: swap failed (all providers)', timestamp: Date.now() }));
+        return null;
+      }
+      await new Promise(r => setTimeout(r, 4000));
       const solAfter = await this.getSolBalance();
       const usdcAfter = await this.getUsdcBalance();
       const solSwapped = solBefore - solAfter;
       const usdcReceived = usdcAfter - usdcBefore;
-      console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion: ${solSwapped.toFixed(6)} SOL → ${usdcReceived.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of harvested)`, timestamp: Date.now() }));
-      if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSwapped, toAmount: usdcReceived, reason: `Harvest SOL→USDC conversion: ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.` });
+      console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion (${swapResult.provider}): ${solSwapped.toFixed(6)} SOL → ${usdcReceived.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of harvested)`, timestamp: Date.now() }));
+      if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSwapped, toAmount: usdcReceived, reason: `Harvest SOL→USDC conversion (${swapResult.provider}): ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.` });
       return { solSwapped, usdcReceived };
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `Harvest SOL conversion failed: ${String(err)}`, timestamp: Date.now() }));
@@ -576,7 +637,7 @@ export class LiveExecutor {
     const { tickLower, tickUpper } = this.currentPosition;
 
     const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(1), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
@@ -620,7 +681,7 @@ export class LiveExecutor {
 
     // Calculate ideal ratio (same logic as openPosition), capped at maxDeployUsdc if provided
     const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(1), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
@@ -634,19 +695,13 @@ export class LiveExecutor {
 
     // Swap to match ideal ratio
     if (solDeficit > 0.01) {
-      const usdcToSwap = Math.min(solDeficit * currentPrice * SWAP_BUFFER, usdcAvailable - 2);
+      const usdcToSwap = Math.min(solDeficit * currentPrice * getSwapBuffer(), usdcAvailable - 2);
       if (usdcToSwap > 1) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${usdcToSwap.toFixed(2)} USDC -> SOL`, timestamp: Date.now() }));
-        const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
-        const swapQuote = await swapQuoteByInputToken(
-          whirlpool, usdcMint, new BN(Math.floor(usdcToSwap * 1e6)),
-          SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
-        );
         const solBeforeSwap = solBal;
         const usdcBeforeSwap = usdcBal;
-        const swapTx = await whirlpool.swap(swapQuote);
-        await this.execTx(swapTx);
-        await new Promise(r => setTimeout(r, 2000));
+        await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Add liquidity: USDC -> SOL to match position ratio`);
+        await new Promise(r => setTimeout(r, 4000));
         solBal = await this.getSolBalance();
         usdcBal = await this.getUsdcBalance();
         solAvailable = Math.max(0, solBal - solReserve);
@@ -656,19 +711,13 @@ export class LiveExecutor {
         if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Add liquidity: swapped ${usdcSpent.toFixed(2)} USDC -> ${solReceived.toFixed(4)} SOL to match position ratio` });
       }
     } else if (usdcDeficit > 1) {
-      const solToSwap = Math.min(usdcDeficit / currentPrice * SWAP_BUFFER, solAvailable - 0.02);
+      const solToSwap = Math.min(usdcDeficit / currentPrice * getSwapBuffer(), solAvailable - 0.02);
       if (solToSwap > 0.005) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${solToSwap.toFixed(4)} SOL -> USDC`, timestamp: Date.now() }));
-        const { swapQuoteByInputToken } = await import('@orca-so/whirlpools-sdk');
-        const swapQuote = await swapQuoteByInputToken(
-          whirlpool, solMint, new BN(Math.floor(solToSwap * 1e9)),
-          SLIPPAGE, ORCA_WHIRLPOOL_PROGRAM_ID, this.client.getFetcher(),
-        );
         const solBeforeSwap = solBal;
         const usdcBeforeSwap = usdcBal;
-        const swapTx = await whirlpool.swap(swapQuote);
-        await this.execTx(swapTx);
-        await new Promise(r => setTimeout(r, 2000));
+        await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Add liquidity: SOL -> USDC to match position ratio`);
+        await new Promise(r => setTimeout(r, 4000));
         solBal = await this.getSolBalance();
         usdcBal = await this.getUsdcBalance();
         solAvailable = Math.max(0, solBal - solReserve);
@@ -684,19 +733,19 @@ export class LiveExecutor {
 
     // Quote with updated balances
     let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(solAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(solAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
 
     if (quote) {
       const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
       if (usdcNeeded > usdcAvailable) {
         quote = increaseLiquidityQuoteByInputToken(
-          usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+          usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
         );
       }
     } else if (usdcAvailable > 0.5) {
       quote = increaseLiquidityQuoteByInputToken(
-        usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, SLIPPAGE, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
     }
 
@@ -747,7 +796,7 @@ export class LiveExecutor {
   }
 
   private async getSolBalance(): Promise<number> {
-    const lamports = await this.connection.getBalance(this.wallet.publicKey);
+    const lamports = await this.connection.getBalance(this.wallet.publicKey, 'confirmed');
     return lamports / 1_000_000_000;
   }
 
@@ -755,7 +804,7 @@ export class LiveExecutor {
     try {
       const usdcMint = new PublicKey(MINTS.USDC);
       const ata = await getAssociatedTokenAddress(usdcMint, this.wallet.publicKey);
-      const account = await getAccount(this.connection, ata);
+      const account = await getAccount(this.connection, ata, 'confirmed');
       return Number(account.amount) / 1_000_000;
     } catch {
       return 0;

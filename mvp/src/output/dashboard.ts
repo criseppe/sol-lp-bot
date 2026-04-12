@@ -8,6 +8,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
 
+const TZ = 'Europe/Rome';
+
 interface OnChainTx {
   signature: string;
   time: string;
@@ -27,7 +29,7 @@ async function fetchRecentTransactions(rpcUrl: string, walletAddress: string, li
       const tx = await conn.getTransaction(sig.signature, { maxSupportedTransactionVersion: 0 });
       txs.push({
         signature: sig.signature,
-        time: new Date((sig.blockTime ?? 0) * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+        time: new Date((sig.blockTime ?? 0) * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: TZ }),
         fee: tx?.meta?.fee ?? 0,
         feeSol: (tx?.meta?.fee ?? 0) / 1e9,
         status: tx?.meta?.err ? 'FAILED' : 'OK',
@@ -83,6 +85,7 @@ export interface LiveData {
   cumHarvestedFeesUsdc: number;
   totalFeesUsdc: number;
   entryPrice: number | null;
+  entryTime: number | null;
   entrySol: number | null;
   entryUsdc: number | null;
   ilUsdc: number;
@@ -265,7 +268,7 @@ export function startDashboard(port: number): DashboardServer {
     const regimeEvals = allDecisions.filter(d => d.decision === 'REGIME_EVAL' || d.decision === 'REGIME_CHANGE').slice(0, 10);
     const decisions = allDecisions.filter(d => d.decision !== 'REGIME_EVAL').slice(0, 10);
     const regimeHist = getRegimeHistory(dbRef, 20);
-    const events = dbGetRebalanceEvents(dbRef, 30);
+    const events = dbGetRebalanceEvents(dbRef, 100);
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const rpcUrl = process.env.RPC_URL ?? '';
     const walletAddr = currentLive?.walletAddress ?? '';
@@ -466,7 +469,7 @@ export function startDashboard(port: number): DashboardServer {
       if (poolStats) {
         const ps = poolStats;
         const ok = 'ok' as const;
-        checks.push({ name: 'Orca API', description: 'Pool stats API connection', status: ok, detail: `Last fetched: ${new Date(ps.lastFetched).toLocaleTimeString('en-US', { hour12: false })}`, lastChecked: now });
+        checks.push({ name: 'Orca API', description: 'Pool stats API connection', status: ok, detail: `Last fetched: ${new Date(ps.lastFetched).toLocaleTimeString('en-US', { hour12: false, timeZone: TZ })}`, lastChecked: now });
         checks.push({ name: 'Pool TVL', description: 'Total value locked in pool', status: ps.tvlUsdc > 0 ? ok : 'error', detail: `$${fmt(ps.tvlUsdc, 0)}`, lastChecked: now });
         checks.push({ name: 'Pool Volume (24h)', description: 'Trading volume last 24 hours', status: ok, detail: `$${fmt(ps.volume24h, 0)} | 7d: $${fmt(ps.volume7d, 0)} | 30d: $${fmt(ps.volume30d, 0)}`, lastChecked: now });
         checks.push({ name: 'Pool Fees (24h)', description: 'Fees generated last 24 hours', status: ok, detail: `$${fmt(ps.fees24h)} | 7d: $${fmt(ps.fees7d)} | 30d: $${fmt(ps.fees30d)}`, lastChecked: now });
@@ -819,7 +822,7 @@ function renderPaperHtml(data: {
   const uptimeStr = uptimeH > 0 ? `${uptimeH}h ${uptimeMin % 60}m` : `${uptimeMin}m`;
 
   const eventRows = data.recentEvents.map(e => {
-    const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false });
+    const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, timeZone: TZ });
     return `<tr><td>${t}</td><td>${e.eventType}</td><td>$${fmt(e.price)}</td><td>${e.regime}</td><td>${e.note || ''}</td></tr>`;
   }).join('');
 
@@ -1002,9 +1005,9 @@ ${pool ? `<div class="card" style="margin-top:12px">
     const cursorPos = Math.max(0, Math.min(100, ((live.solPrice - r.lower) / rangeWidth) * 100));
     const entryPos = live.entryPrice ? Math.max(0, Math.min(100, ((live.entryPrice - r.lower) / rangeWidth) * 100)) : null;
 
-    // Proximity thresholds for current regime
-    const regimeKey = live.regime as keyof typeof REGIME_PARAMS;
-    const params = REGIME_PARAMS[regimeKey] ?? REGIME_PARAMS.RANGING;
+    // Proximity thresholds for current regime (use runtime config, not hardcoded constants)
+    const regimeKey = live.regime ?? 'RANGING';
+    const params = runtime.regimeParams[regimeKey] ?? runtime.regimeParams.RANGING;
     // Downside threshold: triggers when price drops to centre - threshold * halfWidth
     const downsidePrice = centre - params.proxThresholdLower * halfWidth;
     const downsidePos = Math.max(0, Math.min(100, ((downsidePrice - r.lower) / rangeWidth) * 100));
@@ -1062,14 +1065,28 @@ ${pool ? `<div class="card" style="margin-top:12px">
             <td style="padding:6px 8px;color:#8b949e">At entry</td>
             <td style="padding:6px 8px;color:#a855f7">${fmt(live.entrySol ?? 0, 4)} SOL + ${fmt(live.entryUsdc ?? 0)} USDC</td>
           </tr>
+          ${live.entryTime ? (() => {
+            const ageMs = Date.now() - live.entryTime;
+            const ageMin = Math.floor(ageMs / 60_000);
+            const ageH = Math.floor(ageMin / 60);
+            const ageStr = ageH > 0 ? `${ageH}h ${ageMin % 60}m` : `${ageMin}m`;
+            const inRange = live.solPrice >= r.lower && live.solPrice <= r.upper;
+            const inRangeCol = inRange ? '#22c55e' : '#ef4444';
+            return `<tr style="border-bottom:1px solid #21262d">
+              <td style="padding:6px 8px;color:#8b949e">In Range</td>
+              <td style="padding:6px 8px"><span style="color:${inRangeCol};font-weight:bold">${inRange ? 'YES' : 'NO'}</span></td>
+              <td style="padding:6px 8px;color:#8b949e">Age</td>
+              <td style="padding:6px 8px;color:#c9d1d9">${ageStr}</td>
+            </tr>`;
+          })() : ''}
         </tbody>
       </table>`;
   }
 
   // Events — each event is a full card with description
   const eventCards = liveEvents.map(e => {
-    const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false });
-    const d = new Date(e.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const t = new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, timeZone: TZ });
+    const d = new Date(e.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: TZ });
     const typeColors: Record<string, string> = {
       POSITION_OPENED: '#22c55e', POSITION_CLOSED: '#ef4444',
       T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
@@ -1663,8 +1680,8 @@ function executeStop() {
 // ── Insights page ─────────────────────────────────────────────────────────
 
 interface InsightsData {
-  snapshots: Array<{ timestamp: number; price: number; total_value_usdc: number; pending_fees_sol: number; pending_fees_usdc: number; cum_fees_sol: number; cum_fees_usdc: number; il_usdc: number; in_range: number; regime: string }>;
-  snapshots7d: Array<{ timestamp: number; price: number; total_value_usdc: number; total_with_position: number; position_value: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number }>;
+  snapshots: Array<{ timestamp: number; price: number; total_value_usdc: number; pending_fees_sol: number; pending_fees_usdc: number; cum_fees_sol: number; cum_fees_usdc: number; il_usdc: number; in_range: number; regime: string; sol_balance: number; usdc_balance: number; position_mint: string | null; position_sol: number; position_usdc: number; position_value: number; total_with_position: number }>;
+  snapshots7d: Array<{ timestamp: number; price: number; total_value_usdc: number; total_with_position: number; position_value: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number; sol_balance: number; usdc_balance: number; position_sol: number; position_usdc: number }>;
   inRangePct1h: number;
   inRangePct24h: number;
   inRangePctAll: number;
@@ -1679,7 +1696,7 @@ interface InsightsData {
 function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: number; cum_fees_sol: number; cum_fees_usdc: number; pending_fees_sol: number; pending_fees_usdc: number }>): string {
   const feeDailyMap = new Map<string, { totalFeesUsdc: number }>();
   snapshots7d.forEach(s => {
-    const date = new Date(s.timestamp).toISOString().slice(0, 10);
+    const date = new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
     const cumFeesUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
     // Sanity check: pending fees > $1000 is overflow (u128 wrapping artifact), ignore
     const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
@@ -1691,14 +1708,12 @@ function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: numb
   if (feeDays.length < 1) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">Collecting data...</div></div>';
 
   const dailyFees: Array<{ date: string; fees: number }> = [];
-  if (feeDays.length === 1) {
-    // Only 1 day: show cumulative total as single bar
-    dailyFees.push({ date: feeDays[0][0], fees: Math.max(0, feeDays[0][1].totalFeesUsdc) });
-  } else {
-    for (let i = 1; i < feeDays.length; i++) {
-      const delta = feeDays[i][1].totalFeesUsdc - feeDays[i - 1][1].totalFeesUsdc;
-      dailyFees.push({ date: feeDays[i][0], fees: Math.max(0, delta) });
-    }
+  // First day: show its cumulative total as earned that day
+  dailyFees.push({ date: feeDays[0][0], fees: Math.max(0, feeDays[0][1].totalFeesUsdc) });
+  // Subsequent days: delta from previous day
+  for (let i = 1; i < feeDays.length; i++) {
+    const delta = feeDays[i][1].totalFeesUsdc - feeDays[i - 1][1].totalFeesUsdc;
+    dailyFees.push({ date: feeDays[i][0], fees: Math.max(0, delta) });
   }
 
   if (dailyFees.length === 0 || dailyFees.every(d => d.fees === 0)) return '<div class="card" style="margin-bottom:16px"><h2>Total Fees Earned Per Day</h2><div style="color:#8b949e;text-align:center;padding:20px">No fee data yet...</div></div>';
@@ -1716,7 +1731,7 @@ function buildDailyFeesChart(snapshots7d: Array<{ timestamp: number; price: numb
     const barH = Math.max(2, (d.fees / maxFee) * chartH * 0.85);
     const y = baseY - barH;
     const dayLabel = d.date.slice(5);
-    const dayName = new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+    const dayName = new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', timeZone: TZ });
     const feeLabel = d.fees < 0.01 ? d.fees.toFixed(4) : fmt(d.fees, 2);
     return `
       <rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="#22c55e" rx="2"/>
@@ -1766,46 +1781,66 @@ function renderInsightsHtml(data: InsightsData): string {
   const uptimeStr = uptimeH > 0 ? `${uptimeH}h ${uptimeMin % 60}m` : `${uptimeMin}m`;
 
   const snaps = data.snapshots;
-  // Detect capital injections from snapshot jumps (covers both LIQUIDITY_ADDED and wallet deposits)
-  // An injection is a jump where wallet balance increases significantly between consecutive snapshots
-  // that can't be explained by price movement alone (price would need to change >50% in one cycle)
+  // Detect capital injections: compare total tokens (wallet + position) between snapshots,
+  // valued at the SAME price to eliminate price movement effects. Any increase in token
+  // quantity = external deposit (swaps/rebalances just move tokens, don't create new ones).
   interface Injection { timestamp: number; amount: number; price: number }
   const detectedInjections: Injection[] = [];
   for (let i = 1; i < snaps.length; i++) {
     const prev = snaps[i - 1];
     const curr = snaps[i];
-    const prevTotal = (prev as any).total_with_position ?? prev.total_value_usdc;
-    const currTotal = (curr as any).total_with_position ?? curr.total_value_usdc;
-    const jump = currTotal - prevTotal;
-    // If total jumped by more than 5% of previous value in a single cycle, it's likely an injection
-    // (SOL price can't move 5%+ in 30 seconds under normal conditions)
-    if (jump > Math.max(5, prevTotal * 0.05)) {
-      detectedInjections.push({ timestamp: curr.timestamp, amount: jump, price: curr.price });
+    const p = curr.price; // value both at same price
+    const prevValue = (prev.sol_balance + prev.position_sol) * p + prev.usdc_balance + prev.position_usdc;
+    const currValue = (curr.sol_balance + curr.position_sol) * p + curr.usdc_balance + curr.position_usdc;
+    const increase = currValue - prevValue;
+    if (increase > 20) {
+      detectedInjections.push({ timestamp: curr.timestamp, amount: increase, price: p });
     }
   }
-  // Also include LIQUIDITY_ADDED events not captured by snapshot jumps (e.g. if position value stayed flat)
-  const liqEvents = data.events.filter(e => e.eventType === 'LIQUIDITY_ADDED');
   const totalInjected = detectedInjections.reduce((sum, inj) => sum + inj.amount, 0);
+
+  // Build adjusted values: subtract cumulative injections to show organic growth
+  let cumInjected = 0;
+  const injectionMap = new Map(detectedInjections.map(inj => [inj.timestamp, inj.amount]));
+  const adjustedValues: number[] = [];
+  const rawValues: number[] = [];
+  for (const s of snaps) {
+    const raw = s.total_with_position ?? s.total_value_usdc;
+    rawValues.push(raw);
+    if (injectionMap.has(s.timestamp)) cumInjected += injectionMap.get(s.timestamp)!;
+    adjustedValues.push(raw - cumInjected);
+  }
 
   let chartSvg = '<text x="200" y="40" text-anchor="middle" fill="#8b949e" font-size="12">Collecting data...</text>';
   if (snaps.length > 2) {
-    const values = snaps.map(s => (s as any).total_with_position ?? s.total_value_usdc);
-    const minV = Math.min(...values);
-    const maxV = Math.max(...values);
+    // Use adjusted values (organic growth) for the chart line
+    const values = adjustedValues;
+    const allVals = [...rawValues, ...adjustedValues];
+    const minV = Math.min(...allVals);
+    const maxV = Math.max(...allVals);
     const range = maxV - minV || 1;
     const w = 580;
     const h = 80;
 
+    // Organic growth line (adjusted)
     const points = values.map((v, i) => {
       const x = (i / (values.length - 1)) * w + 10;
       const y = h - ((v - minV) / range) * (h - 10) + 5;
       return `${x},${y}`;
     }).join(' ');
 
-    const firstTime = new Date(snaps[0].timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-    const lastTime = new Date(snaps[snaps.length - 1].timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+    // Raw portfolio line (faded, includes injections)
+    const rawPoints = rawValues.map((v, i) => {
+      const x = (i / (rawValues.length - 1)) * w + 10;
+      const y = h - ((v - minV) / range) * (h - 10) + 5;
+      return `${x},${y}`;
+    }).join(' ');
+
+    const firstTime = new Date(snaps[0].timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: TZ });
+    const lastTime = new Date(snaps[snaps.length - 1].timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', timeZone: TZ });
     const lastVal = values[values.length - 1];
     const firstVal = values[0];
+    const lastRaw = rawValues[rawValues.length - 1];
     const lineColor = lastVal >= firstVal ? '#22c55e' : '#ef4444';
     const changePct = firstVal > 0 ? ((lastVal - firstVal) / firstVal * 100) : 0;
 
@@ -1822,6 +1857,7 @@ function renderInsightsHtml(data: InsightsData): string {
       }).join('');
 
     chartSvg = `
+      ${totalInjected > 0 ? `<polyline points="${rawPoints}" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="2,2" opacity="0.4"/>` : ''}
       <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="2"/>
       ${injectionMarkers}
       <text x="10" y="98" fill="#8b949e" font-size="9">${firstTime}</text>
@@ -1829,7 +1865,8 @@ function renderInsightsHtml(data: InsightsData): string {
       <text x="10" y="12" fill="#8b949e" font-size="9">$${fmt(maxV)}</text>
       <text x="10" y="${h}" fill="#8b949e" font-size="9">$${fmt(minV)}</text>
       <circle cx="${w + 10}" cy="${h - ((lastVal - minV) / range) * (h - 10) + 5}" r="3" fill="${lineColor}"/>
-      <text x="${w - 80}" y="12" fill="${lineColor}" font-size="10" font-weight="bold">$${fmt(lastVal)} (${changePct >= 0 ? '+' : ''}${fmt(changePct, 1)}%)</text>`;
+      <text x="${w - 80}" y="12" fill="${lineColor}" font-size="10" font-weight="bold">$${fmt(lastVal)} (${changePct >= 0 ? '+' : ''}${fmt(changePct, 1)}%)</text>
+      ${totalInjected > 0 ? `<text x="${w}" y="12" text-anchor="end" fill="#8b949e" font-size="8">total: $${fmt(lastRaw)}</text>` : ''}`;
   }
 
   function gauge(pct: number, label: string): string {
@@ -1841,7 +1878,7 @@ function renderInsightsHtml(data: InsightsData): string {
   }
 
   const regimeCards = data.regimeHist.map(r => {
-    const t = new Date(r.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    const t = new Date(r.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ });
     const regimeColours: Record<string, string> = { RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7' };
     const oldCol = regimeColours[r.old_regime] || '#888';
     const newCol = regimeColours[r.new_regime] || '#888';
@@ -1860,7 +1897,7 @@ function renderInsightsHtml(data: InsightsData): string {
   }).join('') || '<div style="color:#8b949e;text-align:center;padding:16px">No regime changes yet</div>';
 
   const decisionCards = data.decisions.map(d => {
-    const t = new Date(d.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    const t = new Date(d.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: TZ });
     const decColours: Record<string, string> = {
       HOLD: '#8b949e', T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
       OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308', PULLBACK_REENTRY: '#22c55e',
@@ -1906,27 +1943,31 @@ ${NAV_HTML}
 
 ${(() => {
   // Group 7d snapshots by date, take last snapshot of each day
-  const dailyMap = new Map<string, { total: number; wallet: number; position: number }>();
+  const dailyMap = new Map<string, { total: number; wallet: number; position: number; solPrice: number; totalSol: number }>();
   data.snapshots7d.forEach(s => {
-    const date = new Date(s.timestamp).toISOString().slice(0, 10);
+    const date = new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
     const total = (s as any).total_with_position ?? s.total_value_usdc;
     const position = (s as any).position_value ?? 0;
-    dailyMap.set(date, { total, wallet: s.total_value_usdc, position });
+    const totalSol = (s.sol_balance ?? 0) + (s.position_sol ?? 0);
+    dailyMap.set(date, { total, wallet: s.total_value_usdc, position, solPrice: s.price, totalSol });
   });
   const days = Array.from(dailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-7);
 
-  // Detect capital injections from 7d snapshot jumps (same logic as 24h chart)
+  // Detect capital injections from 7d snapshots: compare total portfolio value
+  // between consecutive snapshots and flag increases beyond what price movement explains.
   const dailyInjections = new Map<string, number>();
   const allSnaps7d = data.snapshots7d;
   for (let i = 1; i < allSnaps7d.length; i++) {
     const prev = allSnaps7d[i - 1];
     const curr = allSnaps7d[i];
-    const prevTotal = (prev as any).total_with_position ?? prev.total_value_usdc;
-    const currTotal = (curr as any).total_with_position ?? curr.total_value_usdc;
-    const jump = currTotal - prevTotal;
-    if (jump > Math.max(5, prevTotal * 0.05)) {
-      const date = new Date(curr.timestamp).toISOString().slice(0, 10);
-      dailyInjections.set(date, (dailyInjections.get(date) ?? 0) + jump);
+    const prevTotalSol = (prev.sol_balance ?? 0) + (prev.position_sol ?? 0);
+    // Value previous tokens at current price (removes price movement effect)
+    const prevTotalValue = prevTotalSol * curr.price + (prev.usdc_balance ?? 0) + (prev.position_usdc ?? 0);
+    const currTotalValue = ((curr.sol_balance ?? 0) + (curr.position_sol ?? 0)) * curr.price + (curr.usdc_balance ?? 0) + (curr.position_usdc ?? 0);
+    const unexplained = currTotalValue - prevTotalValue;
+    if (unexplained > 20) {
+      const date = new Date(curr.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
+      dailyInjections.set(date, (dailyInjections.get(date) ?? 0) + unexplained);
     }
   }
 
@@ -1935,21 +1976,45 @@ ${(() => {
   // Also get cumulative fees per day for PnL line
   const feeDailyMap2 = new Map<string, number>();
   data.snapshots7d.forEach(s => {
-    const date = new Date(s.timestamp).toISOString().slice(0, 10);
+    const date = new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
     const cumFeesUsdc = (s.cum_fees_sol ?? 0) * s.price + (s.cum_fees_usdc ?? 0);
     const rawPending = (s.pending_fees_sol ?? 0) * s.price + (s.pending_fees_usdc ?? 0);
     const pendingFeesUsdc = rawPending > 1000 ? 0 : rawPending;
     feeDailyMap2.set(date, cumFeesUsdc + pendingFeesUsdc);
   });
 
-  // Compute net PnL per day: total_value - cumulative_injections - initial_value
-  let cumInjected = 0;
-  const initialValue = days[0][1].total;
-  const pnlPoints: Array<{ date: string; pnl: number }> = [];
-  days.forEach(([date, val]) => {
-    cumInjected += dailyInjections.get(date) ?? 0;
-    const pnl = val.total - initialValue - cumInjected;
-    pnlPoints.push({ date, pnl });
+  // Compute per-day SOL impact from snapshots: sum micro-impacts per snapshot pair
+  // solImpact += currentSolHoldings * (price[i] - price[i-1])
+  // This weights each price move by the actual SOL held at that moment.
+  const dailySolImpact = new Map<string, number>();
+  for (let i = 1; i < allSnaps7d.length; i++) {
+    const prev = allSnaps7d[i - 1];
+    const curr = allSnaps7d[i];
+    const date = new Date(curr.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
+    const prevDate = new Date(prev.timestamp).toLocaleDateString('en-CA', { timeZone: TZ });
+    // Only count intra-day price moves (skip cross-day boundary)
+    if (date !== prevDate) continue;
+    const solHeld = (prev.sol_balance ?? 0) + (prev.position_sol ?? 0);
+    const priceDelta = curr.price - prev.price;
+    dailySolImpact.set(date, (dailySolImpact.get(date) ?? 0) + solHeld * priceDelta);
+  }
+
+  // Compute per-day: portfolio change, SOL price impact, organic growth
+  const pnlPoints: Array<{ date: string; pnl: number; solImpact: number; organic: number }> = [];
+  days.forEach(([date, val], i) => {
+    const injToday = dailyInjections.get(date) ?? 0;
+    const solImpact = dailySolImpact.get(date) ?? 0;
+    if (i === 0) {
+      // First day: change = closing value - injections (no previous day to compare)
+      const change = val.total - injToday;
+      const organic = change - solImpact;
+      pnlPoints.push({ date, pnl: change, solImpact, organic });
+    } else {
+      const prev = days[i - 1][1];
+      const change = val.total - prev.total - injToday;
+      const organic = change - solImpact;
+      pnlPoints.push({ date, pnl: change, solImpact, organic });
+    }
   });
 
   // Each bar = wallet + position + injections stacked
@@ -1974,7 +2039,7 @@ ${(() => {
     const walH = fullH - posH - injH;
 
     const dayLabel = date.slice(5);
-    const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+    const dayName = new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', timeZone: TZ });
 
 
     return `
@@ -2028,18 +2093,29 @@ ${(() => {
       <th style="text-align:right;padding:6px 8px;color:#58a6ff">Position</th>
       <th style="text-align:right;padding:6px 8px;color:#a855f7">Injected</th>
       <th style="text-align:right;padding:6px 8px;color:#c9d1d9">Total</th>
-      <th style="text-align:right;padding:6px 8px;color:#eab308">Portfolio Change</th>
+      <th style="text-align:right;padding:6px 8px;color:#8b949e">SOL Price</th>
+      <th style="text-align:right;padding:6px 8px;color:#f97316">SOL Impact</th>
+      <th style="text-align:right;padding:6px 8px;color:#22c55e">Organic</th>
+      <th style="text-align:right;padding:6px 8px;color:#eab308">Change</th>
     </tr>
     ${days.map(([date, val], i) => {
       const inj = dailyInjections.get(date) ?? 0;
-      const pnl = pnlPoints[i]?.pnl ?? 0;
+      const p = pnlPoints[i];
+      const pnl = p?.pnl ?? 0;
+      const solImpact = p?.solImpact ?? 0;
+      const organic = p?.organic ?? 0;
       const pnlCol = pnl >= 0 ? '#22c55e' : '#ef4444';
+      const solCol = solImpact >= 0 ? '#22c55e' : '#ef4444';
+      const orgCol = organic >= 0 ? '#22c55e' : '#ef4444';
       return `<tr style="border-bottom:1px solid #21262d">
         <td style="padding:5px 8px;color:#8b949e">${date}</td>
         <td style="padding:5px 8px;text-align:right;color:#22c55e">$${fmt(val.wallet, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:#58a6ff">$${fmt(val.position, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:#a855f7">${inj > 0 ? '$' + fmt(inj, 2) : '-'}</td>
         <td style="padding:5px 8px;text-align:right;color:#c9d1d9;font-weight:bold">$${fmt(val.total, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:#8b949e">$${fmt(val.solPrice, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:${solCol}">${solImpact >= 0 ? '+' : ''}$${fmt(solImpact, 2)}</td>
+        <td style="padding:5px 8px;text-align:right;color:${orgCol}">${organic >= 0 ? '+' : ''}$${fmt(organic, 2)}</td>
         <td style="padding:5px 8px;text-align:right;color:${pnlCol};font-weight:bold">${pnl >= 0 ? '+' : ''}$${fmt(pnl, 2)}</td>
       </tr>`;
     }).join('')}
@@ -2050,6 +2126,99 @@ ${(() => {
 })()}
 
 ${buildDailyFeesChart(data.snapshots7d)}
+
+${(() => {
+  // Build position history from rebalance events: pair opens with closes
+  const closeTypes = new Set(['T1_DOWNSIDE', 'T1_UPSIDE', 'OOR_BELOW', 'OOR_ABOVE', 'POSITION_CLOSED']);
+  const allEvents = data.events.slice().sort((a, b) => a.timestamp - b.timestamp);
+
+  interface PositionRecord {
+    openTime: number; closeTime: number; duration: number;
+    entryPrice: number; closePrice: number;
+    range: string; closeReason: string;
+    feeSol: number; feeUsdc: number; feeTotalUsdc: number;
+    il: number; regime: string;
+  }
+  const positions: PositionRecord[] = [];
+  let lastOpen: { timestamp: number; price: number; note: string } | null = null;
+
+  for (const e of allEvents) {
+    if (e.eventType === 'POSITION_OPENED') {
+      lastOpen = { timestamp: e.timestamp, price: e.price, note: e.note };
+    } else if (closeTypes.has(e.eventType) && lastOpen) {
+      const rangeMatch = (e.note || '').match(/Range was \$([\d.]+).*?\$([\d.]+)/);
+      const range = rangeMatch ? `$${rangeMatch[1]}-$${rangeMatch[2]}` : '--';
+      positions.push({
+        openTime: lastOpen.timestamp,
+        closeTime: e.timestamp,
+        duration: e.timestamp - lastOpen.timestamp,
+        entryPrice: lastOpen.price,
+        closePrice: e.price,
+        range,
+        closeReason: e.eventType,
+        feeSol: e.feeSol ?? 0,
+        feeUsdc: e.feeUsdc ?? 0,
+        feeTotalUsdc: (e.feeSol ?? 0) * e.price + (e.feeUsdc ?? 0),
+        il: e.ilAtClose ?? 0,
+        regime: e.regime,
+      });
+      lastOpen = null;
+    }
+  }
+
+  const recent = positions.slice(-10).reverse();
+  if (recent.length === 0) return '<div class="card" style="margin-bottom:16px"><h2>Position History</h2><div style="color:#8b949e;text-align:center;padding:20px">No closed positions yet</div></div>';
+
+  const totalFees = recent.reduce((s, p) => s + p.feeTotalUsdc, 0);
+  const totalIl = recent.reduce((s, p) => s + p.il, 0);
+  const avgDuration = recent.reduce((s, p) => s + p.duration, 0) / recent.length;
+  const avgDurMin = Math.floor(avgDuration / 60_000);
+  const avgDurStr = avgDurMin >= 60 ? `${Math.floor(avgDurMin / 60)}h ${avgDurMin % 60}m` : `${avgDurMin}m`;
+
+  const reasonColors: Record<string, string> = {
+    T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
+    OOR_BELOW: '#ef4444', OOR_ABOVE: '#eab308',
+    POSITION_CLOSED: '#8b949e',
+  };
+
+  const rows = recent.map(p => {
+    const openT = new Date(p.openTime).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ });
+    const durMin = Math.floor(p.duration / 60_000);
+    const durStr = durMin >= 60 ? `${Math.floor(durMin / 60)}h ${durMin % 60}m` : `${durMin}m`;
+    const net = p.feeTotalUsdc + p.il;
+    const netCol = net >= 0 ? '#22c55e' : '#ef4444';
+    const reasonCol = reasonColors[p.closeReason] ?? '#8b949e';
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:4px 6px;color:#8b949e;font-size:10px;white-space:nowrap">${openT}</td>
+      <td style="padding:4px 6px;text-align:right">${durStr}</td>
+      <td style="padding:4px 6px;text-align:right;font-size:10px;color:#8b949e">${p.range}</td>
+      <td style="padding:4px 6px;text-align:right">$${fmt(p.entryPrice, 2)}<span style="color:#8b949e">→</span>$${fmt(p.closePrice, 2)}</td>
+      <td style="padding:4px 6px;text-align:right;color:#22c55e">$${fmt(p.feeTotalUsdc, 4)}</td>
+      <td style="padding:4px 6px;text-align:right;color:${p.il < 0 ? '#ef4444' : '#22c55e'}">${p.il < 0 ? '-' : '+'}$${fmt(Math.abs(p.il), 4)}</td>
+      <td style="padding:4px 6px;text-align:right;color:${netCol};font-weight:bold">${net >= 0 ? '+' : '-'}$${fmt(Math.abs(net), 4)}</td>
+      <td style="padding:4px 6px"><span class="badge" style="background:${reasonCol}20;color:${reasonCol};font-size:9px">${p.closeReason.replace('_', ' ')}</span></td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="card" style="margin-bottom:16px">
+  <h2>Position History <span style="color:#8b949e;font-size:12px;font-weight:normal">| Last ${recent.length} | Avg duration: ${avgDurStr} | Fees: $${fmt(totalFees, 2)} | IL: $${fmt(Math.abs(totalIl), 2)} | Net: <span style="color:${totalFees + totalIl >= 0 ? '#22c55e' : '#ef4444'}">${totalFees + totalIl >= 0 ? '+' : '-'}$${fmt(Math.abs(totalFees + totalIl), 2)}</span></span></h2>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:11px">
+    <tr style="border-bottom:1px solid #30363d">
+      <th style="text-align:left;padding:4px 6px;color:#8b949e">Opened</th>
+      <th style="text-align:right;padding:4px 6px;color:#8b949e">Duration</th>
+      <th style="text-align:right;padding:4px 6px;color:#8b949e">Range</th>
+      <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry→Close</th>
+      <th style="text-align:right;padding:4px 6px;color:#22c55e">Fees</th>
+      <th style="text-align:right;padding:4px 6px;color:#ef4444">IL</th>
+      <th style="text-align:right;padding:4px 6px;color:#eab308">Net</th>
+      <th style="text-align:left;padding:4px 6px;color:#8b949e">Exit</th>
+    </tr>
+    ${rows}
+  </table>
+  </div>
+</div>`;
+})()}
 
 <div class="section-title">In-Range Performance</div>
 <div class="gauge-row">
@@ -2065,7 +2234,7 @@ ${buildDailyFeesChart(data.snapshots7d)}
 
 <div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Event Log <span style="font-size:11px;color:#8b949e;font-weight:normal">(last 10 — <a href="/api/events" target="_blank" style="color:#58a6ff">download full log</a>)</span></div>
 ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
-    const t = new Date(e.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    const t = new Date(e.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: TZ });
     const typeColors: Record<string, string> = {
       POSITION_OPENED: '#22c55e', POSITION_CLOSED: '#ef4444',
       T1_DOWNSIDE: '#f97316', T1_UPSIDE: '#eab308',
@@ -2287,6 +2456,29 @@ ${NAV_HTML}
     ${field('minIdleSol', c.minIdleSol, 0.05, 'Min idle SOL', 'Min idle SOL after reserve to trigger deploy.', 'At 0.5 SOL (~$42): only meaningful amounts. At 0.01: deploys dust.')}
     ${field('minDeployUsdc', c.minDeployUsdc, 10, 'Min deploy ($)', 'Min total deployable value to trigger.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
     ${field('deployRatioTolerance', c.deployRatioTolerance, 0.02, 'Price ratio tolerance', 'Max deviation from geometric mean (0-1). Wider = more deploy opportunities.', 'At 0.05: deploys even near range edges. At 0.01: only near center.')}
+  </table>
+</div>
+
+<!-- SECTION 4b: Swap Config -->
+<div class="cfg-section">
+  <h3>4b. Swap Routing</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('swapSlippageBps', c.swapSlippageBps, 15, 'Slippage (bps)', 'Swap slippage tolerance in basis points. 100 bps = 1%.', 'At 10: very tight, may fail in volatile markets. At 50: safer but more expensive.')}
+    ${field('swapBufferPct', c.swapBufferPct, 3, 'Swap buffer (%)', 'Over-estimate swap amounts by this % to avoid coming up short.', 'At 1%: tighter, less over-swap. At 5%: more buffer, more leftover.')}
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px">Swap provider</td>
+      <td style="padding:6px 8px;color:#30363d;font-size:11px">jupiter-fallback</td>
+      <td style="padding:6px 8px">
+        <select class="cfg-input" data-key="swapProvider" style="width:140px">
+          <option value="jupiter-fallback" ${c.swapProvider === 'jupiter-fallback' ? 'selected' : ''}>Jupiter + Orca fallback</option>
+          <option value="jupiter" ${c.swapProvider === 'jupiter' ? 'selected' : ''}>Jupiter only</option>
+          <option value="orca" ${c.swapProvider === 'orca' ? 'selected' : ''}>Orca only (legacy)</option>
+        </select>
+      </td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">Routing strategy for token swaps.</td>
+      <td style="padding:6px 8px;color:#8b949e;font-size:11px">jupiter-fallback: best price via Jupiter, Orca if Jupiter is down.</td>
+    </tr>
   </table>
 </div>
 
@@ -2884,7 +3076,7 @@ function renderStatusHtml(checks: Array<{ name: string; description: string; sta
       <div style="flex:1;min-width:0">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <div style="font-weight:bold;font-size:13px;color:#c9d1d9">${c.name}</div>
-          <div style="font-size:10px;color:#8b949e">${new Date(c.lastChecked).toLocaleTimeString('en-US', { hour12: false })}</div>
+          <div style="font-size:10px;color:#8b949e">${new Date(c.lastChecked).toLocaleTimeString('en-US', { hour12: false, timeZone: TZ })}</div>
         </div>
         <div style="font-size:11px;color:#8b949e;margin-top:2px">${c.description}</div>
         <div style="font-size:12px;color:${c.status === 'ok' ? '#c9d1d9' : '#ef4444'};margin-top:4px;font-family:monospace;word-break:break-word">${c.detail}</div>

@@ -58,6 +58,15 @@ export const REGIME_PARAMS = {
   },
 } as const;
 
+// Jupiter aggregator
+export const JUPITER = {
+  QUOTE_API:      'https://api.jup.ag/swap/v1/quote',
+  SWAP_API:       'https://api.jup.ag/swap/v1/swap',
+  TIMEOUT_MS:     10_000,
+  RETRY_DELAY_MS: 2_000,
+  MAX_RETRIES:    1,
+} as const;
+
 // Circuit breaker thresholds
 export const RISK = {
   DAILY_LOSS_LIMIT_PCT:      5,

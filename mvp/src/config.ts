@@ -44,6 +44,11 @@ export const runtime = {
   maxIlPct: RISK.MAX_IL_PCT as number,
   rebalanceLoopLimit: RISK.REBALANCE_LOOP_LIMIT as number,
 
+  // Swap config
+  swapSlippageBps: 15,                                                    // 0.15%
+  swapBufferPct: 3,                                                       // 3% over-request
+  swapProvider: 'jupiter-fallback' as 'jupiter' | 'orca' | 'jupiter-fallback',
+
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
@@ -115,6 +120,11 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const v22 = nv('maxIlPct', 1, 50); if (v22 != null) runtime.maxIlPct = v22;
   const v23 = nv('rebalanceLoopLimit', 1, 100); if (v23 != null) runtime.rebalanceLoopLimit = v23;
 
+  // Swap config
+  const vSlip = nv('swapSlippageBps', 10, 500); if (vSlip != null) runtime.swapSlippageBps = vSlip;
+  const vBuf = nv('swapBufferPct', 0, 10); if (vBuf != null) runtime.swapBufferPct = vBuf;
+  const vProv = g('swapProvider'); if (vProv === 'jupiter' || vProv === 'orca' || vProv === 'jupiter-fallback') runtime.swapProvider = vProv;
+
   const rwo = g('rangeWidthOverride');
   if (rwo != null) runtime.rangeWidthOverride = rwo === 'null' || rwo === '' ? null : parseFloat(rwo);
 
@@ -164,6 +174,9 @@ export function exportConfig(): Record<string, string> {
   out['weeklyDrawdownLimitPct'] = String(runtime.weeklyDrawdownLimitPct);
   out['maxIlPct'] = String(runtime.maxIlPct);
   out['rebalanceLoopLimit'] = String(runtime.rebalanceLoopLimit);
+  out['swapSlippageBps'] = String(runtime.swapSlippageBps);
+  out['swapBufferPct'] = String(runtime.swapBufferPct);
+  out['swapProvider'] = runtime.swapProvider;
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
 
   for (const regime of REGIME_KEYS) {

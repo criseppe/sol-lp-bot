@@ -440,6 +440,7 @@ async function main() {
             cumHarvestedFeesUsdc: liveCumFeesUsdc,
             totalFeesUsdc,
             entryPrice: livePos?.entryPrice ?? null,
+            entryTime: livePos?.entryTime ?? null,
             entrySol: livePos?.entrySol ?? positionSol,
             entryUsdc: livePos?.entryUsdc ?? positionUsdc,
             ilUsdc,
@@ -1060,12 +1061,13 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
       decision: eventType, reasoning: `${logic}\n${execution}`,
       params_json: JSON.stringify(params) });
   } catch (err) {
-    console.log(JSON.stringify({ level: 'error', msg: 'LIVE open position failed', error: String(err), timestamp: Date.now() }));
+    const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
+    console.log(JSON.stringify({ level: 'error', msg: 'LIVE open position failed', error: errMsg, timestamp: Date.now() }));
   }
 }
 
-async function liveClosePosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
-  if (!liveExecutor) return;
+async function liveClosePosition(price: number, eventType: EventType, triggerReason?: string): Promise<boolean> {
+  if (!liveExecutor) return false;
   try {
     // Capture position ID before close (closePosition clears it)
     const closingPositionId = liveExecutor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
@@ -1096,13 +1098,20 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
       prox_lower: null, prox_upper: null, in_range: null,
       decision: eventType, reasoning: `${why}${posInfo}\n${execution}`,
       params_json: null });
+    return true;
   } catch (err) {
-    console.log(JSON.stringify({ level: 'error', msg: 'LIVE close position failed', error: String(err), timestamp: Date.now() }));
+    const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
+    console.log(JSON.stringify({ level: 'error', msg: 'LIVE close position failed', error: errMsg, timestamp: Date.now() }));
+    return false;
   }
 }
 
 async function liveCloseAndReopen(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
-  await liveClosePosition(price, eventType, triggerReason);
+  const closed = await liveClosePosition(price, eventType, triggerReason);
+  if (!closed) {
+    console.log(JSON.stringify({ level: 'warn', msg: 'closeAndReopen: close failed, aborting reopen — position still open', timestamp: Date.now() }));
+    return;
+  }
   await new Promise(r => setTimeout(r, 2000));
   await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after ${eventType}. Previous position closed due to: ${triggerReason ?? eventType}.`);
 
@@ -1123,30 +1132,54 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
 // ── HELPERS ───────────────────────────────────────────────────────────────
 
 let lastPnlDate = '';
-let dailySummaryInitialValue = 0;
 let dailySummaryCumInjected = 0;
 let dailyRebalanceCount = 0;
+// Track previous wallet balances to detect incoming transfers (injections)
+let prevWalletSol = -1;
+let prevWalletUsdc = -1;
+let prevPositionSol = -1;
+let prevPositionUsdc = -1;
 
 function checkAndWriteDailyPnl(currentPrice: number) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' });
   const totalValue = currentLiveData?.totalValueWithPosition ?? 0;
   const walletValue = currentLiveData?.totalValueUsdc ?? 0;
   const positionValue = currentLiveData?.positionValueUsdc ?? 0;
+  const solBal = currentLiveData?.solBalance ?? 0;
+  const usdcBal = currentLiveData?.usdcBalance ?? 0;
+  const posSol = currentLiveData?.positionSol ?? 0;
+  const posUsdc = currentLiveData?.positionUsdc ?? 0;
   const cumFeesUsdc = liveCumFeesSol * currentPrice + liveCumFeesUsdc;
   const rawPending = (currentLiveData?.pendingFeesSol ?? 0) * currentPrice + (currentLiveData?.pendingFeesUsdc ?? 0);
   const pendingFeesUsdc = rawPending > 1000 ? 0 : rawPending;
   const totalFeesUsdc = cumFeesUsdc + pendingFeesUsdc;
 
-  // New day: write daily_pnl and reset daily tracking
-  if (today !== lastPnlDate) {
-    // Detect injection: if total jumped significantly from yesterday's close
-    if (lastPnlDate && dailySummaryInitialValue > 0) {
-      const jump = totalValue - dailySummaryInitialValue;
-      if (jump > Math.max(5, dailySummaryInitialValue * 0.05)) {
-        dailySummaryCumInjected += jump;
-      }
+  // Detect injections: compare total tokens (wallet + position) valued at same price.
+  // Any increase in token quantity = external deposit (swaps just move tokens around).
+  if (prevWalletSol >= 0) {
+    const p = currentPrice;
+    const prevTotalValue = (prevWalletSol + prevPositionSol) * p + prevWalletUsdc + prevPositionUsdc;
+    const currTotalValue = (solBal + posSol) * p + usdcBal + posUsdc;
+    const unexplained = currTotalValue - prevTotalValue;
+    if (unexplained > 20) {
+      dailySummaryCumInjected += unexplained;
+      console.log(JSON.stringify({ level: 'info', msg: `Capital injection detected: $${unexplained.toFixed(2)} new capital`, timestamp: Date.now() }));
     }
-    dailySummaryInitialValue = totalValue;
+  }
+  prevWalletSol = solBal;
+  prevWalletUsdc = usdcBal;
+  prevPositionSol = posSol;
+  prevPositionUsdc = posUsdc;
+
+  // New day: reset daily tracking
+  if (today !== lastPnlDate) {
+    // On restart mid-day, restore today's cumulative injections from DB
+    const existingSummary = getDailySummaries(db, 1);
+    if (existingSummary.length > 0 && existingSummary[0].date === today) {
+      dailySummaryCumInjected = existingSummary[0].injected_usdc;
+    } else {
+      dailySummaryCumInjected = 0;
+    }
     dailyRebalanceCount = 0;
     lastPnlDate = today;
 
@@ -1162,12 +1195,13 @@ function checkAndWriteDailyPnl(currentPrice: number) {
     });
   }
 
-  // Get yesterday's cumulative fees for daily delta
-  const prevSummaries = getDailySummaries(db, 2);
-  const yesterday = prevSummaries.find(s => s.date !== today);
+  // Portfolio change = today's value vs yesterday's close, net of injections
+  const allSummaries = getDailySummaries(db, 2);
+  const yesterday = allSummaries.find(s => s.date !== today);
+  const yesterdayClose = yesterday?.total_usdc ?? totalValue;
   const prevCumFees = yesterday?.cum_fees_usdc ?? 0;
   const dailyFeesEarned = Math.max(0, totalFeesUsdc - prevCumFees);
-  const portfolioChange = totalValue - dailySummaryInitialValue;
+  const portfolioChange = totalValue - yesterdayClose - dailySummaryCumInjected;
 
   // Upsert today's summary (updates every cycle with latest values)
   upsertDailySummary(db, {
