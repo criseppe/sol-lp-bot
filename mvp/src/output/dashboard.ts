@@ -362,18 +362,19 @@ export function startDashboard(port: number): DashboardServer {
     if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
     try {
       const swaps = dbRef.prepare('SELECT * FROM swap_ledger ORDER BY timestamp DESC LIMIT 50').all() as any[];
-      let totalPnl = 0, profitable = 0, unprofitable = 0, totalGas = 0, totalProtocolFee = 0;
+      let totalPnl = 0, profitable = 0, unprofitable = 0, totalGas = 0, totalProtocolFee = 0, buys = 0, sells = 0;
       for (const s of swaps) {
         const gas = 0.00001 * s.price;
         const protocolFee = s.usdc_amount * 0.0006;
         totalGas += gas;
         totalProtocolFee += protocolFee;
+        if (s.direction === 'buy_sol') buys++; else sells++;
         if (s.pnl_usdc != null) {
           totalPnl += s.pnl_usdc;
           if (s.pnl_usdc >= 0) profitable++; else unprofitable++;
         }
       }
-      res.json({ swaps, summary: { totalPnl, swapCount: swaps.length, profitable, unprofitable, totalGas, totalProtocolFee } });
+      res.json({ swaps, summary: { totalPnl, swapCount: swaps.length, buys, sells, profitable, unprofitable, totalGas, totalProtocolFee } });
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
@@ -3158,11 +3159,13 @@ ${data.recentTxs.length > 0 ? `
     var totalPnlCol = s.totalPnl >= 0 ? '#22c55e' : '#ef4444';
     var wrCol = winRate >= 50 ? '#22c55e' : '#ef4444';
 
-    var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;margin-bottom:14px">';
-    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:' + totalPnlCol + '">' + (s.totalPnl >= 0 ? '+' : '') + '$' + sfmt(Math.abs(s.totalPnl), 4) + '</div><div style="font-size:10px;color:#8b949e">Total P&amp;L</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:#22c55e">' + s.profitable + '</div><div style="font-size:10px;color:#8b949e">Profitable</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:#ef4444">' + s.unprofitable + '</div><div style="font-size:10px;color:#8b949e">Unprofitable</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:' + wrCol + '">' + sfmt(winRate, 1) + '%</div><div style="font-size:10px;color:#8b949e">Win Rate</div></div>';
+    var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px;margin-bottom:14px">';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + totalPnlCol + '">' + (s.totalPnl >= 0 ? '+' : '') + '$' + sfmt(Math.abs(s.totalPnl), 2) + '</div><div style="font-size:9px;color:#8b949e">Sell P&amp;L</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#58a6ff">' + (s.buys || 0) + '</div><div style="font-size:9px;color:#8b949e">Buys</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#a855f7">' + (s.sells || 0) + '</div><div style="font-size:9px;color:#8b949e">Sells</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#22c55e">' + s.profitable + '</div><div style="font-size:9px;color:#8b949e">Profitable</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#ef4444">' + s.unprofitable + '</div><div style="font-size:9px;color:#8b949e">Unprofitable</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + wrCol + '">' + sfmt(winRate, 0) + '%</div><div style="font-size:9px;color:#8b949e">Win Rate</div></div>';
     html += '</div>';
 
     html += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;border-collapse:collapse;font-size:11px">';
