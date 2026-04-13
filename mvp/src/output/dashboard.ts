@@ -3070,6 +3070,64 @@ ${data.recentTxs.length > 0 ? `
 </div>
 
 <div class="card" style="margin-bottom:16px">
+  <h2>Swap P&amp;L Tracker (SIR)</h2>
+  <div id="swap-pnl-container"><div style="color:#8b949e;text-align:center;padding:20px">Loading swap data...</div></div>
+</div>
+<script>
+(function() {
+  fetch('/api/swap-ledger').then(function(r){return r.json()}).then(function(data) {
+    var c = document.getElementById('swap-pnl-container');
+    if (!data.swaps || data.swaps.length === 0) {
+      c.innerHTML = '<div style="color:#8b949e;text-align:center;padding:20px">No SIR swaps recorded yet. Swaps will appear here when SIR rebalances the idle wallet.</div>';
+      return;
+    }
+    var s = data.summary;
+    var netPnl = s.totalPnl - s.totalGas - s.totalProtocolFee;
+    var winRate = s.profitable + s.unprofitable > 0 ? (s.profitable / (s.profitable + s.unprofitable) * 100) : 0;
+    var html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + (netPnl >= 0 ? '#22c55e' : '#ef4444') + '">' + (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2) + '</div><div style="font-size:10px;color:#8b949e">Net P&L</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#58a6ff">' + s.swapCount + '</div><div style="font-size:10px;color:#8b949e">Swaps</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#22c55e">' + winRate.toFixed(0) + '%</div><div style="font-size:10px;color:#8b949e">Win Rate</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#ffd700">$' + s.totalGas.toFixed(3) + '</div><div style="font-size:10px;color:#8b949e">Gas Cost</div></div>';
+    html += '</div>';
+    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">';
+    html += '<tr><th style="text-align:left;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Time</th>';
+    html += '<th style="text-align:center;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Dir</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">SOL</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">USDC</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Price</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Fee</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Gross</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Net</th>';
+    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Basis</th></tr>';
+    data.swaps.forEach(function(sw) {
+      var t = new Date(sw.timestamp).toLocaleString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit',hour12:false,timeZone:'Europe/Berlin'});
+      var dirCol = sw.direction === 'buy_sol' ? '#22c55e' : '#ef4444';
+      var dirLabel = sw.direction === 'buy_sol' ? 'BUY' : 'SELL';
+      var gas = 0.00001 * sw.price;
+      var fee = sw.usdc_amount * 0.0006;
+      var gross = sw.pnl_usdc != null ? sw.pnl_usdc : null;
+      var net = gross != null ? gross - gas - fee : null;
+      var netCol = net != null ? (net >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
+      html += '<tr style="border-bottom:1px solid #21262d">';
+      html += '<td style="padding:4px;color:#c9d1d9">' + t + '</td>';
+      html += '<td style="padding:4px;text-align:center;color:' + dirCol + ';font-weight:bold">' + dirLabel + '</td>';
+      html += '<td style="padding:4px;text-align:right">' + sw.sol_amount.toFixed(3) + '</td>';
+      html += '<td style="padding:4px;text-align:right">$' + sw.usdc_amount.toFixed(0) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#58a6ff">$' + sw.price.toFixed(2) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#ffd700">$' + fee.toFixed(2) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:' + (gross != null && gross >= 0 ? '#22c55e' : '#ef4444') + '">' + (gross != null ? (gross >= 0 ? '+' : '') + '$' + gross.toFixed(2) : '-') + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:' + netCol + ';font-weight:bold">' + (net != null ? (net >= 0 ? '+' : '') + '$' + net.toFixed(2) : '-') + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sw.cost_basis_before.toFixed(2) + (sw.cost_basis_after !== sw.cost_basis_before ? ' > $' + sw.cost_basis_after.toFixed(2) : '') + '</td>';
+      html += '</tr>';
+    });
+    html += '</table></div>';
+    c.innerHTML = html;
+  }).catch(function(e) { document.getElementById('swap-pnl-container').innerHTML = '<div style="color:#ef4444">Failed: ' + e + '</div>'; });
+})();
+</script>
+
+<div class="card" style="margin-bottom:16px">
   <h2>Download Logs</h2>
   <p style="color:#8b949e;font-size:12px;margin-bottom:12px">Decision logs are recorded every 30 minutes (HOLD) and regime evaluations every 1 hour. Download for offline analysis.</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
