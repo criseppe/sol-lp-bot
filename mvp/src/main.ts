@@ -1203,10 +1203,11 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Rule 8: Idle wallet rebalance — maintain target SOL/USDC split per regime
-  // Triggers on: regime change OR after position reopen (idleRebalancePending)
-  // Cooldown: 30 minutes between rebalances to prevent spam during rapid close/reopen
+  // Triggers on: regime change OR after position reopen OR periodic re-check every 30 min
+  // The periodic re-check catches drift from auto-deploy consuming SOL disproportionately
   const idleRebalanceCooldownMs = 30 * 60_000;
-  const idleRebalanceDue = lastIdleRebalanceRegime !== liveRegime || (idleRebalancePending && now - lastIdleRebalanceTime >= idleRebalanceCooldownMs);
+  const periodicRecheck = now - lastIdleRebalanceTime >= idleRebalanceCooldownMs;
+  const idleRebalanceDue = lastIdleRebalanceRegime !== liveRegime || (idleRebalancePending && periodicRecheck) || periodicRecheck;
   if (runtime.idleRebalanceEnabled && idleRebalanceDue) {
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
