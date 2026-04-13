@@ -415,7 +415,20 @@ export class LiveExecutor {
       priceUpper: this.currentPosition.priceUpper,
     };
 
-    // 4. Close on-chain
+    // 4. Validate tick arrays before close (same 0x1781/0x1782 issue as open)
+    try {
+      const tickSpacing = poolData.tickSpacing;
+      const currentTick = poolData.tickCurrentIndex;
+      const ticksToCheck = [this.currentPosition.tickLower, this.currentPosition.tickUpper, currentTick];
+      const initTx = await whirlpool.initTickArrayForTicks(ticksToCheck);
+      if (initTx) {
+        console.log(JSON.stringify({ level: 'info', msg: 'Close: initializing tick arrays', timestamp: Date.now() }));
+        try { await this.execTx(initTx); } catch {}
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    } catch {}
+
+    // 5. Close on-chain
     const solBefore = await this.getSolBalance();
     const usdcBefore = await this.getUsdcBalance();
 
