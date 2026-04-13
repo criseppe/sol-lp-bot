@@ -1612,6 +1612,18 @@ ${NAV_HTML}
     <div class="row"><span class="label">USDC in Position</span><span class="value">${fmt(live.positionUsdc, 6)}</span></div>
     <div class="row"><span class="label">Position Value</span><span class="value" style="color:#58a6ff">$${fmt(live.positionValueUsdc)}</span></div>
     <div class="row"><span class="label">Entry Price</span><span class="value">$${fmt(live.entryPrice ?? 0)}</span></div>
+    ${(() => {
+      if (!live.positionRange) return '';
+      const lo = live.positionRange.lower, hi = live.positionRange.upper;
+      const w = hi - lo, c = (lo + hi) / 2, hw = w / 2;
+      const rk = live.regime ?? 'RANGING';
+      const rp = runtime.regimeParams[rk] ?? runtime.regimeParams.RANGING;
+      const thL = rp.proxThresholdLower, thU = rp.proxThresholdUpper;
+      const trigLo = c - thL * hw, trigHi = c + thU * hw;
+      return `<div class="row"><span class="label">Range Width</span><span class="value">${fmt(w / c * 100, 2)}% ($${fmt(w)})</span></div>
+      <div class="row"><span class="label">↓ Exit Trigger</span><span class="value" style="color:#ef4444">${Math.round(thL * 100)}% → $${fmt(trigLo)} <span style="font-size:10px;font-weight:normal;color:#8b949e">($${fmt(live.solPrice - trigLo, 2)} away)</span></span></div>
+      <div class="row"><span class="label">↑ Exit Trigger</span><span class="value" style="color:#eab308">${Math.round(thU * 100)}% → $${fmt(trigHi)} <span style="font-size:10px;font-weight:normal;color:#8b949e">($${fmt(trigHi - live.solPrice, 2)} away)</span></span></div>`;
+    })()}
     <div class="row"><span class="label">Fees Today</span><span class="value" style="color:#22c55e">$${fmt(live.actual24hFeesUsdc, 4)}</span></div>
     <div class="row"><span class="label">Today's APR</span><span class="value" style="color:#22c55e">${fmt(live.actual24hAprPct, 1)}%</span></div>
     <div class="row"><span class="label">Est. Max Yield 24h</span><span class="value" style="color:#8b949e">$${fmt(live.estDailyFeesUsdc, 4)} <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
