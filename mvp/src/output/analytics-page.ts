@@ -187,7 +187,7 @@ function populateAll() {
   var hourlyFees = buildHourlyFees(snaps);
   var dailyFees = buildDailyFees(snaps);
 
-  populateFeesToday(hourlyFees);
+  populateFeesToday();
   populateFeesDaily(DATA.dailySummaries || []);
   populateFeeHeatmap(hourlyFees);
   populateCumFees(DATA.dailySummaries || []);
@@ -305,13 +305,60 @@ function exportWidget(id) {
 
 // ── WIDGET RENDERERS ──
 
-function populateFeesToday(hf) {
+function populateFeesToday() {
+  var el = document.getElementById('w-fees-today');
+  if (!el) return;
   var today = new Date().toLocaleDateString('en-CA',{timeZone:TZ});
-  var todayData = hf.filter(function(h){return h.hour.startsWith(today);});
-  if (todayData.length === 0) { makeTable('fees-today','<div style="color:#8b949e;padding:12px">No data for today</div>'); return; }
-  var labels = todayData.map(function(h){return h.hour.slice(-2)+':00';});
-  var data = todayData.map(function(h){return h.fees;});
-  makeChart('fees-today',{type:'bar',data:{labels:labels,datasets:[{label:'Fees ($)',data:data,backgroundColor:data.map(function(d){return d>2?COLORS.gold:d>0.5?COLORS.green:COLORS.gray+'80';})}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(2);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}});
+  el.innerHTML = '<h3>Fees Per Hour</h3>' +
+    '<button class="export-btn" onclick="exportWidget(\\'fees-today\\')">Export</button>' +
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">' +
+      '<select id="fees-today-date" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;-webkit-appearance:none"></select>' +
+      '<span id="fees-today-total" style="font-size:14px;font-weight:bold;color:#ffd700"></span>' +
+    '</div>' +
+    '<canvas id="c-fees-today"></canvas>';
+  loadFeesTodayData(today, true);
+}
+
+async function loadFeesTodayData(date, initSelect) {
+  try {
+    var res = await fetch('/api/hourly-fees?date=' + date);
+    var d = await res.json();
+    if (d.error) { document.getElementById('fees-today-total').textContent = 'No data'; return; }
+
+    // Populate date selector on first load
+    if (initSelect) {
+      var select = document.getElementById('fees-today-date');
+      if (select && d.availableDates && d.availableDates.length > 0) {
+        var dates = d.availableDates.slice().reverse();
+        // Ensure today is included even if not in daily_summary yet
+        if (dates.indexOf(date) === -1) dates.unshift(date);
+        select.innerHTML = dates.map(function(dt) {
+          return '<option value="' + dt + '"' + (dt === date ? ' selected' : '') + '>' + dt + '</option>';
+        }).join('');
+        select.onchange = function() { loadFeesTodayData(select.value, false); };
+      }
+    }
+
+    // Update total
+    var totalEl = document.getElementById('fees-today-total');
+    if (totalEl) totalEl.textContent = 'Total: $' + (d.dayTotal || 0).toFixed(2);
+
+    // Draw chart
+    var hd = d.hourlyData || [];
+    var labels = hd.map(function(h) { return String(h.hour).padStart(2,'0') + ':00'; });
+    var data = hd.map(function(h) { return h.fees; });
+    if (charts['fees-today']) { try { charts['fees-today'].destroy(); } catch(e) {} }
+    var ctx = document.getElementById('c-fees-today');
+    if (!ctx) return;
+    charts['fees-today'] = new Chart(ctx, {
+      type:'bar',
+      data:{labels:labels,datasets:[{label:'Fees ($)',data:data,backgroundColor:data.map(function(v){return v>2?COLORS.gold:v>0.5?COLORS.green:COLORS.gray+'80';})}]},
+      options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(2);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}
+    });
+  } catch(e) {
+    var totalEl = document.getElementById('fees-today-total');
+    if (totalEl) totalEl.textContent = 'Error loading data';
+  }
 }
 
 function populateFeesDaily(summaries) {
