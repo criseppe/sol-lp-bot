@@ -338,6 +338,25 @@ export function startDashboard(port: number): DashboardServer {
     res.json({ date, hourlyData, dayTotal: dayCum, events, availableDates: dates });
   });
 
+  app.get('/api/swap-ledger', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
+    try {
+      const swaps = dbRef.prepare('SELECT * FROM swap_ledger ORDER BY timestamp DESC LIMIT 50').all() as any[];
+      let totalPnl = 0, profitable = 0, unprofitable = 0, totalGas = 0, totalProtocolFee = 0;
+      for (const s of swaps) {
+        const gas = 0.00001 * s.price;
+        const protocolFee = s.usdc_amount * 0.0006;
+        totalGas += gas;
+        totalProtocolFee += protocolFee;
+        if (s.pnl_usdc != null) {
+          totalPnl += s.pnl_usdc;
+          if (s.pnl_usdc >= 0) profitable++; else unprofitable++;
+        }
+      }
+      res.json({ swaps, summary: { totalPnl, swapCount: swaps.length, profitable, unprofitable, totalGas, totalProtocolFee } });
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
   app.get('/api/regime-history', (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
     res.json(getRegimeHistory(dbRef, 50));
@@ -1609,6 +1628,14 @@ ${NAV_HTML}
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.pendingFeesTotal)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.pendingFeesSol, 6)} SOL</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.pendingFeesUsdc, 4)} USDC</div>
+        ${(() => {
+          if (!live.entryTime || live.pendingFeesTotal <= 0) return '';
+          const ageH = (Date.now() - live.entryTime) / 3_600_000;
+          if (ageH < 0.05) return '<div style="font-size:12px;color:#8b949e;margin-top:4px">building...</div>';
+          const fph = live.pendingFeesTotal / ageH;
+          return '<div id="fee-rate-el" style="font-size:13px;font-weight:bold;margin-top:6px" data-rate="' + fph.toFixed(4) + '"><span style="color:#58a6ff">$' + fph.toFixed(2) + '/h</span> <span id="fee-trend"></span></div>' +
+            '<script>(function(){var el=document.getElementById("fee-trend");var rate=parseFloat(document.getElementById("fee-rate-el").dataset.rate);var prev=parseFloat(localStorage.getItem("feeRate")||"0");if(prev>0&&rate>0){if(rate>prev*1.03){el.textContent="▲";el.style.color="#22c55e";}else if(rate<prev*0.97){el.textContent="▼";el.style.color="#ef4444";}else{el.textContent="▶";el.style.color="#8b949e";}}localStorage.setItem("feeRate",rate.toString());})()</script>';
+        })()}
       </div>
       <div class="fees-cell">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Harvested Fees</div>
