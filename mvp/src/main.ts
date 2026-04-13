@@ -354,10 +354,19 @@ async function main() {
   let cycleRunning = false;
   let lastPruneTime = Date.now();
 
+  let lastConfigReload = Date.now();
+
   const decisionLoop = setInterval(async () => {
     if (cycleRunning) return;
     cycleRunning = true;
     try {
+      // Reload config from DB every 5 minutes (picks up threshold changes without restart)
+      const now0 = Date.now();
+      if (now0 - lastConfigReload > 5 * 60_000) {
+        applyConfigFromDb(getConfig(db));
+        lastConfigReload = now0;
+      }
+
       const price = oracle.getPrice();
       if (!price) return;
 
