@@ -134,20 +134,21 @@ function loadData() {
     }
 
     var html = '<div style="overflow-x:auto"><table>';
-    html += '<tr><th>Name</th><th style="text-align:right">Invested</th><th style="text-align:right">Current Value</th><th style="text-align:center">Date</th><th style="text-align:right">Share</th><th style="text-align:right">Return</th><th style="text-align:right">Return %</th><th></th></tr>';
+    var investmentPool = totalPortfolio - totalFees;
+    html += '<tr><th>Name</th><th style="text-align:right">Invested</th><th style="text-align:right">Investment Value</th><th style="text-align:center">Date</th><th style="text-align:right">Share</th><th style="text-align:right">Return</th><th style="text-align:right">Return %</th><th></th></tr>';
 
     investors.forEach(function(inv) {
       var share = totalInvested > 0 ? (inv.amount_usdc / totalInvested) : 0;
-      var currentValue = share * totalPortfolio;
+      var invValue = share * investmentPool;
       var returnUsdc = totalFees * share;
       var returnPct = inv.amount_usdc > 0 ? (returnUsdc / inv.amount_usdc * 100) : 0;
       var shareCol = share > 0.5 ? '#a855f7' : '#c9d1d9';
-      var cvCol = currentValue >= inv.amount_usdc ? '#22c55e' : '#ef4444';
+      var ivCol = invValue >= inv.amount_usdc ? '#22c55e' : '#ef4444';
 
       html += '<tr>';
       html += '<td style="font-weight:bold">' + inv.name + '</td>';
       html += '<td style="text-align:right;color:#58a6ff">$' + fmt(inv.amount_usdc, 2) + '</td>';
-      html += '<td style="text-align:right;color:' + cvCol + ';font-weight:bold">$' + fmt(currentValue, 2) + '</td>';
+      html += '<td style="text-align:right;color:' + ivCol + ';font-weight:bold">$' + fmt(invValue, 2) + '</td>';
       html += '<td style="text-align:center;color:#8b949e">' + inv.invest_date + '</td>';
       html += '<td style="text-align:right;color:' + shareCol + ';font-weight:bold">' + fmt(share * 100, 1) + '%</td>';
       html += '<td style="text-align:right;color:#ffd700;font-weight:bold">$' + fmt(returnUsdc, 2) + '</td>';
@@ -157,11 +158,11 @@ function loadData() {
     });
 
     // Totals row
-    var totalCvCol = totalPortfolio >= totalInvested ? '#22c55e' : '#ef4444';
+    var totalIvCol = investmentPool >= totalInvested ? '#22c55e' : '#ef4444';
     html += '<tr style="border-top:2px solid #30363d;font-weight:bold">';
     html += '<td>TOTAL</td>';
     html += '<td style="text-align:right;color:#58a6ff">$' + fmt(totalInvested, 2) + '</td>';
-    html += '<td style="text-align:right;color:' + totalCvCol + '">$' + fmt(totalPortfolio, 2) + '</td>';
+    html += '<td style="text-align:right;color:' + totalIvCol + '">$' + fmt(investmentPool, 2) + '</td>';
     html += '<td></td>';
     html += '<td style="text-align:right">100%</td>';
     html += '<td style="text-align:right;color:#ffd700">$' + fmt(totalFees, 2) + '</td>';
