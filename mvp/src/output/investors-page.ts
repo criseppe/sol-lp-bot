@@ -122,6 +122,9 @@ function loadData() {
     cardsHtml += '<div class="card"><div class="val" style="color:#58a6ff">$' + fmt(totalInvested, 0) + '</div><div class="lbl">Total Invested</div></div>';
     cardsHtml += '<div class="card"><div class="val" style="color:#22c55e">$' + fmt(totalPortfolio, 0) + '</div><div class="lbl">Portfolio Value</div></div>';
     cardsHtml += '<div class="card"><div class="val" style="color:#ffd700">$' + fmt(totalFees, 2) + '</div><div class="lbl">Total Fees Earned</div></div>';
+    var totalReturn = totalPortfolio - totalInvested;
+    var trCol = totalReturn >= 0 ? '#22c55e' : '#ef4444';
+    cardsHtml += '<div class="card"><div class="val" style="color:' + trCol + '">' + (totalReturn >= 0 ? '+' : '-') + '$' + fmt(Math.abs(totalReturn), 2) + '</div><div class="lbl">Total Return</div></div>';
     document.getElementById('summary-cards').innerHTML = cardsHtml;
 
     // Table
