@@ -37,12 +37,22 @@ td{padding:6px 8px;border-bottom:1px solid #21262d}
   body{padding:8px}
   .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
   .nav a{padding:7px 3px;font-size:9px}
-  .cards{grid-template-columns:1fr 1fr}
+  .header h1{font-size:16px}
+  .cards{grid-template-columns:1fr 1fr;gap:6px}
+  .card{padding:10px}
   .card .val{font-size:16px}
-  .add-form{flex-direction:column}
-  .add-form input,.add-form button{width:100%}
-  table{font-size:11px}
-  th,td{padding:4px 6px}
+  .card .lbl{font-size:9px}
+  .section{padding:12px}
+  .section h2{font-size:13px}
+  .add-form{flex-direction:column;gap:10px}
+  .add-form>div{width:100%}
+  .add-form label{font-size:12px;margin-bottom:4px}
+  .add-form input{width:100%;font-size:16px;padding:10px 12px;min-height:44px;border-radius:6px}
+  .add-form button{width:100%;font-size:16px;padding:12px;min-height:44px}
+  table{font-size:10px}
+  th{font-size:9px;padding:4px 4px;white-space:nowrap}
+  td{padding:4px 4px}
+  .del-btn{font-size:16px;padding:4px 8px}
 }
 </style></head><body>
 
