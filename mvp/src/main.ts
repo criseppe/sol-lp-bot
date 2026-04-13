@@ -1239,23 +1239,40 @@ async function runLiveCycle(price: number): Promise<void> {
             // Too much SOL → swap SOL to USDC
             const solToSwap = Math.min(diffUsdc / price, idleSol);
             if (solToSwap > 0.01 && diffUsdc > 5) {
-              swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
-              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)})`, timestamp: now }));
-              swapResult = await liveExecutor.doSwapPublic(
-                MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
-                `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
-              );
+              // P&L awareness: only sell SOL at a loss if deviation is extreme (>25%)
+              const basis = sirCostBasis || price;
+              const wouldLose = price < basis;
+              const extremeDeviation = Math.abs(deviation) > 0.25;
+              if (wouldLose && !extremeDeviation) {
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: selling SOL at $${price.toFixed(2)} below cost basis $${basis.toFixed(2)} (loss $${((basis - price) * solToSwap).toFixed(2)}). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < 25% threshold. Waiting for better price.`, timestamp: now }));
+              } else {
+                if (wouldLose) console.log(JSON.stringify({ level: 'warn', msg: `Idle rebalance: selling SOL at loss ($${price.toFixed(2)} vs basis $${basis.toFixed(2)}) — extreme deviation ${(Math.abs(deviation) * 100).toFixed(0)}% forces rebalance`, timestamp: now }));
+                swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)})${!wouldLose ? ' ✅ profitable (price > basis)' : ''}`, timestamp: now }));
+                swapResult = await liveExecutor.doSwapPublic(
+                  MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
+                  `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
+                );
+              }
             }
           } else {
             // Too much USDC → swap USDC to SOL
             const usdcToSwap = Math.min(diffUsdc, idleUsdc);
             if (usdcToSwap > 1 && diffUsdc > 5) {
-              swapDirection = `USDC→SOL (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
-              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC`, timestamp: now }));
-              swapResult = await liveExecutor.doSwapPublic(
-                MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6),
-                `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
-              );
+              // P&L awareness: prefer buying SOL below cost basis (dip buying)
+              const basis = sirCostBasis || price;
+              const buyingCheap = price <= basis;
+              const extremeDeviation = Math.abs(deviation) > 0.25;
+              if (!buyingCheap && !extremeDeviation) {
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: buying SOL at $${price.toFixed(2)} above cost basis $${basis.toFixed(2)} (premium $${(price - basis).toFixed(2)}/SOL). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < 25% threshold. Waiting for dip.`, timestamp: now }));
+              } else {
+                swapDirection = `USDC→SOL (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC${buyingCheap ? ' ✅ buying dip (price < basis)' : ''}`, timestamp: now }));
+                swapResult = await liveExecutor.doSwapPublic(
+                  MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6),
+                  `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
+                );
+              }
             }
           }
 
