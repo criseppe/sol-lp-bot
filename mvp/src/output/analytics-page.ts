@@ -315,6 +315,11 @@ function populateFeesToday() {
       '<select id="fees-today-date" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;-webkit-appearance:none"></select>' +
       '<span id="fees-today-total" style="font-size:14px;font-weight:bold;color:#ffd700"></span>' +
     '</div>' +
+    '<div style="display:flex;gap:12px;margin-bottom:6px;font-size:11px;color:#8b949e;flex-wrap:wrap">' +
+      '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#ffd700;margin-right:4px"></span>&gt; $2</span>' +
+      '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#22c55e;margin-right:4px"></span>$0.50 – $2</span>' +
+      '<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#8b949e80;margin-right:4px"></span>&lt; $0.50</span>' +
+    '</div>' +
     '<canvas id="c-fees-today"></canvas>';
   loadFeesTodayData(today, true);
 }
@@ -339,14 +344,17 @@ async function loadFeesTodayData(date, initSelect) {
       }
     }
 
-    // Update total
+    // Update total — use dayTotal from daily_summary (authoritative)
     var totalEl = document.getElementById('fees-today-total');
     if (totalEl) totalEl.textContent = 'Total: $' + (d.dayTotal || 0).toFixed(2);
 
     // Draw chart
     var hd = d.hourlyData || [];
     var labels = hd.map(function(h) { return String(h.hour).padStart(2,'0') + ':00'; });
-    var data = hd.map(function(h) { return h.fees; });
+    // Scale hourly data proportionally if sum != dayTotal (snapshot deltas can diverge from daily_summary)
+    var rawSum = hd.reduce(function(s,h){return s+h.fees;},0);
+    var scale = (d.dayTotal && rawSum > 0 && Math.abs(rawSum - d.dayTotal) > 1) ? d.dayTotal / rawSum : 1;
+    var data = hd.map(function(h) { return h.fees * scale; });
     if (charts['fees-today']) { try { charts['fees-today'].destroy(); } catch(e) {} }
     var ctx = document.getElementById('c-fees-today');
     if (!ctx) return;
@@ -355,6 +363,17 @@ async function loadFeesTodayData(date, initSelect) {
       data:{labels:labels,datasets:[{label:'Fees ($)',data:data,backgroundColor:data.map(function(v){return v>2?COLORS.gold:v>0.5?COLORS.green:COLORS.gray+'80';})}]},
       options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(2);}},grid:{color:'#21262d'}},x:{grid:{display:false}}}}
     });
+    // Legend
+    var legendEl = document.getElementById('fees-today-legend');
+    if (!legendEl) {
+      var lg = document.createElement('div');
+      lg.id = 'fees-today-legend';
+      lg.style.cssText = 'font-size:10px;color:#8b949e;margin-top:6px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap';
+      lg.innerHTML = '<span><span style="display:inline-block;width:10px;height:10px;background:'+COLORS.gold+';border-radius:2px;margin-right:3px"></span>High (>$2/h)</span>' +
+        '<span><span style="display:inline-block;width:10px;height:10px;background:'+COLORS.green+';border-radius:2px;margin-right:3px"></span>Normal (>$0.50/h)</span>' +
+        '<span><span style="display:inline-block;width:10px;height:10px;background:'+COLORS.gray+'80;border-radius:2px;margin-right:3px"></span>Low (<$0.50/h)</span>';
+      ctx.parentElement.appendChild(lg);
+    }
   } catch(e) {
     var totalEl = document.getElementById('fees-today-total');
     if (totalEl) totalEl.textContent = 'Error loading data';

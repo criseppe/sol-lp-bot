@@ -293,10 +293,19 @@ export function startDashboard(port: number): DashboardServer {
     const hours: Record<number, { fees: number; inRange: number; total: number }> = {};
     for (let h = 0; h < 24; h++) hours[h] = { fees: 0, inRange: 0, total: 0 };
 
-    const feesOf = (s: any) => {
-      const p = (s.pending_fees_sol || 0) * s.price + (s.pending_fees_usdc || 0);
-      return (s.cum_fees_sol || 0) * s.price + (s.cum_fees_usdc || 0) + (p > 1000 ? 0 : p);
+    // Compute fee deltas using SOL and USDC components separately to avoid
+    // price-change inflation on cumulative SOL fees (which are all-time).
+    // Convert SOL delta to USD using the current snapshot's price.
+    const pendingSol = (s: any) => {
+      const p = (s.pending_fees_sol || 0);
+      return (p * s.price > 1000) ? 0 : p; // skip bogus values
     };
+    const pendingUsdc = (s: any) => {
+      const p = (s.pending_fees_usdc || 0);
+      return ((s.pending_fees_sol || 0) * s.price > 1000) ? 0 : p;
+    };
+    const solFees = (s: any) => (s.cum_fees_sol || 0) + pendingSol(s);
+    const usdcFees = (s: any) => (s.cum_fees_usdc || 0) + pendingUsdc(s);
 
     for (let i = 0; i < daySnaps.length; i++) {
       const s = daySnaps[i] as any;
@@ -307,7 +316,11 @@ export function startDashboard(port: number): DashboardServer {
       hours[h].total++;
       // Sum positive fee deltas within the hour (skip drops from rebalances)
       if (i > 0) {
-        const delta = feesOf(s) - feesOf(daySnaps[i - 1]);
+        const prev = daySnaps[i - 1];
+        const deltaSol = solFees(s) - solFees(prev);
+        const deltaUsdc = usdcFees(s) - usdcFees(prev);
+        // Convert SOL delta at current price, combine with USDC delta
+        const delta = deltaSol * s.price + deltaUsdc;
         if (delta > 0 && delta < 50) hours[h].fees += delta;
       }
     }
@@ -333,9 +346,16 @@ export function startDashboard(port: number): DashboardServer {
       FROM rebalance_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`).all(dayStart, dayEnd) as any[];
 
     // Available dates (from daily_summary table — efficient, no full scan)
-    const dates = (dbRef.prepare('SELECT DISTINCT date FROM daily_summary ORDER BY date ASC').all() as any[]).map((r: any) => r.date);
+    const dailySummaries = dbRef.prepare('SELECT date, fees_earned_usdc FROM daily_summary ORDER BY date ASC').all() as any[];
+    const dates = dailySummaries.map((r: any) => r.date);
 
-    res.json({ date, hourlyData, dayTotal: dayCum, events, availableDates: dates });
+    // Use daily_summary.fees_earned_usdc for the day total (accurate, not affected by
+    // price fluctuations on cumulative SOL fees). Fall back to dayCum for today if
+    // daily_summary hasn't been written yet.
+    const summaryRow = dailySummaries.find((r: any) => r.date === date);
+    const dayTotal = summaryRow ? summaryRow.fees_earned_usdc : dayCum;
+
+    res.json({ date, hourlyData, dayTotal, events, availableDates: dates });
   });
 
   app.get('/api/swap-ledger', (_req, res) => {
