@@ -1559,9 +1559,17 @@ ${NAV_HTML}
         <div style="font-size:16px;font-weight:bold">$${fmt(live.totalValueUsdc)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.solBalance, 4)} SOL + ${fmt(live.usdcBalance, 2)} USDC</div>
         ${(() => {
-          const deployPct = live.regime === 'EXTREME' ? 0.25 : live.regime === 'BEARISH_TREND' ? 0.85 : live.regime === 'BULLISH_TREND' ? 0.85 : 1.0;
-          const targetIdlePct = (1 - deployPct) * 100;
-          const targetSolPct = live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50;
+          const varEnabled = runtime.varEnabled;
+          const sirEnabled = runtime.sirEnabled;
+          // VAR deploy or static regime deploy
+          const deployPct = varEnabled
+            ? Math.max(0.25, Math.min(0.90, 0.95 - (live.marketSignals?.vol1h ?? 0.003) * 5))
+            : (live.regime === 'EXTREME' ? 0.25 : live.regime === 'BEARISH_TREND' ? 0.85 : live.regime === 'BULLISH_TREND' ? 0.85 : 1.0);
+          const targetIdlePct = (1 - Math.max(0.10, deployPct)) * 100;
+          // SIR target or static regime target
+          const targetSolPct = sirEnabled
+            ? 50 // SIR base target (deposit ratio ~50%)
+            : (live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50);
           const walletSolVal = live.solBalance * live.solPrice;
           const walletTotal = walletSolVal + live.usdcBalance;
           const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
@@ -1572,10 +1580,10 @@ ${NAV_HTML}
           const idleDeviation = Math.abs(walletPctOfTotal - targetIdlePct);
           const idleCol = idleDeviation > 10 ? '#eab308' : '#22c55e';
           return `<div style="font-size:10px;margin-top:4px">
-            <span style="color:${idleCol};font-weight:bold">${fmt(walletPctOfTotal, 0)}% of portfolio</span> <span style="color:#8b949e">· Target: ${fmt(targetIdlePct, 0)}% idle (${live.regime})</span>
+            <span style="color:${idleCol};font-weight:bold">${fmt(walletPctOfTotal, 0)}% of portfolio</span> <span style="color:#8b949e">· Target: ${fmt(targetIdlePct, 0)}% idle ${varEnabled ? '(VAR)' : '(' + live.regime + ')'}</span>
           </div>
           <div style="font-size:10px;margin-top:2px">
-            <span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span> <span style="color:${solDeviationCol}">· Target: ${targetSolPct}% SOL</span>
+            <span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span> <span style="color:${solDeviationCol}">· Target: ${targetSolPct}% SOL ${sirEnabled ? '(SIR)' : ''}</span>
           </div>`;
         })()}
       </div>
