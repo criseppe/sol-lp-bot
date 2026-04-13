@@ -3104,61 +3104,96 @@ ${data.recentTxs.length > 0 ? `
 ` : '<div style="color:#8b949e;text-align:center;padding:16px">No transactions found</div>'}
 </div>
 
+<div class="section-title">Swap P&amp;L Tracker</div>
 <div class="card" style="margin-bottom:16px">
-  <h2>Swap P&amp;L Tracker (SIR)</h2>
   <div id="swap-pnl-container"><div style="color:#8b949e;text-align:center;padding:20px">Loading swap data...</div></div>
 </div>
 <script>
 (function() {
-  fetch('/api/swap-ledger').then(function(r){return r.json()}).then(function(data) {
+  var TZ = 'Europe/Berlin';
+  function sfmt(n, d) { return n != null ? Number(n).toFixed(d != null ? d : 2) : '--'; }
+
+  fetch('/api/swap-ledger').then(function(r) { return r.json(); }).then(function(data) {
     var c = document.getElementById('swap-pnl-container');
+    if (!c) return;
     if (!data.swaps || data.swaps.length === 0) {
-      c.innerHTML = '<div style="color:#8b949e;text-align:center;padding:20px">No SIR swaps recorded yet. Swaps will appear here when SIR rebalances the idle wallet.</div>';
+      c.innerHTML = '<div style="color:#8b949e;text-align:center;padding:20px">No swaps recorded yet. Swaps will appear here when the bot rebalances.</div>';
       return;
     }
     var s = data.summary;
-    var netPnl = s.totalPnl - s.totalGas - s.totalProtocolFee;
-    var winRate = s.profitable + s.unprofitable > 0 ? (s.profitable / (s.profitable + s.unprofitable) * 100) : 0;
-    var html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">';
-    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + (netPnl >= 0 ? '#22c55e' : '#ef4444') + '">' + (netPnl >= 0 ? '+' : '') + '$' + netPnl.toFixed(2) + '</div><div style="font-size:10px;color:#8b949e">Net P&L</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#58a6ff">' + s.swapCount + '</div><div style="font-size:10px;color:#8b949e">Swaps</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#22c55e">' + winRate.toFixed(0) + '%</div><div style="font-size:10px;color:#8b949e">Win Rate</div></div>';
-    html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#ffd700">$' + s.totalGas.toFixed(3) + '</div><div style="font-size:10px;color:#8b949e">Gas Cost</div></div>';
+    var pnlCount = s.profitable + s.unprofitable;
+    var winRate = pnlCount > 0 ? (s.profitable / pnlCount * 100) : 0;
+    var totalPnlCol = s.totalPnl >= 0 ? '#22c55e' : '#ef4444';
+    var wrCol = winRate >= 50 ? '#22c55e' : '#ef4444';
+
+    var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;margin-bottom:14px">';
+    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:' + totalPnlCol + '">' + (s.totalPnl >= 0 ? '+' : '') + '$' + sfmt(Math.abs(s.totalPnl), 4) + '</div><div style="font-size:10px;color:#8b949e">Total P&amp;L</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:#22c55e">' + s.profitable + '</div><div style="font-size:10px;color:#8b949e">Profitable</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:#ef4444">' + s.unprofitable + '</div><div style="font-size:10px;color:#8b949e">Unprofitable</div></div>';
+    html += '<div style="text-align:center"><div style="font-size:18px;font-weight:bold;color:' + wrCol + '">' + sfmt(winRate, 1) + '%</div><div style="font-size:10px;color:#8b949e">Win Rate</div></div>';
     html += '</div>';
-    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">';
-    html += '<tr><th style="text-align:left;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Time</th>';
-    html += '<th style="text-align:center;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Dir</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">SOL</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">USDC</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Price</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Fee</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Gross</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Net</th>';
-    html += '<th style="text-align:right;color:#8b949e;padding:4px;border-bottom:1px solid #30363d;font-size:10px">Basis</th></tr>';
+
+    html += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;border-collapse:collapse;font-size:11px">';
+    html += '<thead><tr>';
+    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;white-space:nowrap;font-size:10px">Time</th>';
+    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Source</th>';
+    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Dir</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">SOL</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">USDC</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Price</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Gas</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Fee</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Gross</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Net</th>';
+    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px;white-space:nowrap">Cost Basis</th>';
+    html += '</tr></thead><tbody>';
+
     data.swaps.forEach(function(sw) {
-      var t = new Date(sw.timestamp).toLocaleString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit',hour12:false,timeZone:'Europe/Berlin'});
-      var dirCol = sw.direction === 'buy_sol' ? '#22c55e' : '#ef4444';
-      var dirLabel = sw.direction === 'buy_sol' ? 'BUY' : 'SELL';
-      var gas = 0.00001 * sw.price;
-      var fee = sw.usdc_amount * 0.0006;
+      var t = new Date(sw.timestamp).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      var isBuy = sw.direction === 'buy_sol';
+      var dirCol = isBuy ? '#22c55e' : '#ef4444';
+      var dirLabel = isBuy ? 'BUY' : 'SELL';
+      var price = sw.price || 0;
+      var gasEst = 10000 * price / 1e9;
+      var protoFee = (sw.usdc_amount || 0) * 0.0006;
       var gross = sw.pnl_usdc != null ? sw.pnl_usdc : null;
-      var net = gross != null ? gross - gas - fee : null;
+      var net = gross != null ? gross - gasEst - protoFee : null;
+      var grossCol = gross != null ? (gross >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
       var netCol = net != null ? (net >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
+      var cbBefore = sw.cost_basis_before != null ? '$' + sfmt(sw.cost_basis_before, 2) : '--';
+      var cbAfter = sw.cost_basis_after != null ? '$' + sfmt(sw.cost_basis_after, 2) : '--';
+
+      // Determine source from reason
+      var reason = sw.reason || '';
+      var source = 'unknown';
+      var srcCol = '#8b949e';
+      if (reason.indexOf('SIR') >= 0) { source = 'SIR'; srcCol = '#a855f7'; }
+      else if (reason.indexOf('Pre-open') >= 0) { source = 'Pre-open'; srcCol = '#58a6ff'; }
+      else if (reason.indexOf('Add liquidity') >= 0 || reason.indexOf('match position') >= 0) { source = 'Auto-deploy'; srcCol = '#22c55e'; }
+      else if (reason.indexOf('Idle') >= 0 || reason.indexOf('idle') >= 0) { source = 'Idle Rebal'; srcCol = '#eab308'; }
+      else if (reason.indexOf('harvest') >= 0 || reason.indexOf('Harvest') >= 0) { source = 'Harvest'; srcCol = '#ffd700'; }
+
       html += '<tr style="border-bottom:1px solid #21262d">';
-      html += '<td style="padding:4px;color:#c9d1d9">' + t + '</td>';
-      html += '<td style="padding:4px;text-align:center;color:' + dirCol + ';font-weight:bold">' + dirLabel + '</td>';
-      html += '<td style="padding:4px;text-align:right">' + sw.sol_amount.toFixed(3) + '</td>';
-      html += '<td style="padding:4px;text-align:right">$' + sw.usdc_amount.toFixed(0) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#58a6ff">$' + sw.price.toFixed(2) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#ffd700">$' + fee.toFixed(2) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:' + (gross != null && gross >= 0 ? '#22c55e' : '#ef4444') + '">' + (gross != null ? (gross >= 0 ? '+' : '') + '$' + gross.toFixed(2) : '-') + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:' + netCol + ';font-weight:bold">' + (net != null ? (net >= 0 ? '+' : '') + '$' + net.toFixed(2) : '-') + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sw.cost_basis_before.toFixed(2) + (sw.cost_basis_after !== sw.cost_basis_before ? ' > $' + sw.cost_basis_after.toFixed(2) : '') + '</td>';
+      html += '<td style="padding:4px;white-space:nowrap;font-size:10px;color:#8b949e">' + t + '</td>';
+      html += '<td style="padding:4px;font-size:10px;font-weight:bold;color:' + srcCol + '">' + source + '</td>';
+      html += '<td style="padding:4px;color:' + dirCol + ';font-weight:bold;font-size:10px">' + dirLabel + '</td>';
+      html += '<td style="padding:4px;text-align:right;font-family:monospace">' + sfmt(sw.sol_amount, 4) + '</td>';
+      html += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(sw.usdc_amount, 2) + '</td>';
+      html += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(price, 2) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sfmt(gasEst, 4) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sfmt(protoFee, 4) + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:' + grossCol + '">' + (gross != null ? (gross >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(gross), 4) : '--') + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:' + netCol + ';font-weight:bold">' + (net != null ? (net >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(net), 4) : '--') + '</td>';
+      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px;white-space:nowrap">' + cbBefore + ' &rarr; ' + cbAfter + '</td>';
       html += '</tr>';
     });
-    html += '</table></div>';
+
+    html += '</tbody></table></div>';
     c.innerHTML = html;
-  }).catch(function(e) { document.getElementById('swap-pnl-container').innerHTML = '<div style="color:#ef4444">Failed: ' + e + '</div>'; });
+  }).catch(function(e) {
+    var c = document.getElementById('swap-pnl-container');
+    if (c) c.innerHTML = '<div style="color:#ef4444;text-align:center;padding:16px">Failed to load swap data</div>';
+  });
 })();
 </script>
 
