@@ -16,8 +16,9 @@ import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
 import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
-import { calculateVarParams, shouldAdjustRange, calculateIdleTarget, shouldRebalanceIdle } from './engine/var.js';
+import { calculateVarParams, shouldAdjustRange, calculateIdleTarget, shouldRebalanceIdle, calculateSwapPnl } from './engine/var.js';
 import type { VarConfig, SirConfig } from './engine/var.js';
+import { insertSwapLedger } from './db/sqlite.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -98,6 +99,7 @@ let lastIdleRebalanceRegime: string | null = null; // track which regime last tr
 let lastIdleRebalanceTime = 0; // timestamp of last idle rebalance (30-min cooldown)
 let lastVarAdjustTime = 0; // timestamp of last VAR range adjustment
 let lastSirSwapTime = 0; // timestamp of last SIR idle swap
+let sirCostBasis = 0; // weighted average SOL cost basis for SIR P&L tracking
 let idleRebalancePending = false; // set true after position reopen to trigger check
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
@@ -1300,13 +1302,28 @@ async function runLiveCycle(price: number): Promise<void> {
 
       if (sirResult.swap) {
         console.log(JSON.stringify({ level: 'info', msg: `SIR rebalance: ${sirResult.direction} $${sirResult.amountUsdc.toFixed(0)} (SOL ${(currentSolPct * 100).toFixed(0)}% → target ${(sirTarget * 100).toFixed(0)}%)`, timestamp: now }));
+        const solAmount = sirResult.direction === 'sell_sol' ? sirResult.amountUsdc / price : sirResult.amountUsdc / price;
+        const idleSolHolding = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
+        const basisBefore = sirCostBasis || price; // default to current price if no prior basis
+        const pnlCalc = calculateSwapPnl(sirResult.direction, solAmount, price, basisBefore, idleSolHolding);
+
         if (sirResult.direction === 'sell_sol') {
-          const solToSwap = sirResult.amountUsdc / price;
-          await liveExecutor.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `SIR: sell SOL to target ${(sirTarget * 100).toFixed(0)}%`);
+          await liveExecutor.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(solAmount * 1e9), `SIR: sell SOL to target ${(sirTarget * 100).toFixed(0)}%`);
         } else {
           await liveExecutor.doSwapPublic(MINTS.USDC, MINTS.SOL, Math.floor(sirResult.amountUsdc * 1e6), `SIR: buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
         }
+        sirCostBasis = pnlCalc.newBasis;
         lastSirSwapTime = now;
+
+        // Track in swap ledger
+        insertSwapLedger(db, {
+          timestamp: now, direction: sirResult.direction, sol_amount: solAmount,
+          usdc_amount: sirResult.amountUsdc, price, reason: `SIR: ${sirResult.direction} to target ${(sirTarget * 100).toFixed(0)}%`,
+          pnl_usdc: pnlCalc.pnlUsdc, cost_basis_before: basisBefore, cost_basis_after: pnlCalc.newBasis,
+        });
+        if (pnlCalc.pnlUsdc != null) {
+          console.log(JSON.stringify({ level: 'info', msg: `SIR swap P&L: ${pnlCalc.pnlUsdc >= 0 ? '+' : ''}$${pnlCalc.pnlUsdc.toFixed(2)} (sold at $${price.toFixed(2)}, basis $${basisBefore.toFixed(2)})`, timestamp: now }));
+        }
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
           prox_lower: null, prox_upper: null, in_range: null,
           decision: 'SIR_REBALANCE', reasoning: `SIR idle rebalance: ${sirResult.direction} $${sirResult.amountUsdc.toFixed(2)}. SOL ${(currentSolPct * 100).toFixed(0)}% → target ${(sirTarget * 100).toFixed(0)}%. Trend bias: SOL 4h ${mktSig?.solDelta24h ?? 0}%.`,

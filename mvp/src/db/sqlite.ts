@@ -578,6 +578,34 @@ export function setConfig(db: Database.Database, key: string, value: string): vo
     .run(key, value, Date.now());
 }
 
+// ── Swap Ledger (cost basis tracking) ────────────────────────────────────
+
+export function insertSwapLedger(db: Database.Database, entry: {
+  timestamp: number; direction: string; sol_amount: number; usdc_amount: number;
+  price: number; reason: string; pnl_usdc: number | null;
+  cost_basis_before: number; cost_basis_after: number;
+}): void {
+  db.prepare(`INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    entry.timestamp, entry.direction, entry.sol_amount, entry.usdc_amount,
+    entry.price, entry.reason, entry.pnl_usdc, entry.cost_basis_before, entry.cost_basis_after,
+  );
+}
+
+export function getSwapLedger(db: Database.Database, limit = 50): any[] {
+  return db.prepare('SELECT * FROM swap_ledger ORDER BY timestamp DESC LIMIT ?').all(limit);
+}
+
+export function getSwapPnlSummary(db: Database.Database): { totalPnl: number; swapCount: number; profitable: number; unprofitable: number } {
+  const rows = db.prepare("SELECT pnl_usdc FROM swap_ledger WHERE direction = 'sell_sol' AND pnl_usdc IS NOT NULL").all() as any[];
+  let totalPnl = 0, profitable = 0, unprofitable = 0;
+  for (const r of rows) {
+    totalPnl += r.pnl_usdc;
+    if (r.pnl_usdc >= 0) profitable++; else unprofitable++;
+  }
+  return { totalPnl, swapCount: rows.length, profitable, unprofitable };
+}
+
 export function setConfigBatch(db: Database.Database, entries: Record<string, string>): void {
   const stmt = db.prepare('INSERT INTO config (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at');
   const now = Date.now();

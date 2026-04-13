@@ -44,6 +44,47 @@ export interface SirResult {
   amountUsdc: number;
 }
 
+// ── Cost Basis Tracker ───────────────────────────────────────────────────
+
+export interface SwapLedgerEntry {
+  timestamp: number;
+  direction: 'buy_sol' | 'sell_sol';
+  solAmount: number;
+  usdcAmount: number;
+  price: number;
+  reason: string;
+  pnlUsdc: number | null;       // profit/loss on this swap (sell only)
+  costBasisBefore: number;       // avg cost basis before swap
+  costBasisAfter: number;        // avg cost basis after swap
+}
+
+/**
+ * Track SOL cost basis using weighted average.
+ * On buy: new basis = (old_basis * old_qty + buy_price * buy_qty) / (old_qty + buy_qty)
+ * On sell: P&L = (sell_price - cost_basis) * sell_qty. Basis unchanged.
+ */
+export function calculateSwapPnl(
+  direction: 'buy_sol' | 'sell_sol',
+  solAmount: number,
+  price: number,
+  currentBasis: number,
+  currentSolHolding: number,
+): { pnlUsdc: number | null; newBasis: number } {
+  if (direction === 'buy_sol') {
+    // Weighted average cost basis
+    const totalSol = currentSolHolding + solAmount;
+    const newBasis = totalSol > 0
+      ? (currentBasis * currentSolHolding + price * solAmount) / totalSol
+      : price;
+    return { pnlUsdc: null, newBasis };
+  } else {
+    // Sell: P&L = (sell_price - cost_basis) * amount
+    const pnlUsdc = (price - currentBasis) * solAmount;
+    // Basis doesn't change on sell (FIFO/avg unchanged)
+    return { pnlUsdc, newBasis: currentBasis };
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function clamp(val: number, min: number, max: number): number {
