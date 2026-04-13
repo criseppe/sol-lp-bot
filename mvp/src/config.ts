@@ -66,6 +66,25 @@ export const runtime = {
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
+  // VAR — Volatility-Adaptive Range
+  varEnabled: false,
+  varMultiplier: 3.0,
+  varTargetHours: 2,
+  varMinWidth: 1.0,
+  varMaxWidth: 6.0,
+  varAdjustThreshold: 0.30,
+  varMinAge: 15,
+  varCooldown: 10,
+
+  // SIR — Smart Idle Rebalancing
+  sirEnabled: false,
+  sirCooldownMinutes: 5,
+  sirTriggerThreshold: 0.08,
+  sirMinSwapUsdc: 20,
+  sirTrendMultiplier: 0.05,
+  sirMaxSolPct: 0.75,
+  sirMinSolPct: 0.15,
+
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
   vol1hExtremeThreshold: 0.06,
@@ -172,6 +191,25 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vFGLow = nv('fearGreedExtremeLow', 0, 50); if (vFGLow != null) runtime.fearGreedExtremeLow = vFGLow;
   const vFGHigh = nv('fearGreedExtremeHigh', 50, 100); if (vFGHigh != null) runtime.fearGreedExtremeHigh = vFGHigh;
 
+  // VAR config
+  const vVarEn = g('varEnabled'); if (vVarEn === 'true' || vVarEn === 'false') runtime.varEnabled = vVarEn === 'true';
+  const vVarMult = nv('varMultiplier', 1, 10); if (vVarMult != null) runtime.varMultiplier = vVarMult;
+  const vVarHours = nv('varTargetHours', 0.5, 24); if (vVarHours != null) runtime.varTargetHours = vVarHours;
+  const vVarMinW = nv('varMinWidth', 0.5, 5); if (vVarMinW != null) runtime.varMinWidth = vVarMinW;
+  const vVarMaxW = nv('varMaxWidth', 2, 20); if (vVarMaxW != null) runtime.varMaxWidth = vVarMaxW;
+  const vVarAdj = nv('varAdjustThreshold', 0.1, 0.8); if (vVarAdj != null) runtime.varAdjustThreshold = vVarAdj;
+  const vVarAge = nv('varMinAge', 1, 60); if (vVarAge != null) runtime.varMinAge = vVarAge;
+  const vVarCool = nv('varCooldown', 1, 60); if (vVarCool != null) runtime.varCooldown = vVarCool;
+
+  // SIR config
+  const vSirEn = g('sirEnabled'); if (vSirEn === 'true' || vSirEn === 'false') runtime.sirEnabled = vSirEn === 'true';
+  const vSirCool = nv('sirCooldownMinutes', 1, 60); if (vSirCool != null) runtime.sirCooldownMinutes = vSirCool;
+  const vSirTrig = nv('sirTriggerThreshold', 0.02, 0.5); if (vSirTrig != null) runtime.sirTriggerThreshold = vSirTrig;
+  const vSirMin = nv('sirMinSwapUsdc', 5, 500); if (vSirMin != null) runtime.sirMinSwapUsdc = vSirMin;
+  const vSirTrend = nv('sirTrendMultiplier', 0.01, 0.2); if (vSirTrend != null) runtime.sirTrendMultiplier = vSirTrend;
+  const vSirMaxSol = nv('sirMaxSolPct', 0.5, 1); if (vSirMaxSol != null) runtime.sirMaxSolPct = vSirMaxSol;
+  const vSirMinSol = nv('sirMinSolPct', 0, 0.5); if (vSirMinSol != null) runtime.sirMinSolPct = vSirMinSol;
+
   const rwo = g('rangeWidthOverride');
   if (rwo != null) runtime.rangeWidthOverride = rwo === 'null' || rwo === '' ? null : parseFloat(rwo);
 
@@ -234,6 +272,21 @@ export function exportConfig(): Record<string, string> {
   out['idleTargetSolPctBearish'] = String(runtime.idleTargetSolPctBearish);
   out['idleTargetSolPctExtreme'] = String(runtime.idleTargetSolPctExtreme);
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
+  out['varEnabled'] = String(runtime.varEnabled);
+  out['varMultiplier'] = String(runtime.varMultiplier);
+  out['varTargetHours'] = String(runtime.varTargetHours);
+  out['varMinWidth'] = String(runtime.varMinWidth);
+  out['varMaxWidth'] = String(runtime.varMaxWidth);
+  out['varAdjustThreshold'] = String(runtime.varAdjustThreshold);
+  out['varMinAge'] = String(runtime.varMinAge);
+  out['varCooldown'] = String(runtime.varCooldown);
+  out['sirEnabled'] = String(runtime.sirEnabled);
+  out['sirCooldownMinutes'] = String(runtime.sirCooldownMinutes);
+  out['sirTriggerThreshold'] = String(runtime.sirTriggerThreshold);
+  out['sirMinSwapUsdc'] = String(runtime.sirMinSwapUsdc);
+  out['sirTrendMultiplier'] = String(runtime.sirTrendMultiplier);
+  out['sirMaxSolPct'] = String(runtime.sirMaxSolPct);
+  out['sirMinSolPct'] = String(runtime.sirMinSolPct);
   out['useEnhancedRegime'] = String(runtime.useEnhancedRegime);
   out['vol1hExtremeThreshold'] = String(runtime.vol1hExtremeThreshold);
   out['vol4hExtremeThreshold'] = String(runtime.vol4hExtremeThreshold);

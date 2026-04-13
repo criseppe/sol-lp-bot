@@ -16,6 +16,8 @@ import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
 import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
+import { calculateVarParams, shouldAdjustRange, calculateIdleTarget, shouldRebalanceIdle } from './engine/var.js';
+import type { VarConfig, SirConfig } from './engine/var.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -94,6 +96,8 @@ let consecutiveTxFailures = 0; // exponential backoff on repeated TX failures
 let txBackoffUntil = 0; // timestamp: skip position operations until this time
 let lastIdleRebalanceRegime: string | null = null; // track which regime last triggered idle rebalance
 let lastIdleRebalanceTime = 0; // timestamp of last idle rebalance (30-min cooldown)
+let lastVarAdjustTime = 0; // timestamp of last VAR range adjustment
+let lastSirSwapTime = 0; // timestamp of last SIR idle swap
 let idleRebalancePending = false; // set true after position reopen to trigger check
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
@@ -892,8 +896,47 @@ async function runLiveCycle(price: number): Promise<void> {
   }
   if (liveRebalancesThisHour >= runtime.rebalanceLoopLimit) return;
 
-  const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+  let params = { ...(runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)) };
   const currentPos = liveExecutor.getCurrentPosition();
+
+  // ── VAR override: dynamic params from volatility ──
+  if (runtime.varEnabled) {
+    const mktSig = marketData.getSignals();
+    if (mktSig?.vol1h != null) {
+      const varConfig: VarConfig = {
+        enabled: true, multiplier: runtime.varMultiplier, targetHours: runtime.varTargetHours,
+        minWidth: runtime.varMinWidth, maxWidth: runtime.varMaxWidth,
+        adjustThreshold: runtime.varAdjustThreshold, minPositionAge: runtime.varMinAge,
+        cooldownMinutes: runtime.varCooldown,
+      };
+      const varP = calculateVarParams(mktSig.vol1h, mktSig.solDelta24h ?? 0, varConfig);
+      params.rangeWidthPct = varP.targetWidth;
+      params.proxThresholdLower = varP.proxThresholdLower;
+      params.proxThresholdUpper = varP.proxThresholdUpper;
+      params.skewDown = varP.skewDown;
+      params.skewUp = varP.skewUp;
+      params.deployPct = varP.deployPct;
+
+      // Check if range adjustment needed (close+reopen with new width)
+      if (currentPos) {
+        const currentWidth = ((currentPos.priceUpper - currentPos.priceLower) / ((currentPos.priceUpper + currentPos.priceLower) / 2)) * 100;
+        const prox = calcProximity(price, currentPos as any);
+        const proxNearest = Math.max(prox.proxToLower, prox.proxToUpper);
+        const posAgeMin = currentPos.entryTime ? (now - currentPos.entryTime) / 60_000 : 999;
+        if (shouldAdjustRange(currentWidth, varP.targetWidth, proxNearest, posAgeMin, lastVarAdjustTime, now, varConfig)) {
+          console.log(JSON.stringify({ level: 'info', msg: `VAR range adjustment: ${currentWidth.toFixed(2)}% → ${varP.targetWidth.toFixed(2)}% (vol1h=${mktSig.vol1h.toFixed(4)})`, timestamp: now }));
+          insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+            prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
+            decision: 'VAR_ADJUST', reasoning: `VAR range adjustment triggered. Current width ${currentWidth.toFixed(2)}% → target ${varP.targetWidth.toFixed(2)}% (deviation ${(Math.abs(currentWidth - varP.targetWidth) / currentWidth * 100).toFixed(0)}%). Vol1h=${mktSig.vol1h.toFixed(4)}. Closing to reopen with new range.`,
+            params_json: JSON.stringify(varP) });
+          lastVarAdjustTime = now;
+          // Close position — next cycle will reopen with new params
+          try { await liveExecutor.closePosition(); } catch (e) { console.log(JSON.stringify({ level: 'error', msg: 'VAR close failed', error: String(e), timestamp: now })); }
+          return;
+        }
+      }
+    }
+  }
 
   // No position → open one
   if (!currentPos) {
@@ -1234,6 +1277,43 @@ async function runLiveCycle(price: number): Promise<void> {
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'idle rebalance failed', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: now }));
+    }
+  }
+
+  // ── SIR: Smart Idle Rebalancing (price-driven) ──
+  if (runtime.sirEnabled && now - lastSirSwapTime >= runtime.sirCooldownMinutes * 60_000) {
+    try {
+      const mktSig = marketData.getSignals();
+      const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+      const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
+      const idleTotal = idleSol * price + balances.usdc;
+      const currentSolPct = idleTotal > 0 ? (idleSol * price) / idleTotal : 0;
+
+      const sirConfig: SirConfig = {
+        enabled: true, cooldownMinutes: runtime.sirCooldownMinutes,
+        triggerThreshold: runtime.sirTriggerThreshold, minSwapUsdc: runtime.sirMinSwapUsdc,
+        trendMultiplier: runtime.sirTrendMultiplier, maxSolPct: runtime.sirMaxSolPct,
+        minSolPct: runtime.sirMinSolPct,
+      };
+      const sirTarget = calculateIdleTarget(price, params.rangeWidthPct, params.skewDown, mktSig?.solDelta24h ?? 0, sirConfig);
+      const sirResult = shouldRebalanceIdle(currentSolPct, sirTarget, idleTotal, sirConfig);
+
+      if (sirResult.swap) {
+        console.log(JSON.stringify({ level: 'info', msg: `SIR rebalance: ${sirResult.direction} $${sirResult.amountUsdc.toFixed(0)} (SOL ${(currentSolPct * 100).toFixed(0)}% → target ${(sirTarget * 100).toFixed(0)}%)`, timestamp: now }));
+        if (sirResult.direction === 'sell_sol') {
+          const solToSwap = sirResult.amountUsdc / price;
+          await liveExecutor.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `SIR: sell SOL to target ${(sirTarget * 100).toFixed(0)}%`);
+        } else {
+          await liveExecutor.doSwapPublic(MINTS.USDC, MINTS.SOL, Math.floor(sirResult.amountUsdc * 1e6), `SIR: buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
+        }
+        lastSirSwapTime = now;
+        insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+          prox_lower: null, prox_upper: null, in_range: null,
+          decision: 'SIR_REBALANCE', reasoning: `SIR idle rebalance: ${sirResult.direction} $${sirResult.amountUsdc.toFixed(2)}. SOL ${(currentSolPct * 100).toFixed(0)}% → target ${(sirTarget * 100).toFixed(0)}%. Trend bias: SOL 4h ${mktSig?.solDelta24h ?? 0}%.`,
+          params_json: JSON.stringify({ currentSolPct, sirTarget, amountUsdc: sirResult.amountUsdc, direction: sirResult.direction }) });
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'error', msg: 'SIR rebalance failed', error: err instanceof Error ? err.message : String(err), timestamp: now }));
     }
   }
 
