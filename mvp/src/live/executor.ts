@@ -174,21 +174,22 @@ export class LiveExecutor {
     // Validate tick arrays exist before opening — avoids 0x1781 simulation failures
     try {
       const fetcher = this.client.getFetcher();
-      const lowerPDAs = TickArrayUtil.getTickArrayPDAs(range.tickLower, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false);
-      const upperPDAs = TickArrayUtil.getTickArrayPDAs(range.tickUpper, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false);
-      const lowerArr = await fetcher.getTickArray(lowerPDAs[0].publicKey, IGNORE_CACHE);
-      const upperArr = await fetcher.getTickArray(upperPDAs[0].publicKey, IGNORE_CACHE);
-      if (!lowerArr || !upperArr) {
-        console.log(JSON.stringify({ level: 'warn', msg: `Tick arrays not found after init. Lower: ${!!lowerArr}, Upper: ${!!upperArr}. Waiting 5s and retrying...`, timestamp: Date.now() }));
-        await new Promise(r => setTimeout(r, 5000));
-        // Re-init if still missing
-        const retryInit = await whirlpool.initTickArrayForTicks([range.tickLower, range.tickUpper]);
+      const currentTick = poolData.tickCurrentIndex;
+      // Check all 3 tick arrays: lower bound, upper bound, AND current tick
+      const ticksToCheck = [range.tickLower, range.tickUpper, currentTick];
+      const allPDAs = ticksToCheck.map(t => TickArrayUtil.getTickArrayPDAs(t, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false));
+      const allArrays = await Promise.all(allPDAs.map(p => fetcher.getTickArray(p[0].publicKey, IGNORE_CACHE)));
+      const missing = allArrays.map((a, i) => !a ? ticksToCheck[i] : null).filter(Boolean);
+      if (missing.length > 0) {
+        console.log(JSON.stringify({ level: 'warn', msg: `Tick arrays missing for ticks: [${missing.join(',')}]. Initializing + waiting 5s...`, timestamp: Date.now() }));
+        // Init all 3 ticks (lower, upper, current)
+        const retryInit = await whirlpool.initTickArrayForTicks(ticksToCheck);
         if (retryInit) {
-          await this.execTx(retryInit);
+          try { await this.execTx(retryInit); } catch {}
           await new Promise(r => setTimeout(r, 5000));
         }
       } else {
-        console.log(JSON.stringify({ level: 'info', msg: 'Tick arrays validated ✅', timestamp: Date.now() }));
+        console.log(JSON.stringify({ level: 'info', msg: 'Tick arrays validated ✅ (lower + upper + current)', timestamp: Date.now() }));
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `Tick array validation failed: ${err instanceof Error ? err.message : String(err)}. Proceeding anyway.`, timestamp: Date.now() }));
