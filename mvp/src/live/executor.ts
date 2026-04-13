@@ -125,6 +125,19 @@ export class LiveExecutor {
       this.cumGasLamports += result.feeLamports;
       this.txCount++;
     }
+    // Fire swap event callback for tracking (swap ledger, cost basis, etc.)
+    if (result && this.onSwap) {
+      try {
+        this.onSwap({
+          timestamp: Date.now(),
+          fromToken: inputMint === MINTS.SOL ? 'SOL' : 'USDC',
+          toToken: outputMint === MINTS.SOL ? 'SOL' : 'USDC',
+          fromAmount: inputMint === MINTS.SOL ? amountRaw / 1e9 : amountRaw / 1e6,
+          toAmount: result.outputAmount,
+          reason,
+        });
+      } catch {}
+    }
     return result;
   }
 

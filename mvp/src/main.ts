@@ -192,16 +192,30 @@ async function main() {
 
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
+      const swapPrice = currentLiveData?.solPrice ?? 0;
       insertRebalanceEventWithRule2(db, {
-        timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: currentLiveData?.solPrice ?? 0, regime: liveRegime,
+        timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: swapPrice, regime: liveRegime,
         note: `SWAP: ${event.reason}`,
         solBefore: 0, usdcBefore: event.fromAmount, solAfter: event.toAmount, usdcAfter: 0,
         feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
       insertDecisionLog(db, {
-        timestamp: event.timestamp, price: 0, regime: liveRegime, bot_state: liveBotState,
+        timestamp: event.timestamp, price: swapPrice, regime: liveRegime, bot_state: liveBotState,
         prox_lower: null, prox_upper: null, in_range: null,
         decision: 'SWAP', reasoning: event.reason, params_json: null,
+      });
+      // Track ALL swaps in swap_ledger for P&L analysis
+      const isSolSell = event.fromToken === 'SOL';
+      const solAmt = isSolSell ? event.fromAmount : event.toAmount;
+      const usdcAmt = isSolSell ? event.toAmount : event.fromAmount;
+      const direction = isSolSell ? 'sell_sol' : 'buy_sol';
+      const idleSolHolding = 0; // approximate — exact value would need balance check
+      const pnlCalc = calculateSwapPnl(direction as any, solAmt, swapPrice, sirCostBasis || swapPrice, idleSolHolding);
+      sirCostBasis = pnlCalc.newBasis;
+      insertSwapLedger(db, {
+        timestamp: event.timestamp, direction, sol_amount: solAmt, usdc_amount: usdcAmt,
+        price: swapPrice, reason: event.reason, pnl_usdc: pnlCalc.pnlUsdc,
+        cost_basis_before: sirCostBasis || swapPrice, cost_basis_after: pnlCalc.newBasis,
       });
     };
 
