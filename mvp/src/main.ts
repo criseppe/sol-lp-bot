@@ -100,6 +100,14 @@ let lastIdleRebalanceTime = 0; // timestamp of last idle rebalance (30-min coold
 let lastVarAdjustTime = 0; // timestamp of last VAR range adjustment
 let lastSirSwapTime = 0; // timestamp of last SIR idle swap
 let sirCostBasis = 0; // weighted average SOL cost basis for SIR P&L tracking
+// Restore cost basis from last swap_ledger entry (persists across restarts)
+try {
+  const lastSwap = db.prepare('SELECT cost_basis_after FROM swap_ledger WHERE cost_basis_after > 0 ORDER BY timestamp DESC LIMIT 1').get() as any;
+  if (lastSwap?.cost_basis_after) {
+    sirCostBasis = lastSwap.cost_basis_after;
+    console.log(JSON.stringify({ level: 'info', msg: `Cost basis restored from swap_ledger: $${sirCostBasis.toFixed(2)}`, timestamp: Date.now() }));
+  }
+} catch {}
 let idleRebalancePending = false; // set true after position reopen to trigger check
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
@@ -206,7 +214,7 @@ async function main() {
 
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
-      const swapPrice = currentLiveData?.solPrice ?? 0;
+      const swapPrice = currentLiveData?.solPrice || oracle.getPrice()?.price || 0;
       insertRebalanceEventWithRule2(db, {
         timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: swapPrice, regime: liveRegime,
         note: `SWAP: ${event.reason}`,
