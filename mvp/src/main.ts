@@ -190,6 +190,20 @@ async function main() {
     liveExecutor.txCount = (savedState as any)?.tx_count ?? 0;
     console.log(JSON.stringify({ level: 'info', msg: `gas from DB: ${liveExecutor.cumGasLamports} lamports (${(liveExecutor.cumGasLamports/1e9).toFixed(6)} SOL), ${liveExecutor.txCount} txs`, timestamp: Date.now() }));
 
+    // P&L guard for auto-deploy ratio matching swaps
+    liveExecutor.shouldAllowSwap = (direction, amount, price) => {
+      const basis = sirCostBasis || price;
+      if (direction === 'sell_sol' && price < basis) {
+        console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell ${amount.toFixed(2)} SOL at $${price.toFixed(2)} (basis $${basis.toFixed(2)}, would lose $${((basis - price) * amount).toFixed(2)})`, timestamp: Date.now() }));
+        return false;
+      }
+      if (direction === 'buy_sol' && price > basis * 1.005) {
+        console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED buy SOL at $${price.toFixed(2)} (basis $${basis.toFixed(2)}, premium $${((price - basis) * amount).toFixed(2)})`, timestamp: Date.now() }));
+        return false;
+      }
+      return true;
+    };
+
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
       const swapPrice = currentLiveData?.solPrice ?? 0;

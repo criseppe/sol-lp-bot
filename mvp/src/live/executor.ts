@@ -56,6 +56,7 @@ export class LiveExecutor {
   private whirlpoolAddress: PublicKey;
   private currentPosition: LivePosition | null = null;
   public onSwap: ((event: SwapEvent) => void) | null = null;
+  public shouldAllowSwap: ((direction: 'sell_sol' | 'buy_sol', amount: number, price: number) => boolean) | null = null;
   public cumGasLamports = 0;
   public txCount = 0;
 
@@ -752,10 +753,14 @@ export class LiveExecutor {
     const solDeficit = idealSol - solAvailable;
     const usdcDeficit = idealUsdc - usdcAvailable;
 
-    // Swap to match ideal ratio
+    // Swap to match ideal ratio (with P&L awareness)
     if (solDeficit > 0.01) {
       const usdcToSwap = Math.min(solDeficit * currentPrice * getSwapBuffer(), usdcAvailable - 2);
-      if (usdcToSwap > 1) {
+      const buyAllowed = !this.shouldAllowSwap || this.shouldAllowSwap('buy_sol', solDeficit, currentPrice);
+      if (usdcToSwap > 1 && !buyAllowed) {
+        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: SKIPPED USDC→SOL swap ($${usdcToSwap.toFixed(0)}) — P&L guard blocked (buying above basis). Deploying with available ratio.`, timestamp: Date.now() }));
+      }
+      if (usdcToSwap > 1 && buyAllowed) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${usdcToSwap.toFixed(2)} USDC -> SOL`, timestamp: Date.now() }));
         const solBeforeSwap = solBal;
         const usdcBeforeSwap = usdcBal;
@@ -771,7 +776,11 @@ export class LiveExecutor {
       }
     } else if (usdcDeficit > 1) {
       const solToSwap = Math.min(usdcDeficit / currentPrice * getSwapBuffer(), solAvailable - 0.02);
-      if (solToSwap > 0.005) {
+      const sellAllowed = !this.shouldAllowSwap || this.shouldAllowSwap('sell_sol', solToSwap, currentPrice);
+      if (solToSwap > 0.005 && !sellAllowed) {
+        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: SKIPPED SOL→USDC swap (${solToSwap.toFixed(2)} SOL) — P&L guard blocked (selling below basis). Deploying with available ratio.`, timestamp: Date.now() }));
+      }
+      if (solToSwap > 0.005 && sellAllowed) {
         console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${solToSwap.toFixed(4)} SOL -> USDC`, timestamp: Date.now() }));
         const solBeforeSwap = solBal;
         const usdcBeforeSwap = usdcBal;
