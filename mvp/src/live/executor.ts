@@ -158,15 +158,40 @@ export class LiveExecutor {
     const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
 
     // Initialize tick arrays if needed — retry once if it fails (429 can cause false negatives)
+    const poolData = whirlpool.getData();
+    const tickSpacing = poolData.tickSpacing;
     try {
       const initTx = await whirlpool.initTickArrayForTicks([range.tickLower, range.tickUpper]);
       if (initTx) {
         console.log(JSON.stringify({ level: 'info', msg: 'initializing tick arrays', timestamp: Date.now() }));
         await this.execTx(initTx);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 5000)); // 5s wait for RPC to see the init
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `Tick array init failed (may already exist): ${err instanceof Error ? err.message : String(err)}`, timestamp: Date.now() }));
+    }
+
+    // Validate tick arrays exist before opening — avoids 0x1781 simulation failures
+    try {
+      const fetcher = this.client.getFetcher();
+      const lowerPDAs = TickArrayUtil.getTickArrayPDAs(range.tickLower, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false);
+      const upperPDAs = TickArrayUtil.getTickArrayPDAs(range.tickUpper, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false);
+      const lowerArr = await fetcher.getTickArray(lowerPDAs[0].publicKey, IGNORE_CACHE);
+      const upperArr = await fetcher.getTickArray(upperPDAs[0].publicKey, IGNORE_CACHE);
+      if (!lowerArr || !upperArr) {
+        console.log(JSON.stringify({ level: 'warn', msg: `Tick arrays not found after init. Lower: ${!!lowerArr}, Upper: ${!!upperArr}. Waiting 5s and retrying...`, timestamp: Date.now() }));
+        await new Promise(r => setTimeout(r, 5000));
+        // Re-init if still missing
+        const retryInit = await whirlpool.initTickArrayForTicks([range.tickLower, range.tickUpper]);
+        if (retryInit) {
+          await this.execTx(retryInit);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      } else {
+        console.log(JSON.stringify({ level: 'info', msg: 'Tick arrays validated ✅', timestamp: Date.now() }));
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: `Tick array validation failed: ${err instanceof Error ? err.message : String(err)}. Proceeding anyway.`, timestamp: Date.now() }));
     }
 
     const usdcMint = new PublicKey(MINTS.USDC);
