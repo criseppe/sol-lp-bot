@@ -50,8 +50,8 @@ td{padding:5px 6px;border-bottom:1px solid #21262d}
 
 <div class="nav">
   <a href="/live">Live Wallet</a><a href="/insights">Insights</a><a href="/strategy">Strategy</a>
-  <a href="/config">Config</a><a href="/status">Status</a><a href="/analytics">Analytics</a>
-  <a href="/projection" class="active">Projection</a><a href="/analysis">Agent</a><a href="/arcade">Arcade</a>
+  <a href="/config">Config</a><a href="/status">Status</a>
+  <a href="/projection" class="active">Projection</a><a href="/intelligence">Intelligence</a><a href="/arcade">Arcade</a>
 </div>
 
 <div class="header">

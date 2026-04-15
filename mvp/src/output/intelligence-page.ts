@@ -1,5 +1,6 @@
 /**
- * Bot Intelligence — execution analytics page with 12 interactive widgets
+ * Bot Intelligence — unified execution analytics page
+ * 13 original widgets + 8 from analytics = 21 widgets in 5 sections
  */
 
 export function renderIntelligenceHtml(): string {
@@ -46,6 +47,12 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 .fees-card-label{font-size:9px;color:#484f58;margin-top:3px;text-transform:uppercase;letter-spacing:0.5px}
 .fees-compare{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px;padding:8px 0;border-top:1px solid #21262d;border-bottom:1px solid #21262d}
 .fees-bottom{display:flex;gap:16px;justify-content:center;font-size:11px;color:#8b949e;padding:10px 0 0}
+.section-hdr{display:flex;align-items:center;gap:8px;padding:10px 0 6px;cursor:pointer;user-select:none;grid-column:1/-1}
+.section-hdr h2{font-size:13px;color:#58a6ff;text-transform:uppercase;letter-spacing:1.5px;font-weight:600}
+.section-hdr .arrow{color:#484f58;font-size:14px;transition:transform 0.2s}
+.section-hdr .line{flex:1;height:1px;background:#21262d}
+.section-content{display:contents}
+.section-content.collapsed .w{display:none}
 @media(max-width:700px){
   body{padding:8px}
   .grid{grid-template-columns:1fr}
@@ -62,11 +69,12 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
   .fees-compare{grid-template-columns:1fr 1fr}
   .fees-bottom{flex-wrap:wrap;gap:8px;font-size:10px}
   #cFees{max-height:200px!important}
+  .section-hdr h2{font-size:11px}
 }
 </style></head><body>
 <div class="nav">
   <a href="/live">Live Wallet</a><a href="/insights">Insights</a><a href="/strategy">Strategy</a>
-  <a href="/config">Config</a><a href="/analytics">Analytics</a>
+  <a href="/config">Config</a>
   <a href="/projection">Projection</a><a href="/intelligence" class="active">Intelligence</a><a href="/arcade">Arcade</a>
 </div>
 
@@ -83,7 +91,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 <div class="grid" id="widgets"></div>
 
 <script>
-var DATA=null,CHS={},rangeDays=30,FEES_DATA=null;
+var DATA=null,CHS={},rangeDays=30,FEES_DATA=null,ANALYTICS=null;
 
 function setRange(d){rangeDays=d;document.querySelectorAll('#df button').forEach(function(b){b.classList.remove('on')});
   if(d===7)document.getElementById('df7').classList.add('on');
@@ -94,6 +102,18 @@ function setRange(d){rangeDays=d;document.querySelectorAll('#df button').forEach
 function fmt(n,d){return n!=null?Number(n).toFixed(d!=null?d:2):'—';}
 var RC={RANGING:'#4a9eff',BULLISH_TREND:'#22c55e',BEARISH_TREND:'#ef4444',EXTREME:'#a855f7'};
 
+function toggleSection(id){
+  var content=document.getElementById('sec-'+id);
+  var arrow=document.getElementById('arrow-'+id);
+  if(!content)return;
+  content.classList.toggle('collapsed');
+  arrow.textContent=content.classList.contains('collapsed')?'\\u25B6':'\\u25BC';
+  try{localStorage.setItem('intel-sec-'+id,content.classList.contains('collapsed')?'0':'1');}catch{}
+}
+function isSectionOpen(id){
+  try{var v=localStorage.getItem('intel-sec-'+id);return v!=='0';}catch{return true;}
+}
+
 async function load(){
   try{
     var url='/api/intelligence';
@@ -102,6 +122,19 @@ async function load(){
     if(DATA.error){document.getElementById('widgets').innerHTML='<div class="w full"><div class="empty">'+DATA.error+'</div></div>';return;}
     render();
   }catch(e){document.getElementById('widgets').innerHTML='<div class="w full"><div class="empty">Failed: '+e+'</div></div>';}
+}
+
+async function loadAnalyticsData(){
+  try{
+    var days=rangeDays>0?rangeDays:90;
+    var r=await fetch('/api/analytics-data?days='+days);
+    if(r.ok){ANALYTICS=await r.json();renderAnalyticsWidgets();}
+  }catch(e){console.warn('analytics data load failed',e);}
+}
+
+function sectionHeader(id,title){
+  var open=isSectionOpen(id);
+  return '<div class="section-hdr" onclick="toggleSection(\\''+id+'\\')"><span class="arrow" id="arrow-'+id+'">'+(open?'\\u25BC':'\\u25B6')+'</span><h2>'+title+'</h2><span class="line"></span></div>';
 }
 
 function render(){
@@ -117,63 +150,103 @@ function render(){
   document.getElementById('summary').innerHTML=sh;
 
   var h='';
+
+  // ── SECTION 1: DAILY PERFORMANCE ──
+  h+=sectionHeader('perf','Daily Performance');
+  var perfOpen=isSectionOpen('perf');
+  h+='<div class="section-content'+(perfOpen?'':' collapsed')+'" id="sec-perf">';
   // W0: Daily Fees Intelligence
   h+=renderFeesIntelligence();
   // W1: Fee Income
   h+='<div class="w"><h3>Fee Income</h3><canvas id="c1"></canvas></div>';
+  // Cumulative Fees (from analytics)
+  h+='<div class="w"><h3>Cumulative Fees</h3><canvas id="cCumFees"></canvas></div>';
+  // Portfolio Growth (from analytics)
+  h+='<div class="w full"><h3>Portfolio Growth (7D)</h3><canvas id="cPortGrowth"></canvas><div class="tbl-wrap" id="wPortGrowthTbl"></div></div>';
+  h+='</div>';
+
+  // ── SECTION 2: POSITION ANALYTICS ──
+  h+=sectionHeader('pos','Position Analytics');
+  var posOpen=isSectionOpen('pos');
+  h+='<div class="section-content'+(posOpen?'':' collapsed')+'" id="sec-pos">';
   // W2: Position P&L Table
   h+='<div class="w full"><h3>Position P&L</h3><div class="tbl-wrap" id="w2"></div></div>';
-  // W3: APR Trend (placeholder — needs multi-day data)
-  // W4: Fee vs Gas
-  h+='<div class="w"><h3>Fee vs Gas (Daily)</h3><canvas id="c4"></canvas></div>';
-  // W5: Exit Reason Breakdown
-  h+='<div class="w"><h3>Exit Reason Breakdown</h3><canvas id="c5"></canvas></div>';
   // W6: Position Duration
   h+='<div class="w"><h3>Position Duration Distribution</h3><canvas id="c6"></canvas></div>';
+  // Fee vs Duration (from analytics)
+  h+='<div class="w"><h3>Fee vs Duration</h3><canvas id="cFeeVsDur"></canvas></div>';
+  // W5: Exit Reason Breakdown
+  h+='<div class="w"><h3>Exit Reason Breakdown</h3><canvas id="c5"></canvas></div>';
+  // W11: Churn Rate
+  h+='<div class="w"><h3>Churn Rate (Positions/Day)</h3><canvas id="c11"></canvas></div>';
+  // In-Range Rate (from analytics)
+  h+='<div class="w"><h3>In-Range Rate</h3><canvas id="cInRange"></canvas></div>';
+  h+='</div>';
+
+  // ── SECTION 3: COST & RISK ──
+  h+=sectionHeader('cost','Cost & Risk');
+  var costOpen=isSectionOpen('cost');
+  h+='<div class="section-content'+(costOpen?'':' collapsed')+'" id="sec-cost">';
+  // W4: Fee vs Gas
+  h+='<div class="w"><h3>Fee vs Gas (Daily)</h3><canvas id="c4"></canvas></div>';
+  // IL Tracker (from analytics)
+  h+='<div class="w"><h3>IL Tracker</h3><canvas id="cILTracker"></canvas></div>';
+  // W10: Cost Basis vs Price
+  h+='<div class="w full"><h3>Cost Basis vs SOL Price</h3><canvas id="c10"></canvas></div>';
+  // W12: Gate Fire Rate
+  h+='<div class="w"><h3>Gate Block Rate</h3><canvas id="c12"></canvas></div>';
+  h+='</div>';
+
+  // ── SECTION 4: REGIME & MARKET ──
+  h+=sectionHeader('regime','Regime & Market');
+  var regimeOpen=isSectionOpen('regime');
+  h+='<div class="section-content'+(regimeOpen?'':' collapsed')+'" id="sec-regime">';
   // W7: Performance by Regime
   h+='<div class="w"><h3>Performance by Regime</h3><canvas id="c7"></canvas></div>';
   // W8: Regime Timeline
   h+='<div class="w full"><h3>Regime Timeline</h3><canvas id="c8"></canvas></div>';
-  // W10: Cost Basis vs Price
-  h+='<div class="w full"><h3>Cost Basis vs SOL Price</h3><canvas id="c10"></canvas></div>';
-  // W11: Churn Rate
-  h+='<div class="w"><h3>Churn Rate (Positions/Day)</h3><canvas id="c11"></canvas></div>';
-  // W12: Gate Fire Rate
-  h+='<div class="w"><h3>Gate Block Rate</h3><canvas id="c12"></canvas></div>';
+  // SOL Price vs Fees (from analytics)
+  h+='<div class="w"><h3>SOL Price vs Fee Rate</h3><canvas id="cPriceVsFees"></canvas></div>';
+  // Volume & Volatility (from analytics)
+  h+='<div class="w"><h3>Volume & Volatility</h3><canvas id="cVolHistory"></canvas></div>';
+  // Weekday vs Weekend (from analytics)
+  h+='<div class="w"><h3>Weekday vs Weekend</h3><canvas id="cFeesWeekday"></canvas></div>';
+  h+='</div>';
+
+  // ── SECTION 5: CAPITAL ──
+  h+=sectionHeader('capital','Capital');
+  var capitalOpen=isSectionOpen('capital');
+  h+='<div class="section-content'+(capitalOpen?'':' collapsed')+'" id="sec-capital">';
+  // Capital Allocation (from analytics)
+  h+='<div class="w full"><h3>Capital Allocation</h3><canvas id="cCapitalAlloc"></canvas></div>';
 
   // W13: SOL Conversion Monitor
   var sc=DATA.solConversion;
   if(sc){
     var stCol=sc.status==='FIRING'?'#22c55e':sc.status==='COOLDOWN'?'#eab308':sc.status==='BLOCKED'?'#ef4444':'#484f58';
     var scH='<div class="w full"><h3>SOL Conversion Monitor <span class="badge" style="background:'+stCol+'20;color:'+stCol+';margin-left:8px">'+sc.status+'</span></h3>';
-    // Status row
     scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;font-size:11px">';
     var cdText=sc.cooldownRemainingMs>0?Math.floor(sc.cooldownRemainingMs/60000)+':'+String(Math.floor((sc.cooldownRemainingMs%60000)/1000)).padStart(2,'0'):'Ready';
     scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Next fire</span><br><span id="sc-cd" style="color:'+(sc.cooldownRemainingMs>0?'#eab308':'#22c55e')+';font-weight:bold;font-size:14px">'+cdText+'</span></div>';
     scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Cooldown</span><br><span style="color:#c9d1d9;font-weight:bold">'+sc.cooldownTotalMin+'min <span style="color:#8b949e;font-size:10px">('+DATA.regimeHistory?.[0]?.regime?.replace('_TREND','') || 'RANGING'+')</span></span></div>';
     scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Threshold</span><br><span style="color:#c9d1d9;font-weight:bold">$'+sc.threshold.toFixed(2)+'</span> <span style="color:'+(sc.priceAboveThreshold?'#22c55e':'#ef4444')+';font-size:10px">'+(sc.priceAboveThreshold?'\\u2713':'\\u2717')+'</span></div>';
     scH+='</div>';
-    // Conditions
     scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Cap: $'+sc.dynamicCap+' · Idle SOL: $'+sc.idleSolValue+'</div>';
-    // Today
     scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
     scH+='<div class="s"><div class="v" style="color:#a855f7;font-size:16px">'+sc.todayCount+'</div><div class="l">Today</div></div>';
     scH+='<div class="s"><div class="v" style="color:#c9d1d9;font-size:16px">'+sc.todaySol.toFixed(1)+' SOL</div><div class="l">Converted</div></div>';
     scH+='<div class="s"><div class="v" style="color:#22c55e;font-size:16px">$'+sc.todayUsdc.toFixed(0)+'</div><div class="l">Received</div></div>';
     scH+='</div>';
-    // Week summary
     if(sc.weekCount>0){
       var avgP=sc.weekSol>0?(sc.weekUsdc/sc.weekSol):0;
       scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Week: '+sc.weekCount+' conversions · '+sc.weekSol.toFixed(1)+' SOL → $'+sc.weekUsdc.toFixed(0)+' USDC · avg $'+avgP.toFixed(2)+'/SOL</div>';
     }
-    // Last conversion
     if(sc.last){
       var ago=Math.round((Date.now()-sc.last.ts)/60000);
       var agoStr=ago<60?ago+'min ago':(ago/60).toFixed(1)+'h ago';
       var txLink=sc.last.tx?'<a href="https://solscan.io/tx/'+sc.last.tx+'" target="_blank" style="color:#58a6ff;text-decoration:none;font-size:10px">'+sc.last.tx.slice(0,8)+'</a>':'';
       scH+='<div style="font-size:11px;color:#c9d1d9;margin-bottom:8px">Last: <b>'+agoStr+'</b> — '+sc.last.sol.toFixed(3)+' SOL → $'+sc.last.usdc.toFixed(2)+' @ $'+sc.last.price.toFixed(2)+' '+txLink+'</div>';
     }
-    // Recent table
     if(sc.recent&&sc.recent.length>0){
       scH+='<div class="tbl-wrap"><table><thead><tr><th>Time</th><th style="text-align:right">SOL</th><th style="text-align:right">USDC</th><th style="text-align:right">Price</th><th class="m-hide">TX</th></tr></thead><tbody>';
       sc.recent.forEach(function(r){
@@ -186,6 +259,7 @@ function render(){
     scH+='</div>';
     h+=scH;
   }
+  h+='</div>'; // end capital section
 
   document.getElementById('widgets').innerHTML=h;
 
@@ -297,6 +371,212 @@ function render(){
 
   // Hourly fees chart for Daily Fees Intelligence
   renderFeesChart();
+
+  // Render analytics widgets if data already loaded
+  if(ANALYTICS) renderAnalyticsWidgets();
+}
+
+// ── ANALYTICS WIDGET RENDERERS (from analytics-page data) ──
+
+function totalFeesCalc(s){
+  var p=(s.pending_fees_sol||0)*s.price+(s.pending_fees_usdc||0);
+  return (s.cum_fees_sol||0)*s.price+(s.cum_fees_usdc||0)+(p>1000?0:p);
+}
+
+function buildHourlyFees(snaps){
+  var map={};
+  for(var i=1;i<snaps.length;i++){
+    var d=new Date(snaps[i].timestamp);
+    var key=d.toLocaleDateString('en-CA',{timeZone:'Europe/Berlin'})+'T'+String(d.getUTCHours()).padStart(2,'0');
+    var delta=totalFeesCalc(snaps[i])-totalFeesCalc(snaps[i-1]);
+    if(delta>0&&delta<100){
+      if(!map[key])map[key]={fees:0,inRange:0,total:0,price:snaps[i].price,regime:snaps[i].regime};
+      map[key].fees+=delta;
+      if(snaps[i].in_range)map[key].inRange++;
+      map[key].total++;
+    }
+  }
+  return Object.entries(map).map(function(e){return{hour:e[0],fees:e[1].fees,irPct:e[1].total>0?e[1].inRange/e[1].total*100:0,price:e[1].price,regime:e[1].regime};}).sort(function(a,b){return a.hour.localeCompare(b.hour);});
+}
+
+function buildPositions(events){
+  var positions=[],lastOpen=null;
+  events.forEach(function(e){
+    if(e.event_type==='POSITION_OPENED'){
+      var capB=(e.sol_before||0)*e.price+(e.usdc_before||0);
+      var capA=(e.sol_after||0)*e.price+(e.usdc_after||0);
+      lastOpen={ts:e.timestamp,price:e.price,capital:Math.max(0,capB-capA),regime:e.regime};
+    }else if(['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type)&&lastOpen){
+      var fees=(e.fee_sol||0)*e.price+(e.fee_usdc||0);
+      positions.push({openTime:lastOpen.ts,closeTime:e.timestamp,duration:(e.timestamp-lastOpen.ts)/60000,
+        openPrice:lastOpen.price,closePrice:e.price,capital:lastOpen.capital,
+        fees:fees,il:e.il_at_close||0,net:fees+(e.il_at_close||0),reason:e.event_type,regime:lastOpen.regime});
+      lastOpen=null;
+    }
+  });
+  return positions;
+}
+
+function renderAnalyticsWidgets(){
+  if(!ANALYTICS)return;
+  var snaps=ANALYTICS.snaps||[];
+  var events=ANALYTICS.events||[];
+  if(snaps.length<2)return;
+  var positions=buildPositions(events);
+  var hourlyFees=buildHourlyFees(snaps);
+  var summaries=ANALYTICS.dailySummaries||[];
+
+  // 1. Cumulative Fees
+  try{
+    var el=document.getElementById('cCumFees');
+    if(el&&summaries.length>0){
+      if(CHS.cCumFees)try{CHS.cCumFees.destroy();}catch{}
+      var labels=summaries.map(function(s){return s.date.slice(5);});
+      var data=summaries.map(function(s){return s.cum_fees_usdc||0;});
+      CHS.cCumFees=new Chart(el,{type:'line',data:{labels:labels,datasets:[{label:'Cumulative Fees ($)',data:data,borderColor:'#ffd700',backgroundColor:'#ffd70020',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
+    }
+  }catch(e){console.warn('cum-fees error',e);}
+
+  // 1b. Portfolio Growth (stacked bar: wallet+position per day, organic P&L line)
+  try{
+    var elPG=document.getElementById('cPortGrowth');
+    var elPGTbl=document.getElementById('wPortGrowthTbl');
+    if(elPG&&summaries.length>0){
+      if(CHS.cPortGrowth)try{CHS.cPortGrowth.destroy();}catch{}
+      var pgDays=summaries.slice(-7);
+      var pgLabels=pgDays.map(function(s){return s.date.slice(5);});
+      var pgWallet=pgDays.map(function(s){return s.wallet_usdc||0;});
+      var pgPosition=pgDays.map(function(s){return s.position_usdc||0;});
+      var pgInjected=pgDays.map(function(s){return s.injected_usdc||0;});
+      var pgFees=pgDays.map(function(s){return s.fees_earned_usdc||0;});
+      var pgChange=pgDays.map(function(s){return s.portfolio_change||0;});
+      var pgTotal=pgDays.map(function(s){return s.total_usdc||0;});
+      // Organic line = cumulative fees over the 7 days
+      var pgOrganic=[];var pgOrgCum=0;pgFees.forEach(function(f){pgOrgCum+=f;pgOrganic.push(pgOrgCum);});
+      CHS.cPortGrowth=new Chart(elPG,{type:'bar',data:{labels:pgLabels,datasets:[
+        {label:'Wallet',data:pgWallet,backgroundColor:'#22c55e80',stack:'portfolio'},
+        {label:'Position',data:pgPosition,backgroundColor:'#58a6ff80',stack:'portfolio'},
+        {label:'Injected',data:pgInjected,backgroundColor:'#a855f780',stack:'portfolio'},
+        {label:'Organic P&L',data:pgOrganic,type:'line',borderColor:'#22c55e',backgroundColor:'transparent',tension:0.3,pointRadius:3,borderWidth:2,yAxisID:'y1'}
+      ]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{
+        y:{stacked:true,ticks:{callback:function(v){return '$'+v;},color:'#8b949e'},grid:{color:'#21262d'}},
+        y1:{position:'right',ticks:{callback:function(v){return '$'+Number(v).toFixed(2);},color:'#22c55e'},grid:{display:false}},
+        x:{stacked:true,ticks:{color:'#8b949e'},grid:{display:false}}
+      }}});
+      // Table below chart
+      if(elPGTbl){
+        var tbl='<table style="margin-top:10px"><thead><tr><th>Date</th><th style="text-align:right">Wallet</th><th style="text-align:right">Position</th><th style="text-align:right">Injected</th><th style="text-align:right">Total</th><th style="text-align:right">Fees</th><th style="text-align:right">Change</th></tr></thead><tbody>';
+        pgDays.slice().reverse().forEach(function(s){
+          var chgCol=(s.portfolio_change||0)>=0?'#22c55e':'#ef4444';
+          var chgSign=(s.portfolio_change||0)>=0?'+':'';
+          tbl+='<tr><td>'+s.date+'</td><td style="text-align:right;color:#22c55e">$'+fmt(s.wallet_usdc||0,0)+'</td><td style="text-align:right;color:#58a6ff">$'+fmt(s.position_usdc||0,0)+'</td><td style="text-align:right;color:'+(s.injected_usdc>0?'#a855f7':'#484f58')+'">'+(s.injected_usdc>0?'$'+fmt(s.injected_usdc,0):'—')+'</td><td style="text-align:right;font-weight:bold">$'+fmt(s.total_usdc||0,0)+'</td><td style="text-align:right;color:#ffd700">$'+fmt(s.fees_earned_usdc||0)+'</td><td style="text-align:right;color:'+chgCol+'">'+chgSign+'$'+fmt(Math.abs(s.portfolio_change||0))+'</td></tr>';
+        });
+        tbl+='</tbody></table>';
+        elPGTbl.innerHTML=tbl;
+      }
+    }
+  }catch(e){console.warn('portfolio-growth error',e);}
+
+  // 2. In-Range Rate
+  try{
+    var el2=document.getElementById('cInRange');
+    if(el2&&snaps.length>10){
+      if(CHS.cInRange)try{CHS.cInRange.destroy();}catch{}
+      var step=Math.max(1,Math.floor(snaps.length/100));
+      var irLabels=[],irData=[];
+      for(var i=0;i<snaps.length;i+=step){
+        var windowSize=Math.min(60,snaps.length-i);
+        var ir=0;for(var j=i;j<i+windowSize&&j<snaps.length;j++)if(snaps[j].in_range)ir++;
+        irLabels.push('');irData.push(ir/windowSize*100);
+      }
+      CHS.cInRange=new Chart(el2,{type:'line',data:{labels:irLabels,datasets:[{label:'In-Range %',data:irData,borderColor:'#22c55e',backgroundColor:'#22c55e20',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{min:0,max:100,ticks:{callback:function(v){return v+'%';},color:'#8b949e'},grid:{color:'#21262d'}},x:{display:false}}}});
+    }
+  }catch(e){console.warn('in-range error',e);}
+
+  // 3. IL Tracker
+  try{
+    var el3=document.getElementById('cILTracker');
+    if(el3&&positions.length>0){
+      if(CHS.cILTracker)try{CHS.cILTracker.destroy();}catch{}
+      var ilLabels=positions.map(function(p,i){return '#'+(i+1);});
+      var ilData=positions.map(function(p){return p.il;});
+      var ilCum=[];var ilS=0;ilData.forEach(function(d){ilS+=d;ilCum.push(ilS);});
+      CHS.cILTracker=new Chart(el3,{type:'bar',data:{labels:ilLabels,datasets:[{label:'IL per position',data:ilData,backgroundColor:'#ef444460'},{label:'Cumulative IL',data:ilCum,type:'line',borderColor:'#ef4444',pointRadius:2,tension:0.3}]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(3);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
+    }
+  }catch(e){console.warn('il-tracker error',e);}
+
+  // 4. Fee vs Duration scatter
+  try{
+    var el4=document.getElementById('cFeeVsDur');
+    if(el4&&positions.length>0){
+      if(CHS.cFeeVsDur)try{CHS.cFeeVsDur.destroy();}catch{}
+      var scatterData=positions.map(function(p){return{x:p.duration,y:p.fees};});
+      CHS.cFeeVsDur=new Chart(el4,{type:'scatter',data:{datasets:[{label:'Fee vs Duration',data:scatterData,backgroundColor:'#ffd70080',pointRadius:4}]},options:{plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:'Duration (min)',color:'#8b949e'},grid:{color:'#21262d'},ticks:{color:'#8b949e'}},y:{title:{display:true,text:'Fees ($)',color:'#8b949e'},ticks:{callback:function(v){return '$'+v.toFixed(2);},color:'#8b949e'},grid:{color:'#21262d'}}}}});
+    }
+  }catch(e){console.warn('fee-vs-duration error',e);}
+
+  // 5. SOL Price vs Fees
+  try{
+    var el5=document.getElementById('cPriceVsFees');
+    if(el5&&hourlyFees.length>0){
+      if(CHS.cPriceVsFees)try{CHS.cPriceVsFees.destroy();}catch{}
+      var pvLabels=hourlyFees.map(function(h){return h.hour.slice(-5);});
+      var pvPrices=hourlyFees.map(function(h){return h.price;});
+      var pvFees=hourlyFees.map(function(h){return h.fees;});
+      CHS.cPriceVsFees=new Chart(el5,{type:'line',data:{labels:pvLabels,datasets:[{label:'SOL Price',data:pvPrices,borderColor:'#58a6ff',pointRadius:0,yAxisID:'y',tension:0.3},{label:'Fees ($)',data:pvFees,borderColor:'#ffd700',pointRadius:0,yAxisID:'y1',tension:0.3}]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{position:'left',ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},y1:{position:'right',ticks:{callback:function(v){return '$'+v.toFixed(2);},color:'#8b949e'},grid:{display:false}},x:{display:false}}}});
+    }
+  }catch(e){console.warn('price-vs-fees error',e);}
+
+  // 6. Capital Allocation
+  try{
+    var el6=document.getElementById('cCapitalAlloc');
+    if(el6&&snaps.length>2){
+      if(CHS.cCapitalAlloc)try{CHS.cCapitalAlloc.destroy();}catch{}
+      var caStep=Math.max(1,Math.floor(snaps.length/100));
+      var caLabels=[],wSol=[],wUsdc=[],pSol=[],pUsdc=[];
+      for(var ci=0;ci<snaps.length;ci+=caStep){
+        var s=snaps[ci];caLabels.push('');
+        wSol.push((s.sol_balance||0)*s.price);wUsdc.push(s.usdc_balance||0);
+        pSol.push((s.position_sol||0)*s.price);pUsdc.push(s.position_usdc||0);
+      }
+      CHS.cCapitalAlloc=new Chart(el6,{type:'line',data:{labels:caLabels,datasets:[
+        {label:'Wallet SOL',data:wSol,backgroundColor:'#22c55e40',borderColor:'#22c55e',fill:true,pointRadius:0,tension:0.3},
+        {label:'Wallet USDC',data:wUsdc,backgroundColor:'#58a6ff40',borderColor:'#58a6ff',fill:true,pointRadius:0,tension:0.3},
+        {label:'Position SOL',data:pSol,backgroundColor:'#eab30840',borderColor:'#eab308',fill:true,pointRadius:0,tension:0.3},
+        {label:'Position USDC',data:pUsdc,backgroundColor:'#a855f740',borderColor:'#a855f7',fill:true,pointRadius:0,tension:0.3},
+      ]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{stacked:true,ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{display:false}}}});
+    }
+  }catch(e){console.warn('capital-alloc error',e);}
+
+  // 7. Weekday vs Weekend
+  try{
+    var el7=document.getElementById('cFeesWeekday');
+    if(el7&&snaps.length>10){
+      if(CHS.cFeesWeekday)try{CHS.cFeesWeekday.destroy();}catch{}
+      var wd={fees:0,hours:0},we={fees:0,hours:0};
+      for(var wi=1;wi<snaps.length;wi++){
+        var day=new Date(snaps[wi].timestamp).toLocaleDateString('en-US',{timeZone:'Europe/Berlin',weekday:'short'});
+        var isWe=day==='Sat'||day==='Sun';var b=isWe?we:wd;
+        var delta=totalFeesCalc(snaps[wi])-totalFeesCalc(snaps[wi-1]);
+        var elapsed=(snaps[wi].timestamp-snaps[wi-1].timestamp)/3600000;
+        if(delta>0&&delta<100)b.fees+=delta;b.hours+=elapsed;
+      }
+      var wdRate=wd.hours>0?wd.fees/wd.hours*24:0;var weRate=we.hours>0?we.fees/we.hours*24:0;
+      CHS.cFeesWeekday=new Chart(el7,{type:'bar',data:{labels:['Weekday','Weekend'],datasets:[{label:'$/day',data:[wdRate,weRate],backgroundColor:['#58a6ff','#a855f7']}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e'},grid:{display:false}}}}});
+    }
+  }catch(e){console.warn('fees-weekday error',e);}
+
+  // 8. Volume & Volatility (SOL price history)
+  try{
+    var el8=document.getElementById('cVolHistory');
+    if(el8&&snaps.length>10){
+      if(CHS.cVolHistory)try{CHS.cVolHistory.destroy();}catch{}
+      var vStep=Math.max(1,Math.floor(snaps.length/100));
+      var vLabels=[],vPrices=[];
+      for(var vi=0;vi<snaps.length;vi+=vStep){vLabels.push('');vPrices.push(snaps[vi].price);}
+      CHS.cVolHistory=new Chart(el8,{type:'line',data:{labels:vLabels,datasets:[{label:'SOL Price',data:vPrices,borderColor:'#58a6ff',pointRadius:0,tension:0.3,fill:false}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{display:false}}}});
+    }
+  }catch(e){console.warn('vol-history error',e);}
 }
 
 function renderFeesIntelligence(){
@@ -314,39 +594,28 @@ function renderFeesIntelligence(){
 
   var s='<div class="w full" id="fees-widget">';
   s+='<h3>Daily Fees Intelligence <span style="font-size:9px;color:#484f58;font-weight:normal;text-transform:none;letter-spacing:0">Updated every 5 min · Day resets at 00:00 UTC</span></h3>';
-
-  // Header metrics - 4 cards
   s+='<div class="fees-cards">';
   s+='<div class="fees-card" style="border-color:'+todayCol+'30"><div class="fees-card-val" style="color:'+todayCol+'">$'+fmt(d.feesTodayTotal)+'</div><div class="fees-card-sub">'+fmt(d.feesPending,3)+' pending (separate)</div><div class="fees-card-label">Collected today</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesYesterday)+'</div><div class="fees-card-sub">full day</div><div class="fees-card-label">Yesterday</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.fees7dAvgSameTime)+'</div><div class="fees-card-sub">at '+d.hoursElapsed+'h elapsed</div><div class="fees-card-label">7D avg (same time)</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesExpectedToday)+'</div><div class="fees-card-sub" style="color:'+confCol+'">'+d.confidence+' confidence</div><div class="fees-card-label">Expected today</div></div>';
   s+='</div>';
-
-  // Progress bar
   s+='<div style="margin:10px 0">';
   s+='<div style="display:flex;justify-content:space-between;font-size:10px;color:#8b949e;margin-bottom:3px"><span>Today: $'+fmt(d.feesTodayTotal)+' of expected $'+fmt(d.feesExpectedToday)+'</span><span>'+fmt(progressPct,0)+'%</span></div>';
   s+='<div style="background:#21262d;border-radius:4px;height:8px;overflow:hidden"><div style="width:'+progressPct+'%;height:100%;background:'+barCol+';border-radius:4px;transition:width 0.5s"></div></div>';
   s+='</div>';
-
-  // Comparison row
   s+='<div class="fees-compare">';
   s+='<div><span style="color:#8b949e">vs Yesterday (same time):</span> <span style="color:'+vsYCol+';font-weight:bold">'+vsYSign+fmt(d.vsYesterdaySameTime,1)+'%</span></div>';
   s+='<div><span style="color:#8b949e">vs 7D average:</span> <span style="color:'+vs7Col+';font-weight:bold">'+vs7Sign+fmt(d.vs7dAvg,1)+'%</span></div>';
   s+='<div><span style="color:#8b949e">Run rate:</span> <span style="color:#c9d1d9;font-weight:bold">$'+fmt(d.currentRunRate)+'/hr</span> <span style="color:#484f58">('+d.hoursElapsed+'h)</span></div>';
   s+='<div><span style="color:#8b949e">Pending fees:</span> <span style="color:#eab308;font-weight:bold">$'+fmt(d.feesPending)+'</span></div>';
   s+='</div>';
-
-  // Hourly chart
   s+='<div style="margin-top:12px"><canvas id="cFees" style="width:100%;max-height:220px"></canvas></div>';
-
-  // Bottom row
   s+='<div class="fees-bottom">';
   s+='<span>Positions today: <b>'+d.positionsToday+'</b></span>';
   s+='<span>Avg per position: <b>$'+fmt(d.avgFeesPerPosition)+'</b></span>';
   s+='<span>Best position: <b>$'+fmt(d.bestPosition)+'</b></span>';
   s+='</div>';
-
   s+='</div>';
   return s;
 }
@@ -387,7 +656,9 @@ async function loadFeesData(){
 
 load();
 loadFeesData();
-setInterval(loadFeesData,300000); // refresh every 5 min
+loadAnalyticsData();
+setInterval(loadFeesData,300000);
+setInterval(loadAnalyticsData,300000);
 var scCdStart=0,scCdTotal=0;
 function updateScCd(){var el=document.getElementById('sc-cd');if(!el)return;var rem=Math.max(0,scCdTotal-(Date.now()-scCdStart));if(rem<=0){el.textContent='Ready';el.style.color='#22c55e';}else{var m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+String(s).padStart(2,'0');}}
 setInterval(updateScCd,1000);
