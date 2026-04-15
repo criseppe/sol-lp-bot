@@ -1358,7 +1358,7 @@ export function startDashboard(port: number): DashboardServer {
   app.get('/api/sol-conversion-status', (_req, res) => {
     let lastTs = 0;
     if (dbRef) {
-      try { const r = dbRef.prepare('SELECT sol_conversion_last_ts FROM bot_state WHERE id = 1').get() as any; lastTs = r?.sol_conversion_last_ts ?? 0; } catch {}
+      try { const r = dbRef.prepare('SELECT sol_conversion_last_ts FROM bot_state WHERE id = 1').get() as any; lastTs = r?.sol_conversion_last_ts ?? 0; } catch (e: any) { console.log(JSON.stringify({ level: 'warn', msg: `[Dashboard] sol_conversion_last_ts: ${e?.message}`, timestamp: Date.now() })); }
     }
     const cooldownMs = 15 * 60_000;
     const cooldownRemaining = lastTs > 0 ? Math.max(0, (cooldownMs - (Date.now() - lastTs)) / 60_000) : 0;

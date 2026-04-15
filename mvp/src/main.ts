@@ -2238,15 +2238,6 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
     // Smart sell DISABLED — selling SOL always loses money in downtrends.
     // The 65% downside exit threshold prevents SOL-heavy wallets at the root.
-    if (false) { // DISABLED
-      const afterSolVal = balancesAfter.sol * price;
-      const afterTotal = afterSolVal + balancesAfter.usdc;
-      const afterSolPct = afterTotal > 0 ? afterSolVal / afterTotal : 0;
-      smartSellPending = true;
-      smartSellEntryPrice = price;
-      smartSellStartTime = Date.now();
-      console.log(JSON.stringify({ level: 'info', msg: `Smart sell activated: wallet ${(afterSolPct*100).toFixed(0)}% SOL after open. Will sell SOL when price reaches upper half of range (above $${((range.priceLower + range.priceUpper) / 2).toFixed(2)} midpoint). Entry: $${price.toFixed(2)}.`, timestamp: Date.now() }));
-    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
     consecutiveTxFailures++;
@@ -2509,8 +2500,16 @@ function checkAndWriteDailyPnl(currentPrice: number) {
   const allSummaries = getDailySummaries(db, 2);
   const yesterday = allSummaries.find(s => s.date !== today);
   const yesterdayClose = yesterday?.total_usdc ?? totalValue;
-  const prevCumFees = yesterday?.cum_fees_usdc ?? 0;
-  const dailyFeesEarned = Math.max(0, totalFeesUsdc - prevCumFees);
+  // Daily fees: actual fees collected today from closes/harvests + pending uncollected
+  const startOfTodayMs = new Date(today + 'T00:00:00Z').getTime();
+  const actualFeesTodayRow = db.prepare(`
+    SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees
+    FROM rebalance_events
+    WHERE timestamp >= ?
+    AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+    AND (fee_usdc > 0 OR fee_sol > 0)
+  `).get(currentPrice, startOfTodayMs) as { fees: number };
+  const dailyFeesEarned = (actualFeesTodayRow?.fees ?? 0) + pendingFeesUsdc;
   const portfolioChange = totalValue - yesterdayClose - dailySummaryCumInjected;
 
   // Upsert today's summary (updates every cycle with latest values)

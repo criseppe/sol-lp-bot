@@ -178,7 +178,7 @@ export function checkDeployGate(db: Database.Database, usdcNeededForDeposit: num
  */
 export function checkReserveFloor(db: Database.Database, totalPortfolioUsdc: number, floorPct?: number): void {
   const state = getReserveState(db);
-  if (state.floor === 0 || totalPortfolioUsdc <= 0) return;
+  if (!state.floor || state.floor < 1 || totalPortfolioUsdc <= 0) return;
 
   const expectedFloor = totalPortfolioUsdc * (floorPct ?? RESERVE_FLOOR_PCT);
   const floorDrift = (expectedFloor - state.floor) / state.floor;

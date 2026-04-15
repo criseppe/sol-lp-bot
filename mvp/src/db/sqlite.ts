@@ -222,48 +222,55 @@ export function initDb(dbPath: string): Database.Database {
       cost_basis_after  REAL DEFAULT 0
     );
   `);
+  // Migration helper: suppress "duplicate column" errors, log anything else
+  const migrate = (sql: string) => {
+    try { db.exec(sql); } catch (e: any) {
+      if (!e?.message?.includes('duplicate column') && !e?.message?.includes('already exists')) {
+        console.log(JSON.stringify({ level: 'warn', msg: `[Migration] ${e?.message ?? 'unknown error'}`, timestamp: Date.now() }));
+      }
+    }
+  };
+
   // Migration: add swap metadata columns to swap_ledger
-  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN tx_signature TEXT DEFAULT NULL`); } catch (_) {}
-  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN fee_lamports INTEGER DEFAULT NULL`); } catch (_) {}
-  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN price_impact_pct REAL DEFAULT NULL`); } catch (_) {}
-  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN source TEXT DEFAULT 'bot'`); } catch (_) {}
+  migrate(`ALTER TABLE swap_ledger ADD COLUMN tx_signature TEXT DEFAULT NULL`);
+  migrate(`ALTER TABLE swap_ledger ADD COLUMN fee_lamports INTEGER DEFAULT NULL`);
+  migrate(`ALTER TABLE swap_ledger ADD COLUMN price_impact_pct REAL DEFAULT NULL`);
+  migrate(`ALTER TABLE swap_ledger ADD COLUMN source TEXT DEFAULT 'bot'`);
   // Backfill: tag manual swaps detected via balance diff
   try {
     db.exec(`UPDATE swap_ledger SET source = 'manual' WHERE (reason LIKE '%Manual swap%' OR reason LIKE '%manual%' OR reason LIKE '%balance diff%') AND (source IS NULL OR source = 'bot')`);
     db.exec(`UPDATE swap_ledger SET source = 'bot' WHERE source IS NULL OR source = ''`);
-  } catch {}
+  } catch (e: any) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[Migration] backfill swap source: ${e?.message ?? 'unknown'}`, timestamp: Date.now() }));
+  }
 
   // Migration: add pullback state columns to bot_state
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_start INTEGER DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN last_harvest_time INTEGER DEFAULT 0`); } catch (_) {}
+  migrate(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN pullback_start INTEGER DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN last_harvest_time INTEGER DEFAULT 0`);
 
   // Migration: add rule2_active column to existing rebalance_events tables
-  try {
-    db.exec(`ALTER TABLE rebalance_events ADD COLUMN rule2_active INTEGER DEFAULT 1`);
-  } catch (_) { /* column already exists */ }
+  migrate(`ALTER TABLE rebalance_events ADD COLUMN rule2_active INTEGER DEFAULT 1`);
 
   // Migration: add position_id column for per-position P&L tracking
-  try {
-    db.exec(`ALTER TABLE rebalance_events ADD COLUMN position_id TEXT`);
-  } catch (_) { /* column already exists */ }
+  migrate(`ALTER TABLE rebalance_events ADD COLUMN position_id TEXT`);
 
   // Migration: add cost basis tracking columns to bot_state
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_cost_basis REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_total_acquired REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_total_cost REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN cost_basis_last_updated INTEGER DEFAULT 0`); } catch (_) {}
+  migrate(`ALTER TABLE bot_state ADD COLUMN sol_cost_basis REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN sol_total_acquired REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN sol_total_cost REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN cost_basis_last_updated INTEGER DEFAULT 0`);
 
   // Migration: add USDC reserve columns to bot_state
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN usdc_reserve REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN usdc_reserve_floor REAL DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN reserve_state TEXT DEFAULT 'EMPTY'`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN reserve_last_updated INTEGER DEFAULT 0`); } catch (_) {}
+  migrate(`ALTER TABLE bot_state ADD COLUMN usdc_reserve REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN usdc_reserve_floor REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN reserve_state TEXT DEFAULT 'EMPTY'`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN reserve_last_updated INTEGER DEFAULT 0`);
 
   // Migration: SOL conversion tracking
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_conversion_enabled INTEGER DEFAULT 0`); } catch (_) {}
-  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_conversion_last_ts INTEGER DEFAULT 0`); } catch (_) {}
+  migrate(`ALTER TABLE bot_state ADD COLUMN sol_conversion_enabled INTEGER DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN sol_conversion_last_ts INTEGER DEFAULT 0`);
 
   // Portfolio snapshots — 4-hourly value tracking for arcade page
   db.exec(`CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -299,7 +306,19 @@ export function initDb(dbPath: string): Database.Database {
     daily_regime TEXT,
     ta_data_age_min INTEGER DEFAULT 0
   )`);
-  try { db.exec(`ALTER TABLE regime_snapshots ADD COLUMN ta_data_age_min INTEGER DEFAULT 0`); } catch (_) {}
+  migrate(`ALTER TABLE regime_snapshots ADD COLUMN ta_data_age_min INTEGER DEFAULT 0`);
+
+  // Indexes for query performance
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_rebalance_events_ts ON rebalance_events(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_live_snapshots_ts ON live_snapshots(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_price_ticks_ts ON price_ticks(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_swap_ledger_ts ON swap_ledger(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_ts ON portfolio_snapshots(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_regime_history_ts ON regime_history(timestamp DESC);
+  `);
 
   return db;
 }
