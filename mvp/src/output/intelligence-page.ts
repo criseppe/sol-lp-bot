@@ -57,22 +57,28 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
   body{padding:8px}
   .grid{grid-template-columns:1fr}
   .w canvas{max-height:200px}
+  .w{padding:10px}
   .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
   .nav a{padding:6px 3px;font-size:9px}
   .hdr h1{font-size:15px}
   .sum{grid-template-columns:1fr 1fr}
+  .sum .s{padding:6px}
   .sum .s .v{font-size:15px}
+  .s{padding:6px}
   .w th,.w td{padding:3px 4px;font-size:10px}
+  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .m-hide{display:none!important}
   .fees-cards{grid-template-columns:1fr 1fr}
   .fees-card-val{font-size:15px}
   .fees-compare{grid-template-columns:1fr 1fr}
   #hpCards,#ilCards{grid-template-columns:1fr 1fr!important}
-  #cHourlyFees{max-height:200px!important}
+  #cHourlyFees,#cILTracker{max-height:200px!important}
   #cHourlyVol{max-height:120px!important}
   .fees-bottom{flex-wrap:wrap;gap:8px;font-size:10px}
   #cFees{max-height:200px!important}
-  .section-hdr h2{font-size:11px}
+  .section-hdr h2{font-size:12px}
+  .section-hdr{padding:8px 0 4px}
+  #wHourlyPerf select{max-width:140px}
 }
 </style></head><body>
 <div class="nav">
@@ -161,7 +167,7 @@ function render(){
   // W0: Daily Fees Intelligence
   h+=renderFeesIntelligence();
   // W1: Fee Income
-  h+='<div class="w"><h3>Fee Income</h3><canvas id="c1"></canvas></div>';
+  h+='<div class="w full"><h3>Fee Income</h3><canvas id="c1"></canvas></div>';
   // Portfolio Growth (from analytics)
   h+='<div class="w full"><h3>Portfolio Growth (7D)</h3><canvas id="cPortGrowth"></canvas><div class="tbl-wrap" id="wPortGrowthTbl"></div></div>';
   // Hourly Performance
@@ -241,30 +247,34 @@ function render(){
   // W13: SOL Conversion Monitor
   var sc=DATA.solConversion;
   if(sc){
-    var stCol=sc.status==='FIRING'?'#22c55e':sc.status==='COOLDOWN'?'#eab308':sc.status==='BLOCKED'?'#ef4444':'#484f58';
+    var stCol=sc.status==='FIRING'?'#22c55e':sc.status==='MOMENTUM'?'#58a6ff':sc.status==='COOLDOWN'?'#eab308':sc.status==='BLOCKED'?'#ef4444':'#484f58';
     var scH='<div class="w full"><h3>SOL Conversion Monitor <span class="badge" style="background:'+stCol+'20;color:'+stCol+';margin-left:8px">'+sc.status+'</span></h3>';
-    scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;font-size:11px">';
+    // Row 1: 3 metric cards
     var cdText=sc.cooldownRemainingMs>0?Math.floor(sc.cooldownRemainingMs/60000)+':'+String(Math.floor((sc.cooldownRemainingMs%60000)/1000)).padStart(2,'0'):'Ready';
-    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Next fire</span><br><span id="sc-cd" style="color:'+(sc.cooldownRemainingMs>0?'#eab308':'#22c55e')+';font-weight:bold;font-size:14px">'+cdText+'</span></div>';
-    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Cooldown</span><br><span style="color:#c9d1d9;font-weight:bold">'+sc.cooldownTotalMin+'min <span style="color:#8b949e;font-size:10px">('+DATA.regimeHistory?.[0]?.regime?.replace('_TREND','') || 'RANGING'+')</span></span></div>';
-    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Threshold</span><br><span style="color:#c9d1d9;font-weight:bold">$'+sc.threshold.toFixed(2)+'</span> <span style="color:'+(sc.priceAboveThreshold?'#22c55e':'#ef4444')+';font-size:10px">'+(sc.priceAboveThreshold?'\\u2713':'\\u2717')+'</span></div>';
+    var regLabel=DATA.regimeHistory?.[0]?.regime?.replace('_TREND','') || 'RANGING';
+    scH+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">';
+    scH+='<div class="s"><div class="v" style="font-size:16px"><span id="sc-cd" style="color:'+(sc.cooldownRemainingMs>0?'#eab308':'#22c55e')+'">'+cdText+'</span></div><div class="l">Next fire</div></div>';
+    scH+='<div class="s"><div class="v" style="font-size:16px;color:#c9d1d9">'+sc.cooldownTotalMin+'min</div><div class="l">Cooldown ('+regLabel+')</div></div>';
+    scH+='<div class="s"><div class="v" style="font-size:16px;color:#c9d1d9">$'+sc.threshold.toFixed(2)+' <span style="color:'+(sc.priceAboveThreshold?'#22c55e':'#ef4444')+';font-size:12px">'+(sc.priceAboveThreshold?'\\u2713':'\\u2717')+'</span></div><div class="l">Threshold</div></div>';
     scH+='</div>';
-    scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Cap: $'+sc.dynamicCap+' · Idle SOL: $'+sc.idleSolValue+'</div>';
-    scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
-    scH+='<div class="s"><div class="v" style="color:#a855f7;font-size:16px">'+sc.todayCount+'</div><div class="l">Today</div></div>';
-    scH+='<div class="s"><div class="v" style="color:#c9d1d9;font-size:16px">'+sc.todaySol.toFixed(1)+' SOL</div><div class="l">Converted</div></div>';
-    scH+='<div class="s"><div class="v" style="color:#22c55e;font-size:16px">$'+sc.todayUsdc.toFixed(0)+'</div><div class="l">Received</div></div>';
-    scH+='</div>';
+    // Row 2: Stats bar
+    scH+='<div style="display:flex;flex-wrap:wrap;gap:6px 16px;font-size:11px;color:#8b949e;padding:8px 0;border-top:1px solid #21262d;border-bottom:1px solid #21262d;margin-bottom:10px">';
+    scH+='<span>Cap: <b style="color:#c9d1d9">$'+sc.dynamicCap+'</b></span>';
+    scH+='<span>Idle SOL: <b style="color:#c9d1d9">$'+sc.idleSolValue+'</b></span>';
+    scH+='<span>Today: <b style="color:#a855f7">'+sc.todayCount+'</b> conv · <b style="color:#c9d1d9">'+sc.todaySol.toFixed(1)+' SOL</b> → <b style="color:#22c55e">$'+sc.todayUsdc.toFixed(0)+'</b></span>';
     if(sc.weekCount>0){
       var avgP=sc.weekSol>0?(sc.weekUsdc/sc.weekSol):0;
-      scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Week: '+sc.weekCount+' conversions · '+sc.weekSol.toFixed(1)+' SOL → $'+sc.weekUsdc.toFixed(0)+' USDC · avg $'+avgP.toFixed(2)+'/SOL</div>';
+      scH+='<span>Week: <b>'+sc.weekCount+'</b> conv · '+sc.weekSol.toFixed(1)+' SOL → $'+sc.weekUsdc.toFixed(0)+' · avg $'+avgP.toFixed(2)+'/SOL</span>';
     }
+    scH+='</div>';
+    // Row 3: Last conversion
     if(sc.last){
       var ago=Math.round((Date.now()-sc.last.ts)/60000);
       var agoStr=ago<60?ago+'min ago':(ago/60).toFixed(1)+'h ago';
       var txLink=sc.last.tx?'<a href="https://solscan.io/tx/'+sc.last.tx+'" target="_blank" style="color:#58a6ff;text-decoration:none;font-size:10px">'+sc.last.tx.slice(0,8)+'</a>':'';
-      scH+='<div style="font-size:11px;color:#c9d1d9;margin-bottom:8px">Last: <b>'+agoStr+'</b> — '+sc.last.sol.toFixed(3)+' SOL → $'+sc.last.usdc.toFixed(2)+' @ $'+sc.last.price.toFixed(2)+' '+txLink+'</div>';
+      scH+='<div style="font-size:11px;color:#c9d1d9;margin-bottom:10px">Last: <b>'+agoStr+'</b> — '+sc.last.sol.toFixed(3)+' SOL → $'+sc.last.usdc.toFixed(2)+' @ $'+sc.last.price.toFixed(2)+' '+txLink+'</div>';
     }
+    // Row 4: Full-width conversion history table
     if(sc.recent&&sc.recent.length>0){
       scH+='<div class="tbl-wrap"><table><thead><tr><th>Time</th><th style="text-align:right">SOL</th><th style="text-align:right">USDC</th><th style="text-align:right">Price</th><th class="m-hide">TX</th></tr></thead><tbody>';
       sc.recent.forEach(function(r){
@@ -395,6 +405,12 @@ function render(){
 
   // Render IL tracker from intelligence data
   renderILTracker();
+
+  // Load hourly performance (DOM now exists)
+  var hpSel=document.getElementById('hpDate');
+  if(hpSel&&hpSel.options.length===0){
+    hpLoad(new Date().toLocaleDateString('en-CA',{timeZone:'UTC'}));
+  }else if(HP_DATA){hpRender();}
 }
 
 function renderILTracker(){
@@ -830,9 +846,7 @@ function hpRender(){
 load();
 loadFeesData();
 loadAnalyticsData();
-var hpToday=new Date().toLocaleDateString('en-CA',{timeZone:'UTC'});
-hpLoad(hpToday);
-setInterval(function(){hpLoad(document.getElementById('hpDate')?.value||hpToday);},300000);
+setInterval(function(){var sel=document.getElementById('hpDate');if(sel&&sel.value)hpLoad(sel.value);},300000);
 setInterval(loadFeesData,300000);
 setInterval(loadAnalyticsData,300000);
 var scCdStart=0,scCdTotal=0;
