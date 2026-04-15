@@ -16,7 +16,7 @@ import type Database from 'better-sqlite3';
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const RESERVE_FLOOR_PCT = 0.20; // 20% of total portfolio value
+const RESERVE_FLOOR_PCT = 0.10; // fallback — callers should pass regime-aware floorPct
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

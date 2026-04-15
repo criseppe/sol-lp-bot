@@ -4275,6 +4275,7 @@ function renderConfigHtml(): string {
     { key: 'deployRatioTolerance', label: 'Deploy ratio tolerance', desc: 'Max price deviation from midpoint for auto-deploy to fire (0-1).', ex: '0.020→0.050: deploys even near range edges. At 0.01: only near center.' },
     { key: 'basisGateThreshold', label: 'Basis gate threshold', desc: 'Price must be >= basis × threshold to open position. Lower = more permissive.', ex: '0.999 = 0.1% buffer. 0.995 = 0.5% buffer. 0.992 = 0.8% buffer.' },
     { key: 'proximityDeployThreshold', label: 'Prox deploy threshold', desc: 'Max proximity to lower bound before auto-deploy pauses (0-1).', ex: '0.40→0.55: deploys closer to edge. 0.40: pauses when 40% to lower bound.' },
+    { key: 'reserveFloorPct', label: 'Reserve floor %', desc: 'Reserve floor as fraction of total portfolio. Higher = more USDC held back from deployment.', ex: '0.10 = 10% reserve. 0.18 = 18%. 0.20 = 20%. Higher in bearish regimes for safety.' },
   ];
 
   // Original defaults from constants (for "Default" column)

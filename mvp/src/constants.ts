@@ -42,7 +42,7 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.035,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.55,
-    reserveFloorPct: 0.15,
+    reserveFloorPct: 0.12,
   },
   BEARISH_TREND: {
     rangeWidthPct:        2,
@@ -58,7 +58,7 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.030,
     basisGateThreshold:   0.992,
     proximityDeployThreshold: 0.55,
-    reserveFloorPct: 0.20,
+    reserveFloorPct: 0.18,
   },
   EXTREME: {
     rangeWidthPct:        5,
@@ -74,7 +74,7 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.050,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.40,
-    reserveFloorPct: 0.25,
+    reserveFloorPct: 0.20,
   },
 } as const;
 
