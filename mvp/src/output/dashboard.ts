@@ -295,6 +295,98 @@ export function startDashboard(port: number): DashboardServer {
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
 
+  // Hourly Performance endpoint — feeds the Intelligence hourly widget
+  app.get('/api/hourly-performance', requireAuth, (req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const date = (req.query as any).date || new Date().toLocaleDateString('en-CA', { timeZone: 'UTC' });
+
+      // 1. Hourly fees from rebalance_events
+      const feeRows = dbRef.prepare(`
+        SELECT strftime('%H', datetime(timestamp/1000, 'unixepoch')) as hour,
+               ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price), 4) as fees,
+               COUNT(*) as events
+        FROM rebalance_events
+        WHERE date(timestamp/1000, 'unixepoch') = ?
+          AND (COALESCE(fee_usdc,0) > 0 OR COALESCE(fee_sol,0) > 0)
+        GROUP BY hour ORDER BY hour
+      `).all(date) as any[];
+
+      // 2. Uptime + active % from regime_snapshots
+      const uptimeRows = dbRef.prepare(`
+        SELECT strftime('%H', datetime(ts/1000, 'unixepoch')) as hour,
+               COUNT(*) as snaps,
+               SUM(CASE WHEN position_state = 'ACTIVE' THEN 1 ELSE 0 END) as active_snaps
+        FROM regime_snapshots
+        WHERE date(ts/1000, 'unixepoch') = ?
+        GROUP BY hour ORDER BY hour
+      `).all(date) as any[];
+
+      // 3. Price range per hour
+      const priceRows = dbRef.prepare(`
+        SELECT strftime('%H', datetime(ts/1000, 'unixepoch')) as hour,
+               ROUND(MAX(price) - MIN(price), 4) as price_range,
+               ROUND(MAX(price), 2) as high,
+               ROUND(MIN(price), 2) as low,
+               ROUND(AVG(price), 2) as avg_price
+        FROM regime_snapshots
+        WHERE date(ts/1000, 'unixepoch') = ?
+        GROUP BY hour ORDER BY hour
+      `).all(date) as any[];
+
+      // 4. BB width (volatility proxy)
+      const bbRows = dbRef.prepare(`
+        SELECT strftime('%H', datetime(ts/1000, 'unixepoch')) as hour,
+               ROUND(AVG(bb_width), 4) as avg_bb_width
+        FROM regime_snapshots
+        WHERE date(ts/1000, 'unixepoch') = ?
+          AND bb_width IS NOT NULL
+        GROUP BY hour ORDER BY hour
+      `).all(date) as any[];
+
+      // Merge into hourly array
+      const feeMap: Record<string, any> = {};
+      feeRows.forEach((r: any) => { feeMap[r.hour] = r; });
+      const uptimeMap: Record<string, any> = {};
+      uptimeRows.forEach((r: any) => { uptimeMap[r.hour] = r; });
+      const priceMap: Record<string, any> = {};
+      priceRows.forEach((r: any) => { priceMap[r.hour] = r; });
+      const bbMap: Record<string, any> = {};
+      bbRows.forEach((r: any) => { bbMap[r.hour] = r; });
+
+      const hours = [];
+      for (let h = 0; h < 24; h++) {
+        const hh = String(h).padStart(2, '0');
+        const f = feeMap[hh];
+        const u = uptimeMap[hh];
+        const p = priceMap[hh];
+        const b = bbMap[hh];
+        // Expected snapshots per hour: regime_snapshots fire every ~60s = ~60/hour
+        const expectedSnaps = 60;
+        hours.push({
+          hour: hh,
+          fees: f?.fees ?? 0,
+          events: f?.events ?? 0,
+          uptimePct: u && u.snaps >= 3 ? Math.min(100, Math.round(u.snaps / expectedSnaps * 1000) / 10) : null,
+          activePct: u && u.snaps >= 3 ? Math.round(u.active_snaps / u.snaps * 1000) / 10 : null,
+          priceRange: p?.price_range ?? 0,
+          high: p?.high ?? 0,
+          low: p?.low ?? 0,
+          avgPrice: p?.avg_price ?? 0,
+          bbWidth: b?.avg_bb_width ?? 0,
+        });
+      }
+
+      // Available dates
+      const availableDates = (dbRef.prepare(`
+        SELECT DISTINCT date(ts/1000, 'unixepoch') as d
+        FROM regime_snapshots ORDER BY d ASC
+      `).all() as any[]).map((r: any) => r.d);
+
+      res.json({ date, hours, availableDates });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+
   // Daily Fees Intelligence endpoint
   app.get('/api/daily-fees-intelligence', requireAuth, (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }

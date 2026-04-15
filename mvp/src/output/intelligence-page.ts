@@ -67,6 +67,9 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
   .fees-cards{grid-template-columns:1fr 1fr}
   .fees-card-val{font-size:15px}
   .fees-compare{grid-template-columns:1fr 1fr}
+  #hpCards{grid-template-columns:1fr 1fr!important}
+  #cHourlyFees{max-height:200px!important}
+  #cHourlyVol{max-height:120px!important}
   .fees-bottom{flex-wrap:wrap;gap:8px;font-size:10px}
   #cFees{max-height:200px!important}
   .section-hdr h2{font-size:11px}
@@ -163,6 +166,18 @@ function render(){
   h+='<div class="w"><h3>Cumulative Fees</h3><canvas id="cCumFees"></canvas></div>';
   // Portfolio Growth (from analytics)
   h+='<div class="w full"><h3>Portfolio Growth (7D)</h3><canvas id="cPortGrowth"></canvas><div class="tbl-wrap" id="wPortGrowthTbl"></div></div>';
+  // Hourly Performance
+  h+='<div class="w full" id="wHourlyPerf">';
+  h+='<h3>Hourly Performance</h3>';
+  h+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;flex-wrap:wrap">';
+  h+='<button id="hpPrev" onclick="hpNav(-1)" style="background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">\\u25C0</button>';
+  h+='<select id="hpDate" onchange="hpLoad(this.value)" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 10px;font-size:12px;flex:1;max-width:180px"></select>';
+  h+='<button id="hpNext" onclick="hpNav(1)" style="background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">\\u25B6</button>';
+  h+='</div>';
+  h+='<canvas id="cHourlyFees" style="width:100%;max-height:280px"></canvas>';
+  h+='<canvas id="cHourlyVol" style="width:100%;max-height:160px;margin-top:8px"></canvas>';
+  h+='<div id="hpCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px"></div>';
+  h+='</div>';
   h+='</div>';
 
   // ── SECTION 2: POSITION ANALYTICS ──
@@ -654,9 +669,111 @@ async function loadFeesData(){
   }catch(e){console.warn('fees intelligence load failed',e);}
 }
 
+// ── HOURLY PERFORMANCE WIDGET ──
+var HP_DATA=null,HP_DATES=[];
+async function hpLoad(date){
+  try{
+    var r=await fetch('/api/hourly-performance?date='+date);
+    if(!r.ok)return;
+    HP_DATA=await r.json();
+    // Populate date selector on first load
+    var sel=document.getElementById('hpDate');
+    if(sel&&HP_DATA.availableDates&&sel.options.length===0){
+      HP_DATES=HP_DATA.availableDates;
+      HP_DATES.slice().reverse().forEach(function(d){
+        var opt=document.createElement('option');
+        opt.value=d;opt.textContent=d;
+        if(d===date)opt.selected=true;
+        sel.appendChild(opt);
+      });
+    }else if(sel){sel.value=date;}
+    // Update nav buttons
+    var idx=HP_DATES.indexOf(date);
+    var prevBtn=document.getElementById('hpPrev');
+    var nextBtn=document.getElementById('hpNext');
+    if(prevBtn)prevBtn.disabled=idx<=0;
+    if(nextBtn)nextBtn.disabled=idx>=HP_DATES.length-1;
+    hpRender();
+  }catch(e){console.warn('hourly-performance load failed',e);}
+}
+function hpNav(dir){
+  var sel=document.getElementById('hpDate');
+  if(!sel)return;
+  var idx=HP_DATES.indexOf(sel.value);
+  var next=idx+dir;
+  if(next>=0&&next<HP_DATES.length){hpLoad(HP_DATES[next]);}
+}
+function hpRender(){
+  if(!HP_DATA||!HP_DATA.hours)return;
+  var hrs=HP_DATA.hours;
+  var labels=hrs.map(function(h){return h.hour;});
+  var fees=hrs.map(function(h){return h.fees;});
+  var uptime=hrs.map(function(h){return h.activePct;});
+  var priceRange=hrs.map(function(h){return h.priceRange;});
+  var bbWidth=hrs.map(function(h){return h.bbWidth;});
+
+  // Fees + uptime chart
+  if(CHS.cHourlyFees)try{CHS.cHourlyFees.destroy();}catch{}
+  var el1=document.getElementById('cHourlyFees');
+  if(el1){
+    var feeCols=fees.map(function(v){return v>2?'#2ea043cc':v>0.5?'#2ea04399':'#2ea04340';});
+    CHS.cHourlyFees=new Chart(el1,{type:'bar',data:{labels:labels,datasets:[
+      {label:'Fees ($)',data:fees,backgroundColor:feeCols,yAxisID:'y',order:2},
+      {label:'Active %',data:uptime,type:'line',borderColor:'#58a6ff',backgroundColor:'transparent',tension:0.3,pointRadius:2,borderWidth:2,yAxisID:'y1',order:1}
+    ]},options:{interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}},tooltip:{callbacks:{label:function(ctx){
+      var h=hrs[ctx.dataIndex];
+      if(ctx.datasetIndex===0)return 'Fees: $'+fmt(h.fees,4)+' ('+h.events+' events)';
+      return 'Active: '+fmt(h.activePct,1)+'%';
+    },afterBody:function(items){
+      var h=hrs[items[0].dataIndex];
+      var lines=[];
+      if(h.high>0)lines.push('Price: $'+fmt(h.low)+' – $'+fmt(h.high)+' (range $'+fmt(h.priceRange,4)+')');
+      if(h.bbWidth>0)lines.push('BB Width: '+fmt(h.bbWidth,2)+'%');
+      return lines;
+    }}}},scales:{
+      y:{ticks:{callback:function(v){return '$'+Number(v).toFixed(2);},color:'#8b949e'},grid:{color:'#21262d'},title:{display:true,text:'Fees',color:'#484f58',font:{size:10}}},
+      y1:{position:'right',min:0,max:100,ticks:{callback:function(v){return v+'%';},color:'#58a6ff'},grid:{display:false},title:{display:true,text:'Active %',color:'#484f58',font:{size:10}}},
+      x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}
+    }}});
+  }
+
+  // Volatility chart
+  if(CHS.cHourlyVol)try{CHS.cHourlyVol.destroy();}catch{}
+  var el2=document.getElementById('cHourlyVol');
+  if(el2){
+    CHS.cHourlyVol=new Chart(el2,{type:'line',data:{labels:labels,datasets:[
+      {label:'Price Range ($)',data:priceRange,borderColor:'#f97316',backgroundColor:'#f9731620',fill:true,tension:0.3,pointRadius:2,borderWidth:1.5,yAxisID:'y'},
+      {label:'BB Width (%)',data:bbWidth,borderColor:'#a855f7',backgroundColor:'transparent',tension:0.3,pointRadius:2,borderWidth:1.5,yAxisID:'y1'}
+    ]},options:{interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{
+      y:{ticks:{callback:function(v){return '$'+Number(v).toFixed(2);},color:'#f97316'},grid:{color:'#21262d'},title:{display:true,text:'Price Range',color:'#484f58',font:{size:10}}},
+      y1:{position:'right',ticks:{callback:function(v){return Number(v).toFixed(1)+'%';},color:'#a855f7'},grid:{display:false},title:{display:true,text:'BB Width',color:'#484f58',font:{size:10}}},
+      x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}
+    }}});
+  }
+
+  // Summary cards
+  var cardsEl=document.getElementById('hpCards');
+  if(cardsEl){
+    var bestHr=hrs.reduce(function(a,b){return b.fees>a.fees?b:a;},hrs[0]);
+    var activeHrs=hrs.filter(function(h){return h.activePct!=null;});
+    var avgActive=activeHrs.length>0?activeHrs.reduce(function(s,h){return s+h.activePct;},0)/activeHrs.length:0;
+    var peakVol=hrs.reduce(function(a,b){return b.priceRange>a.priceRange?b:a;},hrs[0]);
+    var totalFees=hrs.reduce(function(s,h){return s+h.fees;},0);
+    var cs='';
+    cs+='<div class="s"><div class="v" style="color:#ffd700;font-size:14px">'+bestHr.hour+':00</div><div class="l">Best hour ($'+fmt(bestHr.fees)+')</div></div>';
+    cs+='<div class="s"><div class="v" style="color:#58a6ff;font-size:14px">'+fmt(avgActive,0)+'%</div><div class="l">Avg active</div></div>';
+    cs+='<div class="s"><div class="v" style="color:#f97316;font-size:14px">'+peakVol.hour+':00</div><div class="l">Peak vol ($'+fmt(peakVol.priceRange,4)+')</div></div>';
+    cs+='<div class="s"><div class="v" style="color:#22c55e;font-size:14px">$'+fmt(totalFees)+'</div><div class="l">Total fees</div></div>';
+    cardsEl.innerHTML=cs;
+  }
+}
+
 load();
 loadFeesData();
 loadAnalyticsData();
+var hpToday=new Date().toLocaleDateString('en-CA',{timeZone:'UTC'});
+hpLoad(hpToday);
+setInterval(function(){hpLoad(document.getElementById('hpDate')?.value||hpToday);},300000);
 setInterval(loadFeesData,300000);
 setInterval(loadAnalyticsData,300000);
 var scCdStart=0,scCdTotal=0;
