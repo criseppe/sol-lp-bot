@@ -4037,18 +4037,6 @@ ${NAV_HTML}
   <h3>2. Position Rules</h3>
   <table style="margin-bottom:16px">
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    <tr style="border-bottom:1px solid #21262d">
-      <td style="padding:8px;color:#c9d1d9;font-size:12px">Range width override</td>
-      <td style="padding:8px">
-        <select id="rwo-toggle" class="cfg-input" style="width:60px" onchange="document.getElementById('rwo-val').style.display=this.value==='on'?'inline':'none'">
-          <option value="off" ${c.rangeWidthOverride == null ? 'selected' : ''}>OFF</option>
-          <option value="on" ${c.rangeWidthOverride != null ? 'selected' : ''}>ON</option>
-        </select>
-        <input type="number" step="any" id="rwo-val" class="cfg-input" data-key="rangeWidthOverride" value="${c.rangeWidthOverride ?? 1.5}" style="width:60px;margin-left:4px;${c.rangeWidthOverride == null ? 'display:none' : ''}">
-      </td>
-      <td style="padding:8px;color:#8b949e;font-size:11px">Force fixed range width regardless of regime. OFF = adaptive.</td>
-      <td style="padding:8px;color:#58a6ff;font-size:11px">ON at 1.5%: always tight range. OFF: adapts 1.5-6% by regime.</td>
-    </tr>
     ${field('positionMaxAgeHours', c.positionMaxAgeHours, 0, 'Max position age (h)', 'Rebalance after this many hours to reset IL baseline and collect fees. 0 = disabled.', 'At 24: daily rebalance. At 0: only rebalance on OOR/proximity exit.')}
   </table>
   <div style="color:#8b949e;font-size:11px;margin-bottom:8px">Per-regime parameters (hover <span style="color:#30363d">&#x2753;</span> for description + example):</div>
@@ -4246,10 +4234,6 @@ function getChanges() {
     if (!key) return;
     var val = el.value;
     // Handle range width override toggle
-    if (key === 'rangeWidthOverride') {
-      var toggle = document.getElementById('rwo-toggle');
-      if (toggle.value === 'off') val = 'null';
-    }
     if (val !== originalValues[key]) {
       changes[key] = val;
     }
@@ -4509,15 +4493,29 @@ signals all point to the same conclusion.</div>
     <div class="cell header" style="color:#22c55e">Bullish</div>
     <div class="cell header" style="color:#ef4444">Bearish</div>
     <div class="cell header" style="color:#a855f7">Extreme</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Range Width (R1)</div><div class="cell" style="color:#4a9eff">1.5%</div><div class="cell" style="color:#22c55e">3%</div><div class="cell" style="color:#ef4444">2.5%</div><div class="cell" style="color:#a855f7">6%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Skew down/up (R1)</div><div class="cell">30/70</div><div class="cell">20/80</div><div class="cell">40/60</div><div class="cell">50/50</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Downside Exit (R2)</div><div class="cell">65%</div><div class="cell">70%</div><div class="cell">55%</div><div class="cell">50%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Upside Exit (R2)</div><div class="cell">88%</div><div class="cell">92%</div><div class="cell">82%</div><div class="cell">80%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">SOL Re-entry (R4)</div><div class="cell">50%</div><div class="cell">50%</div><div class="cell">30%</div><div class="cell">20%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Capital Deploy (R5)</div><div class="cell" style="color:#22c55e">100%</div><div class="cell">85%</div><div class="cell" style="color:#eab308">75%</div><div class="cell" style="color:#ef4444">25%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Harvest (R6)</div><div class="cell">7d</div><div class="cell">4d</div><div class="cell">2d</div><div class="cell">1d</div>
-    <div class="cell" style="text-align:left;color:#8b949e">SOL&#x2192;USDC Harvest</div><div class="cell">0%</div><div class="cell">70%</div><div class="cell" style="color:#ef4444">100%</div><div class="cell" style="color:#ef4444">100%</div>
-    <div class="cell" style="text-align:left;color:#8b949e">Auto Deploy (R7)</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#22c55e">Yes</div><div class="cell" style="color:#ef4444">Blocked</div>
+    ${(() => {
+      const R = REGIME_PARAMS;
+      const r = (v: number) => Math.round(v * 100);
+      const pct = (v: number) => `${r(v)}%`;
+      const rows = [
+        { label: 'Range Width (R1)', vals: [R.RANGING.rangeWidthPct, R.BULLISH_TREND.rangeWidthPct, R.BEARISH_TREND.rangeWidthPct, R.EXTREME.rangeWidthPct], fmt: (v: number) => `${v}%` },
+        { label: 'Skew down/up (R1)', vals: [0,1,2,3], fmt: (v: number) => { const regimes = [R.RANGING, R.BULLISH_TREND, R.BEARISH_TREND, R.EXTREME]; return `${r(regimes[v].skewDown)}/${r(regimes[v].skewUp)}`; } },
+        { label: 'Downside Exit (R2)', vals: [R.RANGING.proxThresholdLower, R.BULLISH_TREND.proxThresholdLower, R.BEARISH_TREND.proxThresholdLower, R.EXTREME.proxThresholdLower], fmt: pct },
+        { label: 'Upside Exit (R2)', vals: [R.RANGING.proxThresholdUpper, R.BULLISH_TREND.proxThresholdUpper, R.BEARISH_TREND.proxThresholdUpper, R.EXTREME.proxThresholdUpper], fmt: pct },
+        { label: 'SOL Re-entry (R4)', vals: [R.RANGING.solReentrySplit, R.BULLISH_TREND.solReentrySplit, R.BEARISH_TREND.solReentrySplit, R.EXTREME.solReentrySplit], fmt: pct },
+        { label: 'Capital Deploy (R5)', vals: [R.RANGING.deployPct, R.BULLISH_TREND.deployPct, R.BEARISH_TREND.deployPct, R.EXTREME.deployPct], fmt: pct },
+        { label: 'Harvest (R6)', vals: [R.RANGING.harvestIntervalDays, R.BULLISH_TREND.harvestIntervalDays, R.BEARISH_TREND.harvestIntervalDays, R.EXTREME.harvestIntervalDays], fmt: (v: number) => `${v}d` },
+        { label: 'SOL&#x2192;USDC Harvest', vals: [R.RANGING.harvestSolConvertPct, R.BULLISH_TREND.harvestSolConvertPct, R.BEARISH_TREND.harvestSolConvertPct, R.EXTREME.harvestSolConvertPct], fmt: pct },
+        { label: 'Reserve Floor', vals: [R.RANGING.reserveFloorPct, R.BULLISH_TREND.reserveFloorPct, R.BEARISH_TREND.reserveFloorPct, R.EXTREME.reserveFloorPct], fmt: pct },
+        { label: 'Prox Deploy Threshold', vals: [R.RANGING.proximityDeployThreshold, R.BULLISH_TREND.proximityDeployThreshold, R.BEARISH_TREND.proximityDeployThreshold, R.EXTREME.proximityDeployThreshold], fmt: pct },
+        { label: 'Basis Gate', vals: [R.RANGING.basisGateThreshold, R.BULLISH_TREND.basisGateThreshold, R.BEARISH_TREND.basisGateThreshold, R.EXTREME.basisGateThreshold], fmt: (v: number) => v.toFixed(3) },
+      ];
+      const colors = ['#4a9eff', '#22c55e', '#ef4444', '#a855f7'];
+      return rows.map(row => {
+        const cells = row.vals.map((v, i) => `<div class="cell" style="color:${colors[i]}">${row.fmt(v)}</div>`).join('');
+        return `<div class="cell" style="text-align:left;color:#8b949e">${row.label}</div>${cells}`;
+      }).join('\n    ');
+    })()}
   </div></div>
   <div style="font-size:11px;color:#8b949e;margin-top:4px">Pool fee tier: <b>0.04%</b> (Orca SOL/USDC, tick spacing 4). Fee density matters &#x2014; tighter range = more concentrated liquidity = more fees per dollar at 0.04%.</div>
 </div>
@@ -4874,6 +4872,37 @@ exists and is earning fees.</div>
 <b>Rebalance Limit</b>  &gt; 10 per hour               &#x2192; pause
 <b>Min Position</b>     &lt; $100 USDC                  &#x2192; skip open
 <b>Flash Crash</b>      &gt; 5% single drop             &#x2192; wait 15 min</div>
+</div>
+
+<!-- ── SOL CONVERSION ─────────────────────────────────────────────── -->
+
+<div class="section-title" style="color:#a855f7">SOL Conversion &amp; Reserve System</div>
+<div class="card" style="margin-bottom:16px">
+  <div style="font-size:12px;color:#c9d1d9;line-height:1.6">
+    <p style="margin-bottom:8px"><b>Dynamic Cap:</b> Cap = idleSolValue &divide; targetCycles. Target cycles scale by regime:
+    RANGING&nbsp;=&nbsp;6 (fast), BULLISH&nbsp;=&nbsp;9, BEARISH&nbsp;=&nbsp;18, EXTREME&nbsp;=&nbsp;48 (conservative). Floor&nbsp;$200, ceiling&nbsp;$5000.</p>
+    <p style="margin-bottom:8px"><b>Momentum Override:</b> In BEARISH/EXTREME, SolConvert normally blocked by regime gate. Override fires when price rises &ge;2% in 30&nbsp;minutes AND price is &ge;0.5% above cost basis. This captures recovery bounces without waiting for regime change.</p>
+    <p style="margin-bottom:8px"><b>Reserve Floor (regime-aware):</b>
+    RANGING&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.RANGING.reserveFloorPct * 100)}%,
+    BULLISH&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.BULLISH_TREND.reserveFloorPct * 100)}%,
+    BEARISH&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.BEARISH_TREND.reserveFloorPct * 100)}%,
+    EXTREME&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.EXTREME.reserveFloorPct * 100)}%.
+    Reserve floor is recalculated each cycle based on total portfolio value &times; regime %. USDC below this floor is never deployed or swapped.</p>
+    <p style="margin-bottom:0"><b>Basis Gate (unified):</b>
+    All regimes use ${REGIME_PARAMS.RANGING.basisGateThreshold} (${((1 - REGIME_PARAMS.RANGING.basisGateThreshold) * 100).toFixed(1)}% buffer) except BEARISH at ${REGIME_PARAMS.BEARISH_TREND.basisGateThreshold} (${((1 - REGIME_PARAMS.BEARISH_TREND.basisGateThreshold) * 100).toFixed(1)}% buffer).
+    SOL sells are blocked when price is below basis &times; threshold.</p>
+  </div>
+</div>
+
+<!-- ── FEE COLLECTION ────────────────────────────────────────────────── -->
+
+<div class="section-title" style="color:#ffd700">Fee Collection</div>
+<div class="card" style="margin-bottom:16px">
+  <div style="font-size:12px;color:#c9d1d9;line-height:1.6">
+    <p style="margin-bottom:8px"><b>Single source of truth:</b> <code>rebalance_events</code> table. Fees are recorded at the moment they are physically withdrawn from the position to the wallet (on close or harvest). Each event stores <code>fee_sol</code> and <code>fee_usdc</code> at the close-time price.</p>
+    <p style="margin-bottom:8px"><b>Pending fees</b> (accrued but uncollected) are shown separately in the Daily Fees Intelligence widget. They are never added to collected totals.</p>
+    <p style="margin-bottom:0"><b>Cumulative fees</b> in all charts use a running sum of <code>fees_earned_usdc</code> from <code>daily_summary</code>, which is itself derived from <code>rebalance_events</code>. This avoids mark-to-market distortion from SOL price changes.</p>
+  </div>
 </div>
 
 <!-- ── CONCENTRATED LIQUIDITY PRIMER ────────────────────────────────── -->
