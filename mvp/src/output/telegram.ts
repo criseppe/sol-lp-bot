@@ -147,7 +147,7 @@ function buildReport(
     `🏦 Reserve: $${rs.current.toFixed(0)} / $${rs.floor.toFixed(0)} (${rs.state})`,
     `📐 Basis: $${cb.solCostBasis.toFixed(2)} | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
     ``,
-    `💸 All-time: $${live.totalFeesUsdc.toFixed(2)} | Pending: $${live.pendingFeesTotal.toFixed(2)} | Net: ${netFees >= 0 ? '+' : ''}$${netFees.toFixed(2)}`,
+    `💸 Fees (MtM): $${live.totalFeesUsdc.toFixed(2)} | Pending: $${live.pendingFeesTotal.toFixed(2)} | Net: ${netFees >= 0 ? '+' : ''}$${netFees.toFixed(2)}`,
     ``,
     `🚦 Gates:`,
     `   Reserve: ${reserveGatePassing ? 'PASS' : 'BLOCK'}`,

@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries, getRegimeSnapshots } from '../db/sqlite.js';
+import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries, getRegimeSnapshots, getFeesCollected, getFeesCollectedByDay } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
@@ -216,11 +216,10 @@ export function startDashboard(port: number): DashboardServer {
       for (const g of gasRaw) { const price = priceHistory.length > 0 ? priceHistory[priceHistory.length-1].price : 84; gasMap[g.date] = (g.gas_lamports || 0) / 1e9 * price; }
       // Enrich daily fees with gas
       const dailyFeesEnriched = dailyFees.map((d: any) => ({ ...d, gas: gasMap[d.date] || 0, net: d.fees - (gasMap[d.date] || 0) }));
-      // Summary — use daily_summary as authoritative fee source (same as arcade)
-      const feesFromSummary = (dbRef.prepare('SELECT COALESCE(SUM(fees_earned_usdc), 0) as total FROM daily_summary').get() as any)?.total ?? 0;
-      const latestPrice = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1].price : 84;
+      // Summary — single source: rebalance_events (actual collected fees)
+      const feesCollectedAllTime = getFeesCollected(dbRef!);
       const pendingFees = currentLive ? currentLive.pendingFeesTotal : 0;
-      const totalFees = feesFromSummary + pendingFees;
+      const totalFees = feesCollectedAllTime;
       const totalGas = Object.values(gasMap).reduce((s: number, g: any) => s + g, 0);
       const avgDuration = positions.length > 0 ? Math.round(positions.reduce((s: number, p: any) => s + p.durationMin, 0) / positions.length) : 0;
       // SOL Conversion stats
@@ -294,9 +293,9 @@ export function startDashboard(port: number): DashboardServer {
       const feesToday = todayRow?.fees ?? 0;
       const positionsToday = todayRow?.positions ?? 0;
 
-      // Pending fees from current open position
+      // Pending fees shown separately — not added to collected total
       const feesPending = currentLive?.pendingFeesTotal ?? 0;
-      const feesTodayTotal = feesToday + feesPending;
+      const feesTodayTotal = feesToday;
 
       // Yesterday's full-day fees
       const yesterdayStart = startOfTodayMs - 86400000;
@@ -431,8 +430,7 @@ export function startDashboard(port: number): DashboardServer {
       const portfolio4hAgo = snap4h?.total_value ?? portfolioNow;
       const change = portfolioNow - portfolio4hAgo;
       const changePct = portfolio4hAgo > 0 ? (change / portfolio4hAgo) * 100 : 0;
-      const feesAllRow = dbRef.prepare('SELECT COALESCE(SUM(fees_earned_usdc), 0) as total FROM daily_summary').get() as { total: number };
-      const feesAllTime = feesAllRow?.total ?? 0;
+      const feesAllTime = getFeesCollected(dbRef!);
       const positionActive = live?.botState === 'ACTIVE';
       const pendingFees = live ? live.pendingFeesTotal : 0;
       const fees4hClose = dbRef.prepare('SELECT COALESCE(SUM(fee_usdc),0) + COALESCE(SUM(fee_sol),0) * ? as total FROM rebalance_events WHERE timestamp > ? AND (fee_usdc > 0 OR fee_sol > 0)').get(price, Date.now() - 4 * 3600_000) as { total: number };
@@ -746,8 +744,7 @@ export function startDashboard(port: number): DashboardServer {
     const totalInvested = investors.reduce((s: number, i: any) => s + i.amount_usdc, 0);
     const latestSnap = dbRef.prepare('SELECT * FROM live_snapshots ORDER BY timestamp DESC LIMIT 1').get() as any;
     const totalPortfolio = latestSnap?.total_with_position ?? 0;
-    const summaries = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date DESC LIMIT 1').get() as any;
-    const totalFees = summaries?.cum_fees_usdc ?? 0;
+    const totalFees = getFeesCollected(dbRef!);
     res.json({ investors, totalInvested, totalPortfolio, totalFees });
   });
 
@@ -898,17 +895,20 @@ export function startDashboard(port: number): DashboardServer {
       });
       const weekdayRate = wdHours > 0 ? wdFees / wdHours : 0;
       const weekendRate = weHours > 0 ? weFees / weHours : 0;
-      const blendedRate = totalHours > 0 ? (summaries.reduce((s: number, d: any) => s + (d.fees_earned_usdc || 0), 0)) / (totalHours / 24) / 24 : 1;
+      const feesAllTimeProj = getFeesCollected(dbRef!);
+      const blendedRate = totalHours > 0 ? feesAllTimeProj / (totalHours / 24) / 24 : 1;
 
-      // Daily summaries for trend
-      const dailyFeesArr = summaries.map((s: any) => ({ date: s.date, fees: s.fees_earned_usdc || 0, total: s.total_usdc, regime: s.regime }));
+      // Daily summaries for trend — use rebalance_events per day
+      const dailyFeesFromEvents = getFeesCollectedByDay(dbRef!, 90);
+      const dailyFeesMap = new Map(dailyFeesFromEvents.map(d => [d.date, d.fees]));
+      const dailyFeesArr = summaries.map((s: any) => ({ date: s.date, fees: dailyFeesMap.get(s.date) ?? 0, total: s.total_usdc, regime: s.regime }));
 
       // SOL/USDC holdings and rolling averages
       const solHeld = latestSnap.sol_balance + (latestSnap.position_sol || 0);
       const usdcHeld = latestSnap.usdc_balance + (latestSnap.position_usdc || 0);
       const now = Date.now();
-      const fees7d = summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 7 * 86400_000).reduce((a: number, s: any) => a + (s.fees_earned_usdc || 0), 0);
-      const fees30d = summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 30 * 86400_000).reduce((a: number, s: any) => a + (s.fees_earned_usdc || 0), 0);
+      const fees7d = getFeesCollected(dbRef!, { fromTs: now - 7 * 86400_000 });
+      const fees30d = getFeesCollected(dbRef!, { fromTs: now - 30 * 86400_000 });
       const days7 = Math.min(7, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 7 * 86400_000).length || 1);
       const days30 = Math.min(30, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 30 * 86400_000).length || 1);
 
@@ -2180,9 +2180,9 @@ ${NAV_HTML}
         <div style="font-size:11px;color:#8b949e">${fmt(live.cumHarvestedFeesUsdc, 4)} USDC</div>
       </div>
       <div class="fees-cell" style="border-right:none">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Total Fees Earned</div>
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Total Fees (mark-to-market)</div>
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.totalFeesUsdc)}</div>
-        <div style="font-size:11px;color:#8b949e">Pending + Harvested</div>
+        <div style="font-size:11px;color:#8b949e">Pending + harvested at current SOL price</div>
       </div>
     </div>
     <div style="border-top:1px solid #21262d;margin-top:8px;padding-top:12px">

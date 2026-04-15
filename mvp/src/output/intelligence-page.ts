@@ -109,7 +109,7 @@ function render(){
   var S=DATA.summary;
   // Summary cards
   var sh='';
-  sh+='<div class="s"><div class="v" style="color:#22c55e">$'+fmt(S.totalFees,0)+'</div><div class="l">Total Fees (incl. pending)</div></div>';
+  sh+='<div class="s"><div class="v" style="color:#22c55e">$'+fmt(S.totalFees,0)+'</div><div class="l">Fees Collected</div></div>';
   sh+='<div class="s"><div class="v" style="color:#ef4444">$'+fmt(S.totalGas,2)+'</div><div class="l">Total Gas</div></div>';
   sh+='<div class="s"><div class="v" style="color:#ffd700">$'+fmt(S.totalFees-S.totalGas,0)+'</div><div class="l">Net Income</div></div>';
   sh+='<div class="s"><div class="v" style="color:#58a6ff">'+S.totalPositions+'</div><div class="l">Positions</div></div>';
@@ -317,7 +317,7 @@ function renderFeesIntelligence(){
 
   // Header metrics - 4 cards
   s+='<div class="fees-cards">';
-  s+='<div class="fees-card" style="border-color:'+todayCol+'30"><div class="fees-card-val" style="color:'+todayCol+'">$'+fmt(d.feesTodayTotal)+'</div><div class="fees-card-sub">'+fmt(d.feesPending,3)+' pending</div><div class="fees-card-label">Today so far</div></div>';
+  s+='<div class="fees-card" style="border-color:'+todayCol+'30"><div class="fees-card-val" style="color:'+todayCol+'">$'+fmt(d.feesTodayTotal)+'</div><div class="fees-card-sub">'+fmt(d.feesPending,3)+' pending (separate)</div><div class="fees-card-label">Collected today</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesYesterday)+'</div><div class="fees-card-sub">full day</div><div class="fees-card-label">Yesterday</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.fees7dAvgSameTime)+'</div><div class="fees-card-sub">at '+d.hoursElapsed+'h elapsed</div><div class="fees-card-label">7D avg (same time)</div></div>';
   s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesExpectedToday)+'</div><div class="fees-card-sub" style="color:'+confCol+'">'+d.confidence+' confidence</div><div class="fees-card-label">Expected today</div></div>';

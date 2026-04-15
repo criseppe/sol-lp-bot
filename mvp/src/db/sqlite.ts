@@ -459,6 +459,52 @@ export function getDailyPnl(db: Database.Database, days: number): DailyPnlRow[] 
   `).all(days) as DailyPnlRow[];
 }
 
+// ── Fee query helpers ─────────────────────────────────────────────────────
+// Single source of truth: rebalance_events (actual fees collected at close/harvest).
+// SOL fees valued at event-time price (stored in `price` column).
+
+export function getFeesCollected(db: Database.Database, opts: {
+  fromTs?: number;
+  toTs?: number;
+  currentPrice?: number; // if provided, values SOL at this price instead of event price
+} = {}): number {
+  const useCurrentPrice = opts.currentPrice != null;
+  let sql = `
+    SELECT COALESCE(SUM(
+      fee_usdc + fee_sol * ${useCurrentPrice ? '?' : 'COALESCE(price, 0)'}
+    ), 0) as total
+    FROM rebalance_events
+    WHERE (fee_usdc > 0 OR fee_sol > 0)
+  `;
+  const params: any[] = useCurrentPrice ? [opts.currentPrice] : [];
+
+  if (opts.fromTs != null) {
+    sql += ` AND timestamp >= ?`;
+    params.push(opts.fromTs);
+  }
+  if (opts.toTs != null) {
+    sql += ` AND timestamp <= ?`;
+    params.push(opts.toTs);
+  }
+
+  const row = db.prepare(sql).get(...params) as { total: number };
+  return row?.total ?? 0;
+}
+
+export function getFeesCollectedByDay(db: Database.Database, days: number = 30): { date: string; fees: number; events: number }[] {
+  return db.prepare(`
+    SELECT
+      DATE(timestamp / 1000, 'unixepoch') as date,
+      ROUND(SUM(fee_usdc + fee_sol * COALESCE(price, 0)), 4) as fees,
+      COUNT(*) as events
+    FROM rebalance_events
+    WHERE (fee_usdc > 0 OR fee_sol > 0)
+    AND timestamp >= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `).all(Date.now() - days * 86400_000) as { date: string; fees: number; events: number }[];
+}
+
 export function pruneOldPriceTicks(db: Database.Database, keepDays: number): void {
   db.prepare(`
     DELETE FROM price_ticks

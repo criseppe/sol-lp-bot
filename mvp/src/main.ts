@@ -15,7 +15,7 @@ import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldR
 import { MINTS } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
-import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
+import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries, getFeesCollected } from './db/sqlite.js';
 import { calculateVarParams, shouldAdjustRange, calculateIdleTarget, shouldRebalanceIdle, calculateSwapPnl } from './engine/var.js';
 import type { VarConfig, SirConfig } from './engine/var.js';
 import { insertSwapLedger, backfillSwapLedgerCostBasis } from './db/sqlite.js';
@@ -2496,28 +2496,17 @@ function checkAndWriteDailyPnl(currentPrice: number) {
     });
   }
 
-  // Fee calculation sources — each serves a different purpose:
-  // 1. bot_state.cum_fees_sol/usdc: mark-to-market portfolio value
-  //    (SOL fees revalued at current price each cycle)
-  // 2. daily_summary.fees_earned_usdc: actual daily earnings
-  //    (rebalance_events actual + pending at write time)
-  // 3. rebalance_events: transaction-level audit trail
-  //    (fees at event-time price, no pending)
+  // Fee sources — single source of truth: rebalance_events (actual fees collected).
+  // bot_state.cum_fees_sol/usdc is mark-to-market for portfolio valuation only.
+  // daily_summary.fees_earned_usdc = getFeesCollected() for that day (no pending).
 
   // Portfolio change = today's value vs yesterday's close, net of injections
   const allSummaries = getDailySummaries(db, 2);
   const yesterday = allSummaries.find(s => s.date !== today);
   const yesterdayClose = yesterday?.total_usdc ?? totalValue;
-  // Daily fees: actual fees collected today from closes/harvests + pending uncollected
+  // Daily fees: actual fees collected today from closes/harvests (no pending)
   const startOfTodayMs = new Date(today + 'T00:00:00Z').getTime();
-  const actualFeesTodayRow = db.prepare(`
-    SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees
-    FROM rebalance_events
-    WHERE timestamp >= ?
-    AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
-    AND (fee_usdc > 0 OR fee_sol > 0)
-  `).get(currentPrice, startOfTodayMs) as { fees: number };
-  const dailyFeesEarned = (actualFeesTodayRow?.fees ?? 0) + pendingFeesUsdc;
+  const dailyFeesEarned = getFeesCollected(db, { fromTs: startOfTodayMs });
   const portfolioChange = totalValue - yesterdayClose - dailySummaryCumInjected;
 
   // Upsert today's summary (updates every cycle with latest values)
