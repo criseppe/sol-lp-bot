@@ -11,6 +11,7 @@ import type { RegimeParams } from './types.js';
 export const runtime = {
   // Decision loop
   decisionIntervalSeconds: 60,
+  regimeCheckIntervalMs: 120_000, // 2 minutes between regime checks
   regimeWindowDays: 7,
   trendThreshold: 0.35,
 
@@ -26,6 +27,7 @@ export const runtime = {
 
   // Auto Deploy
   autoDeployCheckMinutes: 5,
+  autoDeployCheckIntervalSec: 10, // seconds between auto-deploy attempts (within main cycle)
   autoDeployCooldownMinutes: 30,
   minIdleUsdc: 5,
   minIdleSol: 0.05,
@@ -66,6 +68,9 @@ export const runtime = {
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
+  // Regime-change reopen
+  regimeChangeReopenEnabled: true,
+
   // VAR — Volatility-Adaptive Range
   varEnabled: false,
   varMultiplier: 3.0,
@@ -84,6 +89,11 @@ export const runtime = {
   sirTrendMultiplier: 0.05,
   sirMaxSolPct: 0.75,
   sirMinSolPct: 0.15,
+
+  // SOL Conversion — sell SOL to USDC when profitable and USDC needed for deploys
+  solConversionEnabled: false,
+  solConversionCooldownMin: 15,
+  solConversionBasisMultiplier: 1.000, // price must be > basis * this to convert
 
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
@@ -109,7 +119,7 @@ export const runtime = {
 const REGIME_KEYS = ['RANGING', 'BULLISH_TREND', 'BEARISH_TREND', 'EXTREME'] as const;
 const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
   'rangeWidthPct', 'skewDown', 'skewUp', 'proxThresholdLower', 'proxThresholdUpper',
-  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct',
+  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold',
 ];
 
 /**
@@ -132,6 +142,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Decision loop
   const v1 = nv('decisionIntervalSeconds', 10, 600); if (v1 != null) runtime.decisionIntervalSeconds = v1;
+  const rcMs = nv('regimeCheckIntervalMs', 30000, 3600000); if (rcMs != null) runtime.regimeCheckIntervalMs = rcMs;
   const v2 = nv('regimeWindowDays', 1, 30); if (v2 != null) runtime.regimeWindowDays = v2;
   const v3 = nv('trendThreshold', 0.05, 0.95); if (v3 != null) runtime.trendThreshold = v3;
   const v4 = nv('pythMaxConfidencePct', 0.1, 5); if (v4 != null) runtime.pythMaxConfidencePct = v4;
@@ -145,11 +156,17 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Auto deploy
   const v10 = nv('autoDeployCheckMinutes', 1, 60); if (v10 != null) runtime.autoDeployCheckMinutes = v10;
-  const v11 = nv('autoDeployCooldownMinutes', 1, 1440); if (v11 != null) runtime.autoDeployCooldownMinutes = v11;
+  const adSec = nv('autoDeployCheckIntervalSec', 5, 300); if (adSec != null) runtime.autoDeployCheckIntervalSec = adSec;
+  const v11 = nv('autoDeployCooldownMinutes', 0, 1440); if (v11 != null) runtime.autoDeployCooldownMinutes = v11;
   const v12 = nv('minIdleUsdc', 0.1, 10000); if (v12 != null) runtime.minIdleUsdc = v12;
   const v13 = nv('minIdleSol', 0.001, 100); if (v13 != null) runtime.minIdleSol = v13;
   const v14 = nv('minDeployUsdc', 1, 10000); if (v14 != null) runtime.minDeployUsdc = v14;
   const v15 = nv('deployRatioTolerance', 0.001, 0.5); if (v15 != null) runtime.deployRatioTolerance = v15;
+
+  // SOL conversion
+  const scEnabled = g('solConversionEnabled'); if (scEnabled != null) runtime.solConversionEnabled = scEnabled === 'true' || scEnabled === '1';
+  const scCooldown = nv('solConversionCooldownMin', 1, 120); if (scCooldown != null) runtime.solConversionCooldownMin = scCooldown;
+  const scBasis = nv('solConversionBasisMultiplier', 1.000, 1.050); if (scBasis != null) runtime.solConversionBasisMultiplier = scBasis;
 
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
@@ -173,6 +190,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Idle wallet rebalance
   const vIREnabled = g('idleRebalanceEnabled'); if (vIREnabled === 'true' || vIREnabled === 'false') runtime.idleRebalanceEnabled = vIREnabled === 'true';
+  const vRCR = g('regimeChangeReopenEnabled'); if (vRCR === 'true' || vRCR === 'false') runtime.regimeChangeReopenEnabled = vRCR === 'true';
   const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
   const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
@@ -237,6 +255,9 @@ export function exportConfig(): Record<string, string> {
   const out: Record<string, string> = {};
 
   out['decisionIntervalSeconds'] = String(runtime.decisionIntervalSeconds);
+  out['regimeCheckIntervalMs'] = String(runtime.regimeCheckIntervalMs);
+  out['autoDeployCheckIntervalSec'] = String(runtime.autoDeployCheckIntervalSec);
+  out['regimeChangeReopenEnabled'] = String(runtime.regimeChangeReopenEnabled);
   out['regimeWindowDays'] = String(runtime.regimeWindowDays);
   out['trendThreshold'] = String(runtime.trendThreshold);
   out['pythMaxConfidencePct'] = String(runtime.pythMaxConfidencePct);
@@ -251,6 +272,9 @@ export function exportConfig(): Record<string, string> {
   out['minIdleSol'] = String(runtime.minIdleSol);
   out['minDeployUsdc'] = String(runtime.minDeployUsdc);
   out['deployRatioTolerance'] = String(runtime.deployRatioTolerance);
+  out['solConversionEnabled'] = runtime.solConversionEnabled ? '1' : '0';
+  out['solConversionCooldownMin'] = String(runtime.solConversionCooldownMin);
+  out['solConversionBasisMultiplier'] = String(runtime.solConversionBasisMultiplier);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);

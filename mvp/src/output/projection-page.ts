@@ -71,6 +71,7 @@ let DATA=null;
 let charts={};
 let volMultiplier=1.0;
 let capitalOverride=0;
+let solPriceChangePct=0;
 
 async function load() {
   try {
@@ -95,10 +96,13 @@ function render() {
   const blended = DATA.blendedRate * volMultiplier;
   const costPerDay = DATA.rebalancesPerDay * (DATA.costPerRebalance + DATA.ilPerRebalance);
   const startMonth = new Date().getMonth();
+  var solPrice = DATA.currentPrice || 84;
+  var solHeld = DATA.solHeld || 0;
+  var usdcHeld = DATA.usdcHeld || 0;
 
-  // Build 3 scenarios
+  // Build 3 scenarios (fees + SOL price impact)
   function buildScenario(label, feeMultiplier) {
-    let cumNet = 0;
+    let cumFees = 0;
     const months = [];
     for (let i = 0; i < 12; i++) {
       const mIdx = (startMonth + i) % 12;
@@ -107,15 +111,22 @@ function render() {
       const weHours = 30 * (2/7) * 24;
       const fees = (wdHours * wdRate * feeMultiplier + weHours * weRate * feeMultiplier) * seasonal * (DATA.inRangePct / 100);
       const costs = costPerDay * 30;
-      const net = fees - costs;
-      cumNet += net;
-      months.push({ month: MONTHS[mIdx], fees: Math.round(fees), costs: Math.round(costs), net: Math.round(net), cumNet: Math.round(cumNet) });
+      const netFees = fees - costs;
+      cumFees += netFees;
+      const solPriceM = solPrice * (1 + solPriceChangePct / 100 * (i + 1) / 12);
+      const solPnl = solHeld * (solPriceM - solPrice);
+      const portfolio = solHeld * solPriceM + usdcHeld + cumFees;
+      months.push({ month: MONTHS[mIdx], fees: Math.round(fees), costs: Math.round(costs), netFees: Math.round(netFees), cumFees: Math.round(cumFees), solPrice: Math.round(solPriceM * 100) / 100, solPnl: Math.round(solPnl), portfolio: Math.round(portfolio) });
     }
-    const annualReturn = cumNet;
-    const apr = capital > 0 ? (annualReturn / capital * 100) : 0;
-    const monthlyAvg = annualReturn / 12;
+    const totalFees12m = cumFees;
+    const solPnl12m = solHeld * (solPrice * (1 + solPriceChangePct / 100) - solPrice);
+    const annualReturn = totalFees12m + solPnl12m;
+    const apr = capital > 0 ? (totalFees12m / capital * 100) : 0;
+    const monthlyAvg = totalFees12m / 12;
     const breakEvenDays = monthlyAvg > 0 ? Math.round(capital / (monthlyAvg / 30)) : 999;
-    return { label, months, annualReturn: Math.round(annualReturn), apr: Math.round(apr * 10) / 10, monthlyAvg: Math.round(monthlyAvg), breakEvenDays };
+    const breakEvenDropPct = solHeld * solPrice > 0 ? (totalFees12m / (solHeld * solPrice)) * 100 : 100;
+    const breakEvenPrice = solPrice * (1 - breakEvenDropPct / 100);
+    return { label, months, annualReturn: Math.round(annualReturn), feeReturn: Math.round(totalFees12m), solPnl: Math.round(solPnl12m), apr: Math.round(apr * 10) / 10, monthlyAvg: Math.round(monthlyAvg), breakEvenDays, breakEvenPrice: Math.round(breakEvenPrice * 100) / 100, breakEvenDropPct: Math.round(breakEvenDropPct * 10) / 10 };
   }
 
   const conservative = buildScenario('Conservative', 0.6);
@@ -126,17 +137,33 @@ function render() {
   var html = '';
 
   // Summary cards
+  var beCol = solPrice > base.breakEvenPrice ? '#22c55e' : '#ef4444';
   html += '<div class="cards">';
-  html += '<div class="card"><div class="val" style="color:#ffd700">$'+fmt(base.annualReturn,0)+'</div><div class="lbl">Projected Annual Return (Base)</div></div>';
-  html += '<div class="card"><div class="val" style="color:#22c55e">'+base.apr+'%</div><div class="lbl">Projected APR</div></div>';
-  html += '<div class="card"><div class="val" style="color:#58a6ff">$'+fmt(base.monthlyAvg,0)+'</div><div class="lbl">Avg Monthly</div></div>';
-  html += '<div class="card"><div class="val" style="color:#c9d1d9">'+base.breakEvenDays+'d</div><div class="lbl">Break-Even</div></div>';
+  html += '<div class="card"><div class="val" style="color:#ffd700">$'+fmt(base.feeReturn,0)+'</div><div class="lbl">Fee Income (12m)</div></div>';
+  html += '<div class="card"><div class="val" style="color:'+(base.solPnl>=0?'#22c55e':'#ef4444')+'">$'+fmt(base.solPnl,0)+'</div><div class="lbl">SOL P&L (12m)</div></div>';
+  html += '<div class="card"><div class="val" style="color:#22c55e">'+base.apr+'%</div><div class="lbl">Fee APR</div></div>';
+  html += '<div class="card"><div class="val" style="color:'+beCol+'">'+(solHeld>0&&!isNaN(base.breakEvenPrice)?'$'+fmt(base.breakEvenPrice):'N/A')+'</div><div class="lbl">Break-Even SOL Price</div></div>';
+  html += '<div class="card"><div class="val" style="color:#58a6ff">$'+(DATA.avgDailyFees7d||0).toFixed(2)+'</div><div class="lbl">Avg Daily Fees (7d)</div></div>';
+  html += '<div class="card"><div class="val" style="color:#8b949e">$'+(DATA.avgDailyFees30d||0).toFixed(2)+'</div><div class="lbl">Avg Daily Fees (30d)</div></div>';
   html += '<div class="card"><div class="val" style="color:#8b949e">$'+fmt(capital,0)+'</div><div class="lbl">Capital</div></div>';
   html += '<div class="card"><div class="val" style="color:#8b949e">'+fmt(DATA.totalHours,0)+'h</div><div class="lbl">Data Window</div></div>';
   html += '</div>';
+  html += solHeld > 0 && !isNaN(base.breakEvenPrice) ? '<div style="text-align:center;font-size:11px;color:#8b949e;margin-bottom:12px">SOL can drop to <b style="color:'+beCol+'">$'+fmt(base.breakEvenPrice)+'</b> (-'+base.breakEvenDropPct+'%) before 12m fees are wiped out</div>' : '';
 
-  // Sensitivity sliders
+  // SOL price scenario + sensitivity sliders
+  var solEnd = solPrice * (1 + solPriceChangePct/100);
+
   html += '<div class="sliders">';
+  html += '<div class="slider-card"><label>SOL Price Scenario (12m)</label>';
+  html += '<div style="display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap">';
+  [{l:'Bear -30%',v:-30},{l:'Flat 0%',v:0},{l:'Bull +50%',v:50}].forEach(function(s){
+    var active=solPriceChangePct===s.v;
+    html+='<button onclick="solPriceChangePct='+s.v+';render()" style="padding:4px 8px;font-size:10px;border:1px solid '+(active?'#58a6ff':'#30363d')+';background:'+(active?'#58a6ff20':'transparent')+';color:'+(active?'#58a6ff':'#8b949e')+';border-radius:4px;cursor:pointer;font-family:inherit">'+s.l+'</button>';
+  });
+  html += '<button onclick="document.getElementById(\\'sol-slider\\').style.display=\\'block\\'" style="padding:4px 8px;font-size:10px;border:1px solid #30363d;background:transparent;color:#8b949e;border-radius:4px;cursor:pointer;font-family:inherit">Custom</button>';
+  html += '</div>';
+  html += '<div id="sol-slider" style="display:'+([-30,0,50].indexOf(solPriceChangePct)>=0?'none':'block')+'"><input type="range" min="-80" max="300" step="5" value="'+solPriceChangePct+'" oninput="solPriceChangePct=parseInt(this.value);render()"></div>';
+  html += '<div class="val">Current: $'+fmt(solPrice)+' → Year end: $'+fmt(solEnd)+' ('+(solPriceChangePct>=0?'+':'')+solPriceChangePct+'%)</div></div>';
   html += '<div class="slider-card"><label>Volume Multiplier</label><input type="range" min="0.2" max="3" step="0.1" value="'+volMultiplier+'" oninput="volMultiplier=parseFloat(this.value);document.getElementById(\\'vol-val\\').textContent=this.value+\\'x\\';render()"><div class="val" id="vol-val">'+volMultiplier+'x</div></div>';
   html += '<div class="slider-card"><label>Capital ($)</label><input type="range" min="1000" max="20000" step="500" value="'+capital+'" oninput="capitalOverride=parseInt(this.value);document.getElementById(\\'cap-val\\').textContent=\\'$\\'+this.value;render()"><div class="val" id="cap-val">$'+capital+'</div></div>';
   html += '</div>';
@@ -147,23 +174,20 @@ function render() {
   // Monthly table
   html += '<div class="section"><h2>Monthly Breakdown</h2>';
   html += '<div style="overflow-x:auto"><table>';
-  html += '<tr><th></th><th colspan="3" style="text-align:center;color:#8b949e">Conservative</th><th colspan="3" style="text-align:center;color:#58a6ff">Base Case</th><th colspan="3" style="text-align:center;color:#ffd700">Optimistic</th></tr>';
-  html += '<tr><th>Month</th><th style="text-align:right;color:#8b949e">Fees</th><th style="text-align:right;color:#8b949e">Net</th><th style="text-align:right;color:#8b949e">Cum</th><th style="text-align:right;color:#58a6ff">Fees</th><th style="text-align:right;color:#58a6ff">Net</th><th style="text-align:right;color:#58a6ff">Cum</th><th style="text-align:right;color:#ffd700">Fees</th><th style="text-align:right;color:#ffd700">Net</th><th style="text-align:right;color:#ffd700">Cum</th></tr>';
+  html += '<tr><th>Month</th><th style="text-align:right">SOL Price</th><th style="text-align:right">Fees</th><th style="text-align:right">SOL P&L</th><th style="text-align:right;color:#58a6ff">Portfolio</th><th style="text-align:right">Return</th></tr>';
   for (let i = 0; i < 12; i++) {
-    const c = conservative.months[i], b = base.months[i], o = optimistic.months[i];
+    const b = base.months[i];
+    const ret = capital > 0 ? ((b.portfolio - capital) / capital * 100) : 0;
+    const retCol = ret >= 0 ? '#22c55e' : '#ef4444';
     html += '<tr>';
-    html += '<td style="font-weight:bold">'+c.month+'</td>';
-    html += '<td style="text-align:right;color:#8b949e">$'+c.fees+'</td><td style="text-align:right;color:#8b949e">$'+c.net+'</td><td style="text-align:right;color:#8b949e;font-weight:bold">$'+c.cumNet+'</td>';
-    html += '<td style="text-align:right;color:#58a6ff">$'+b.fees+'</td><td style="text-align:right;color:#58a6ff">$'+b.net+'</td><td style="text-align:right;color:#58a6ff;font-weight:bold">$'+b.cumNet+'</td>';
-    html += '<td style="text-align:right;color:#ffd700">$'+o.fees+'</td><td style="text-align:right;color:#ffd700">$'+o.net+'</td><td style="text-align:right;color:#ffd700;font-weight:bold">$'+o.cumNet+'</td>';
+    html += '<td style="font-weight:bold">'+b.month+'</td>';
+    html += '<td style="text-align:right;font-family:monospace">$'+fmt(b.solPrice)+'</td>';
+    html += '<td style="text-align:right;color:#22c55e">$'+b.cumFees+'</td>';
+    html += '<td style="text-align:right;color:'+(b.solPnl>=0?'#22c55e':'#ef4444')+'">$'+b.solPnl+'</td>';
+    html += '<td style="text-align:right;color:#58a6ff;font-weight:bold">$'+b.portfolio.toLocaleString()+'</td>';
+    html += '<td style="text-align:right;color:'+retCol+'">'+(ret>=0?'+':'')+ret.toFixed(1)+'%</td>';
     html += '</tr>';
   }
-  html += '<tr style="border-top:2px solid #30363d;font-weight:bold">';
-  html += '<td>TOTAL</td>';
-  html += '<td style="text-align:right;color:#8b949e">$'+conservative.months.reduce(function(s,m){return s+m.fees;},0)+'</td><td style="text-align:right;color:#8b949e">$'+conservative.annualReturn+'</td><td></td>';
-  html += '<td style="text-align:right;color:#58a6ff">$'+base.months.reduce(function(s,m){return s+m.fees;},0)+'</td><td style="text-align:right;color:#58a6ff">$'+base.annualReturn+'</td><td></td>';
-  html += '<td style="text-align:right;color:#ffd700">$'+optimistic.months.reduce(function(s,m){return s+m.fees;},0)+'</td><td style="text-align:right;color:#ffd700">$'+optimistic.annualReturn+'</td><td></td>';
-  html += '</tr>';
   html += '</table></div>';
 
   // Scenario summary
@@ -172,8 +196,8 @@ function render() {
     var col = s === conservative ? '#8b949e' : s === base ? '#58a6ff' : '#ffd700';
     html += '<div style="text-align:center;padding:8px;background:#0d1117;border-radius:6px;border:1px solid '+col+'30">';
     html += '<div style="font-size:10px;color:'+col+';font-weight:bold;margin-bottom:4px">'+s.label+'</div>';
-    html += '<div style="font-size:16px;font-weight:bold;color:'+col+'">$'+s.annualReturn+'</div>';
-    html += '<div style="font-size:10px;color:#8b949e">'+s.apr+'% APR · $'+s.monthlyAvg+'/mo · '+s.breakEvenDays+'d break-even</div>';
+    html += '<div style="font-size:16px;font-weight:bold;color:'+col+'">$'+s.feeReturn+' <span style="font-size:11px;color:'+(s.solPnl>=0?'#22c55e':'#ef4444')+'">'+(s.solPnl>=0?'+':'')+s.solPnl+' SOL</span></div>';
+    html += '<div style="font-size:10px;color:#8b949e">'+s.apr+'% fee APR · $'+s.monthlyAvg+'/mo · BE: $'+s.breakEvenPrice+'</div>';
     html += '</div>';
   });
   html += '</div></div>';
@@ -218,9 +242,11 @@ function render() {
     data: {
       labels: labels,
       datasets: [
-        { label: 'Optimistic', data: optimistic.months.map(function(m){return m.cumNet;}), borderColor: '#ffd700', backgroundColor: '#ffd70020', fill: true, tension: 0.3, pointRadius: 3 },
-        { label: 'Base Case', data: base.months.map(function(m){return m.cumNet;}), borderColor: '#58a6ff', backgroundColor: '#58a6ff20', fill: true, tension: 0.3, pointRadius: 3 },
-        { label: 'Conservative', data: conservative.months.map(function(m){return m.cumNet;}), borderColor: '#8b949e', backgroundColor: '#8b949e20', fill: true, tension: 0.3, pointRadius: 3 },
+        { label: 'Optimistic', data: optimistic.months.map(function(m){return m.portfolio;}), borderColor: '#ffd700', backgroundColor: '#ffd70020', fill: false, tension: 0.3, pointRadius: 3, borderDash: [5,3] },
+        { label: 'Base Case', data: base.months.map(function(m){return m.portfolio;}), borderColor: '#58a6ff', backgroundColor: '#58a6ff20', fill: true, tension: 0.3, pointRadius: 3 },
+        { label: 'Conservative', data: conservative.months.map(function(m){return m.portfolio;}), borderColor: '#8b949e', backgroundColor: '#8b949e20', fill: false, tension: 0.3, pointRadius: 3, borderDash: [5,3] },
+        { label: 'SOL P&L', data: base.months.map(function(m){return m.solPnl;}), borderColor: '#a855f7', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, borderDash: [3,3], borderWidth: 1.5 },
+        { label: 'Fees Only', data: base.months.map(function(m){return m.cumFees;}), borderColor: '#22c55e', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 2, borderDash: [2,2], borderWidth: 1.5 },
       ]
     },
     options: {

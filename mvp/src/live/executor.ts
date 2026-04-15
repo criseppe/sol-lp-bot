@@ -46,6 +46,9 @@ export interface SwapEvent {
   fromAmount: number;
   toAmount: number;
   reason: string;
+  txSignature?: string;
+  feeLamports?: number;
+  priceImpactPct?: number;
 }
 
 export class LiveExecutor {
@@ -57,6 +60,8 @@ export class LiveExecutor {
   private currentPosition: LivePosition | null = null;
   public onSwap: ((event: SwapEvent) => void) | null = null;
   public shouldAllowSwap: ((direction: 'sell_sol' | 'buy_sol', amount: number, price: number) => boolean) | null = null;
+  public getReserveFloor: (() => number) | null = null;
+  public getProximityDeployThreshold: (() => number) | null = null;
   public cumGasLamports = 0;
   public txCount = 0;
 
@@ -136,6 +141,9 @@ export class LiveExecutor {
           fromAmount: inputMint === MINTS.SOL ? amountRaw / 1e9 : amountRaw / 1e6,
           toAmount: result.outputAmount,
           reason,
+          txSignature: result.txSignature,
+          feeLamports: result.feeLamports,
+          priceImpactPct: result.priceImpactPct,
         });
       } catch {}
     }
@@ -204,50 +212,59 @@ export class LiveExecutor {
     let solAvailable = Math.max(0, solBal - getSolReserve());
     let usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
 
-    // Pre-open swap: if wallet is heavily imbalanced (one side < $5), swap to match
-    // the ideal ratio for the LP range. This prevents "no valid quote" after downside exits.
-    // Cap the swap to the deploy target so we don't swap more than needed.
-    const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1), range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
-    );
-    const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
-    const swapTargetUsdc = usdcToDeposit > 0 ? Math.min(solAvailable * currentPrice + usdcAvailable, usdcToDeposit) : (solAvailable * currentPrice + usdcAvailable);
-    const idealSol = swapTargetUsdc / (currentPrice + usdcPer1Sol);
-    const idealUsdc = idealSol * usdcPer1Sol;
+    // Pre-open swap: find the ideal SOL/USDC ratio for the LP deposit using the FULL
+    // capital to deploy, then swap only the difference between current wallet and ideal.
+    // Key insight: simulate with a reference amount to get the ratio, then scale to full capital.
+    {
+      // Get the LP deposit ratio: how much USDC per 1 SOL at this tick range
+      const ratioQuote = increaseLiquidityQuoteByInputToken(
+        solMint, new Decimal(1), range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      );
+      const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
 
-    // Pre-open swap: if wallet ratio is significantly off from the ideal LP deposit ratio, swap to match.
-    // Old logic only swapped when one side < $5 — now swaps whenever deviation > 30%.
-    const solValueUsdc = solAvailable * currentPrice;
-    const totalAvail = solValueUsdc + usdcAvailable;
-    const currentSolRatio = totalAvail > 0 ? solValueUsdc / totalAvail : 0.5;
-    const idealSolRatio = totalAvail > 0 ? (idealSol * currentPrice) / totalAvail : 0.5;
-    const ratioDeviation = Math.abs(currentSolRatio - idealSolRatio);
+      // Calculate ideal amounts for the full capital we want to deploy
+      const totalVal = solAvailable * currentPrice + usdcAvailable;
+      const deployTarget = usdcToDeposit > 0 ? Math.min(totalVal, usdcToDeposit) : totalVal;
 
-    if (ratioDeviation > 0.30 && totalAvail > 50) {
-      if (currentSolRatio > idealSolRatio && solAvailable > 0.1) {
-        // Too much SOL — swap to USDC
-        const solToSwap = Math.min((idealUsdc - usdcAvailable) / currentPrice * getSwapBuffer(), solAvailable - 0.05);
-        if (solToSwap > 0.01) {
-          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${solToSwap.toFixed(4)} SOL -> USDC (ratio ${(currentSolRatio*100).toFixed(0)}% SOL vs ideal ${(idealSolRatio*100).toFixed(0)}%)`, timestamp: Date.now() }));
-          await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Pre-open: SOL -> USDC to match LP deposit ratio`);
-          await new Promise(r => setTimeout(r, 4000));
-          solBal = await this.getSolBalance();
-          usdcBal = await this.getUsdcBalance();
-          solAvailable = Math.max(0, solBal - getSolReserve());
-          usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
-        }
-      } else if (currentSolRatio < idealSolRatio && usdcAvailable > 10) {
-        // Too much USDC — swap to SOL
-        const usdcToSwap = Math.min((idealSol - solAvailable) * currentPrice * getSwapBuffer(), usdcAvailable - 2);
+      // idealSol * currentPrice + idealSol * usdcPer1Sol = deployTarget
+      const idealSol = deployTarget / (currentPrice + usdcPer1Sol);
+      const idealUsdc = idealSol * usdcPer1Sol;
+
+      const solDeficit = idealSol - solAvailable; // positive = need more SOL
+      const usdcDeficit = idealUsdc - usdcAvailable; // positive = need more USDC
+
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: `Pre-open calc: wallet ${solAvailable.toFixed(4)} SOL ($${(solAvailable*currentPrice).toFixed(0)}) + $${usdcAvailable.toFixed(0)} USDC. Ideal for $${deployTarget.toFixed(0)} deposit: ${idealSol.toFixed(4)} SOL + $${idealUsdc.toFixed(0)} USDC. Deficit: ${solDeficit.toFixed(4)} SOL / $${usdcDeficit.toFixed(0)} USDC`,
+        timestamp: Date.now(),
+      }));
+
+      // RULE: NEVER sell SOL in pre-open swap. Selling SOL after position close is the #1
+      // source of losses (-$20+ per day). The LP quote handles excess SOL by depositing
+      // with SOL as the constraining token. Remaining SOL stays idle — no round-trips.
+      // Only buy SOL if wallet is heavily USDC and needs SOL for a balanced deposit.
+      const deviationPct = deployTarget > 0 ? Math.abs(solDeficit * currentPrice) / deployTarget : 0;
+
+      if (solDeficit > 0.5 && solDeficit * currentPrice > 50 && deviationPct > 0.20) {
+        // Need more SOL — buy with USDC
+        const usdcToSwap = Math.min(solDeficit * currentPrice * 0.95, usdcAvailable - 2);
         if (usdcToSwap > 1) {
-          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: ${usdcToSwap.toFixed(2)} USDC -> SOL (ratio ${(currentSolRatio*100).toFixed(0)}% SOL vs ideal ${(idealSolRatio*100).toFixed(0)}%)`, timestamp: Date.now() }));
-          await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL to match LP deposit ratio`);
+          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: $${usdcToSwap.toFixed(2)} USDC -> SOL (need ${solDeficit.toFixed(4)} SOL, deviation ${(deviationPct*100).toFixed(0)}%)`, timestamp: Date.now() }));
+          await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL for balanced deposit (need ${solDeficit.toFixed(2)} SOL)`);
           await new Promise(r => setTimeout(r, 4000));
           solBal = await this.getSolBalance();
           usdcBal = await this.getUsdcBalance();
           solAvailable = Math.max(0, solBal - getSolReserve());
           usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
         }
+      } else if (solDeficit < 0) {
+        // SOL-heavy wallet — never sell SOL. Deposit SOL-constrained, respect reserve floor.
+        const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
+        const availableUsdc = Math.max(0, usdcAvailable - reserveFloor);
+        console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL-heavy wallet — depositing SOL-constrained. Wallet USDC: $${usdcAvailable.toFixed(2)}, Reserve floor: $${reserveFloor.toFixed(2)}, Available for deposit: $${availableUsdc.toFixed(2)}`, timestamp: Date.now() }));
+        usdcAvailable = availableUsdc;
+      } else {
+        console.log(JSON.stringify({ level: 'info', msg: `Pre-open: no swap needed (deviation ${(deviationPct*100).toFixed(0)}%)`, timestamp: Date.now() }));
       }
     }
 
@@ -503,6 +520,9 @@ export class LiveExecutor {
   /**
    * Convert a percentage of harvested SOL fees to USDC.
    * Called after collectFees() based on regime's harvestSolConvertPct.
+   * NOTE: This converts LP fee income (zero cost basis).
+   * shouldAllowSwap is intentionally NOT called here —
+   * fee SOL sells are always profitable regardless of price vs basis.
    */
   async convertHarvestedSol(solAmount: number, convertPct: number): Promise<{ solSwapped: number; usdcReceived: number } | null> {
     if (convertPct <= 0 || solAmount <= 0.0001) return null;
@@ -776,7 +796,35 @@ export class LiveExecutor {
     let solAvailable = Math.max(0, solBal - solReserve);
     let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
 
-    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC (${usdcAvailable.toFixed(2)} avail)${maxDeployUsdc ? `, cap: $${maxDeployUsdc.toFixed(2)}` : ''}`, timestamp: Date.now() }));
+    // Reserve-aware idle USDC check — only deploy USDC above reserve floor
+    const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
+    const idleUsdc = Math.max(0, usdcBal - reserveFloor);
+    if (idleUsdc < 100) {
+      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — insufficient USDC above reserve floor. Wallet USDC: $${usdcBal.toFixed(2)}, Floor: $${reserveFloor.toFixed(2)}, Available: $${idleUsdc.toFixed(2)}`, timestamp: Date.now() }));
+      return null;
+    }
+    // Use reserve-aware USDC for deposit calculations
+    usdcAvailable = Math.min(usdcAvailable, idleUsdc);
+
+    // Proximity guard — don't deploy capital near range edges (about to exit)
+    const { priceLower, priceUpper } = this.currentPosition;
+    const positionRange = priceUpper - priceLower;
+    if (positionRange > 0) {
+      const distanceToLower = currentPrice - priceLower;
+      const proximityToLower = 1 - (distanceToLower / positionRange);
+      const proxThreshold = this.getProximityDeployThreshold ? this.getProximityDeployThreshold() : 0.40;
+      if (proximityToLower > proxThreshold) {
+        console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — too close to lower boundary. Proximity: ${(proximityToLower * 100).toFixed(1)}% (threshold ${(proxThreshold * 100).toFixed(0)}%). Price $${currentPrice.toFixed(2)}, lower $${priceLower.toFixed(2)}`, timestamp: Date.now() }));
+        return null;
+      }
+      const proximityToUpper = distanceToLower / positionRange;
+      if (proximityToUpper > 0.85) {
+        console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — too close to upper boundary. Proximity: ${(proximityToUpper * 100).toFixed(1)}% (threshold 85%). Price $${currentPrice.toFixed(2)}, upper $${priceUpper.toFixed(2)}`, timestamp: Date.now() }));
+        return null;
+      }
+    }
+
+    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC ($${idleUsdc.toFixed(2)} above floor)${maxDeployUsdc ? `, cap: $${maxDeployUsdc.toFixed(2)}` : ''}`, timestamp: Date.now() }));
 
     // Calculate ideal ratio (same logic as openPosition), capped at maxDeployUsdc if provided
     const ratioQuote = increaseLiquidityQuoteByInputToken(
@@ -814,25 +862,8 @@ export class LiveExecutor {
         if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Add liquidity: swapped ${usdcSpent.toFixed(2)} USDC -> ${solReceived.toFixed(4)} SOL to match position ratio` });
       }
     } else if (usdcDeficit > 1) {
-      const solToSwap = Math.min(usdcDeficit / currentPrice * getSwapBuffer(), solAvailable - 0.02);
-      const sellAllowed = !this.shouldAllowSwap || this.shouldAllowSwap('sell_sol', solToSwap, currentPrice);
-      if (solToSwap > 0.005 && !sellAllowed) {
-        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: SKIPPED SOL→USDC swap (${solToSwap.toFixed(2)} SOL) — P&L guard blocked (selling below basis). Deploying with available ratio.`, timestamp: Date.now() }));
-      }
-      if (solToSwap > 0.005 && sellAllowed) {
-        console.log(JSON.stringify({ level: 'info', msg: `Add liquidity swap: ${solToSwap.toFixed(4)} SOL -> USDC`, timestamp: Date.now() }));
-        const solBeforeSwap = solBal;
-        const usdcBeforeSwap = usdcBal;
-        await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), `Add liquidity: SOL -> USDC to match position ratio`);
-        await new Promise(r => setTimeout(r, 4000));
-        solBal = await this.getSolBalance();
-        usdcBal = await this.getUsdcBalance();
-        solAvailable = Math.max(0, solBal - solReserve);
-        usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-        const usdcReceived = usdcBal - usdcBeforeSwap;
-        const solSpent = solBeforeSwap - solBal;
-        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSpent, toAmount: usdcReceived, reason: `Add liquidity: swapped ${solSpent.toFixed(4)} SOL -> ${usdcReceived.toFixed(2)} USDC to match position ratio` });
-      }
+      // SOL-heavy — never sell SOL in auto-deploy. Deposit SOL-constrained.
+      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] SOL-heavy — depositing SOL-constrained (need $${usdcDeficit.toFixed(2)} more USDC, not selling SOL).`, timestamp: Date.now() }));
     }
 
     // Refresh pool data after swap

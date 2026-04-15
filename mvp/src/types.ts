@@ -50,6 +50,10 @@ export interface RegimeParams {
   solReentrySplit: number;
   harvestIntervalDays: number;
   harvestSolConvertPct: number;
+  usdcDepositPct: number; // fraction of deposit that must be USDC (reserve gate input)
+  deployRatioTolerance: number; // max price deviation from range center for auto-deploy (0-1)
+  basisGateThreshold: number; // price must be >= basis * threshold to open (e.g. 0.999 = 0.1% buffer)
+  proximityDeployThreshold: number; // max proximity to lower bound before auto-deploy skips (0-1)
 }
 
 export interface RangeBounds {

@@ -31,6 +31,16 @@ export interface BotStateRow {
   pullback_peak?: number;
   pullback_start?: number;
   last_harvest_time?: number;
+  // Cost basis tracking
+  sol_cost_basis?: number;
+  sol_total_acquired?: number;
+  sol_total_cost?: number;
+  cost_basis_last_updated?: number;
+  // USDC reserve
+  usdc_reserve?: number;
+  usdc_reserve_floor?: number;
+  reserve_state?: 'FULL' | 'REFILLING' | 'EMPTY';
+  reserve_last_updated?: number;
 }
 
 export interface DailyPnlRow {
@@ -197,6 +207,32 @@ export function initDb(dbPath: string): Database.Database {
     );
   `);
 
+  // swap_ledger table (added 2026-04-13; use CREATE IF NOT EXISTS so fresh DBs get it too)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS swap_ledger (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp         INTEGER NOT NULL,
+      direction         TEXT NOT NULL,
+      sol_amount        REAL NOT NULL,
+      usdc_amount       REAL NOT NULL,
+      price             REAL NOT NULL,
+      reason            TEXT,
+      pnl_usdc          REAL,
+      cost_basis_before REAL DEFAULT 0,
+      cost_basis_after  REAL DEFAULT 0
+    );
+  `);
+  // Migration: add swap metadata columns to swap_ledger
+  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN tx_signature TEXT DEFAULT NULL`); } catch (_) {}
+  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN fee_lamports INTEGER DEFAULT NULL`); } catch (_) {}
+  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN price_impact_pct REAL DEFAULT NULL`); } catch (_) {}
+  try { db.exec(`ALTER TABLE swap_ledger ADD COLUMN source TEXT DEFAULT 'bot'`); } catch (_) {}
+  // Backfill: tag manual swaps detected via balance diff
+  try {
+    db.exec(`UPDATE swap_ledger SET source = 'manual' WHERE (reason LIKE '%Manual swap%' OR reason LIKE '%manual%' OR reason LIKE '%balance diff%') AND (source IS NULL OR source = 'bot')`);
+    db.exec(`UPDATE swap_ledger SET source = 'bot' WHERE source IS NULL OR source = ''`);
+  } catch {}
+
   // Migration: add pullback state columns to bot_state
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`); } catch (_) {}
   try { db.exec(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`); } catch (_) {}
@@ -212,6 +248,58 @@ export function initDb(dbPath: string): Database.Database {
   try {
     db.exec(`ALTER TABLE rebalance_events ADD COLUMN position_id TEXT`);
   } catch (_) { /* column already exists */ }
+
+  // Migration: add cost basis tracking columns to bot_state
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_cost_basis REAL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_total_acquired REAL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_total_cost REAL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN cost_basis_last_updated INTEGER DEFAULT 0`); } catch (_) {}
+
+  // Migration: add USDC reserve columns to bot_state
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN usdc_reserve REAL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN usdc_reserve_floor REAL DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN reserve_state TEXT DEFAULT 'EMPTY'`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN reserve_last_updated INTEGER DEFAULT 0`); } catch (_) {}
+
+  // Migration: SOL conversion tracking
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_conversion_enabled INTEGER DEFAULT 0`); } catch (_) {}
+  try { db.exec(`ALTER TABLE bot_state ADD COLUMN sol_conversion_last_ts INTEGER DEFAULT 0`); } catch (_) {}
+
+  // Portfolio snapshots — 4-hourly value tracking for arcade page
+  db.exec(`CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    total_value REAL NOT NULL
+  )`);
+
+  // Regime snapshots — per-cycle data capture for post-hoc analysis
+  db.exec(`CREATE TABLE IF NOT EXISTS regime_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    regime TEXT NOT NULL,
+    prev_regime TEXT,
+    regime_changed INTEGER DEFAULT 0,
+    confidence TEXT NOT NULL,
+    deploy_pct REAL,
+    veto_fired INTEGER DEFAULT 0,
+    ta_score_bullish INTEGER,
+    ta_score_ranging INTEGER,
+    ta_score_bearish INTEGER,
+    ta_score_extreme INTEGER,
+    ta_winner TEXT,
+    ta_total_score INTEGER,
+    ema9 REAL, sma20 REAL, ema_cross TEXT,
+    rsi REAL, bb_width REAL, bb_position REAL, atr REAL,
+    vol_1h REAL, sol_change_4h REAL, fear_greed INTEGER, btc_change_4h REAL,
+    price REAL NOT NULL,
+    position_state TEXT,
+    position_age_min REAL,
+    proximity_lower REAL, proximity_upper REAL,
+    reserve_gate TEXT, basis_gate TEXT, churn_guard TEXT,
+    daily_regime TEXT,
+    ta_data_age_min INTEGER DEFAULT 0
+  )`);
+  try { db.exec(`ALTER TABLE regime_snapshots ADD COLUMN ta_data_age_min INTEGER DEFAULT 0`); } catch (_) {}
 
   return db;
 }
@@ -295,13 +383,34 @@ export function getRebalanceEvents(db: Database.Database, limit: number): Rebala
 
 export function upsertBotState(db: Database.Database, state: BotStateRow): void {
   db.prepare(`
-    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time)
-    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time)
-  `).run({ ...state, ledger_json: state.ledger_json ?? null, naive_json: state.naive_json ?? null, cum_fees_sol: state.cum_fees_sol ?? 0, cum_fees_usdc: state.cum_fees_usdc ?? 0, realized_il: state.realized_il ?? 0, tx_count: state.tx_count ?? 0, cum_gas_lamports: state.cum_gas_lamports ?? 0, pullback_active: state.pullback_active ?? 0, pullback_peak: state.pullback_peak ?? 0, pullback_start: state.pullback_start ?? 0, last_harvest_time: state.last_harvest_time ?? 0 });
+    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated)
+    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated)
+  `).run({
+    ...state,
+    ledger_json: state.ledger_json ?? null,
+    naive_json: state.naive_json ?? null,
+    cum_fees_sol: state.cum_fees_sol ?? 0,
+    cum_fees_usdc: state.cum_fees_usdc ?? 0,
+    realized_il: state.realized_il ?? 0,
+    tx_count: state.tx_count ?? 0,
+    cum_gas_lamports: state.cum_gas_lamports ?? 0,
+    pullback_active: state.pullback_active ?? 0,
+    pullback_peak: state.pullback_peak ?? 0,
+    pullback_start: state.pullback_start ?? 0,
+    last_harvest_time: state.last_harvest_time ?? 0,
+    sol_cost_basis: state.sol_cost_basis ?? 0,
+    sol_total_acquired: state.sol_total_acquired ?? 0,
+    sol_total_cost: state.sol_total_cost ?? 0,
+    cost_basis_last_updated: state.cost_basis_last_updated ?? 0,
+    usdc_reserve: state.usdc_reserve ?? (getBotState(db)?.usdc_reserve ?? 0),
+    usdc_reserve_floor: state.usdc_reserve_floor ?? (getBotState(db)?.usdc_reserve_floor ?? 0),
+    reserve_state: state.reserve_state ?? (getBotState(db)?.reserve_state ?? 'EMPTY'),
+    reserve_last_updated: state.reserve_last_updated ?? (getBotState(db)?.reserve_last_updated ?? 0),
+  });
 }
 
 export function getBotState(db: Database.Database): BotStateRow | null {
-  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
+  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
   return row ?? null;
 }
 
@@ -337,6 +446,27 @@ export function pruneOldPriceTicks(db: Database.Database, keepDays: number): voi
     WHERE source != 'backfill'
     AND timestamp < (strftime('%s','now') - ? * 86400) * 1000
   `).run(keepDays);
+}
+
+export function pruneOldData(db: Database.Database): void {
+  const now = Date.now();
+  const day7 = now - 7 * 24 * 3600_000;
+  const day30 = now - 30 * 24 * 3600_000;
+  const tables: Array<{ table: string; col: string; cutoff: number }> = [
+    { table: 'live_snapshots', col: 'timestamp', cutoff: day7 },
+    { table: 'decision_log', col: 'timestamp', cutoff: day7 },
+    { table: 'portfolio_snapshots', col: 'ts', cutoff: day30 },
+  ];
+  for (const { table, col, cutoff } of tables) {
+    try {
+      const result = db.prepare(`DELETE FROM ${table} WHERE ${col} < ?`).run(cutoff);
+      if ((result as any).changes > 0) {
+        console.log(JSON.stringify({ level: 'info', msg: `[DBPrune] ${table}: deleted ${(result as any).changes} old rows`, timestamp: now }));
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ level: 'warn', msg: `[DBPrune] ${table} pruning failed: ${String(e)}`, timestamp: now }));
+    }
+  }
 }
 
 // ── Live snapshots ────────────────────────────────────────────────────────
@@ -547,13 +677,13 @@ export interface DailySummaryRow {
 export function upsertDailySummary(db: Database.Database, row: DailySummaryRow): void {
   db.prepare(`
     INSERT INTO daily_summary (date, wallet_usdc, position_usdc, total_usdc, injected_usdc, fees_earned_usdc, cum_fees_usdc, portfolio_change, sol_price, regime, in_range_pct, updated_at)
-    VALUES (@date, @wallet_usdc, @position_usdc, @total_usdc, @injected_usdc, @fees_earned_usdc, @cum_fees_usdc, @portfolio_change, @sol_price, @regime, @in_range_pct, ${Date.now()})
+    VALUES (@date, @wallet_usdc, @position_usdc, @total_usdc, @injected_usdc, @fees_earned_usdc, @cum_fees_usdc, @portfolio_change, @sol_price, @regime, @in_range_pct, @updated_at)
     ON CONFLICT(date) DO UPDATE SET
       wallet_usdc = excluded.wallet_usdc, position_usdc = excluded.position_usdc, total_usdc = excluded.total_usdc,
       injected_usdc = excluded.injected_usdc, fees_earned_usdc = excluded.fees_earned_usdc, cum_fees_usdc = excluded.cum_fees_usdc,
       portfolio_change = excluded.portfolio_change, sol_price = excluded.sol_price, regime = excluded.regime,
-      in_range_pct = excluded.in_range_pct, updated_at = ${Date.now()}
-  `).run(row);
+      in_range_pct = excluded.in_range_pct, updated_at = excluded.updated_at
+  `).run({ ...row, updated_at: Date.now() });
 }
 
 export function getDailySummaries(db: Database.Database, limit: number): DailySummaryRow[] {
@@ -584,11 +714,15 @@ export function insertSwapLedger(db: Database.Database, entry: {
   timestamp: number; direction: string; sol_amount: number; usdc_amount: number;
   price: number; reason: string; pnl_usdc: number | null;
   cost_basis_before: number; cost_basis_after: number;
+  tx_signature?: string | null; fee_lamports?: number | null; price_impact_pct?: number | null;
+  source?: string;
 }): void {
-  db.prepare(`INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  db.prepare(`INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after, tx_signature, fee_lamports, price_impact_pct, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     entry.timestamp, entry.direction, entry.sol_amount, entry.usdc_amount,
     entry.price, entry.reason, entry.pnl_usdc, entry.cost_basis_before, entry.cost_basis_after,
+    entry.tx_signature ?? null, entry.fee_lamports ?? null, entry.price_impact_pct ?? null,
+    entry.source ?? 'bot',
   );
 }
 
@@ -615,4 +749,181 @@ export function setConfigBatch(db: Database.Database, entries: Record<string, st
     }
   });
   tx();
+}
+
+// ── Swap Ledger cost_basis_after backfill ─────────────────────────────────
+
+/**
+ * Backfills `cost_basis_after` (and `cost_basis_before`) in swap_ledger for any
+ * rows where the field is 0 or NULL. Computes a running weighted-average across
+ * all SOL acquisition events (swap buys + LP closes) ordered chronologically.
+ *
+ * Only runs when there are entries needing backfill, so it is safe to call on
+ * every startup.
+ */
+export function backfillSwapLedgerCostBasis(db: Database.Database): void {
+  // Quick check: are there any rows that need backfill?
+  const needsBackfill = db.prepare(
+    `SELECT COUNT(*) as cnt FROM swap_ledger WHERE cost_basis_after IS NULL OR cost_basis_after = 0`,
+  ).get() as { cnt: number };
+  if (needsBackfill.cnt === 0) return;
+
+  // 1. All swap_ledger rows, oldest first
+  const swaps = db.prepare(
+    `SELECT id, timestamp, direction, sol_amount, price FROM swap_ledger ORDER BY timestamp ASC`,
+  ).all() as Array<{ id: number; timestamp: number; direction: string; sol_amount: number; price: number }>;
+
+  // 2. LP closes where SOL returned (sol_after > sol_before), oldest first
+  const lpCloseTypes = `('T1_DOWNSIDE','T1_UPSIDE','OOR_ABOVE','OOR_BELOW','POSITION_CLOSED')`;
+  const closes = db.prepare(
+    `SELECT timestamp, sol_after, sol_before, price FROM rebalance_events
+     WHERE event_type IN ${lpCloseTypes}
+       AND sol_after > sol_before AND price > 0
+     ORDER BY timestamp ASC`,
+  ).all() as Array<{ timestamp: number; sol_after: number; sol_before: number; price: number }>;
+
+  // 3. Merge into chronological stream of acquisition events
+  interface AcqEvent { timestamp: number; sol: number; price: number; swapId?: number; direction?: string }
+  const acqEvents: AcqEvent[] = [];
+
+  for (const s of swaps) {
+    // buy_sol = USDC→SOL acquisition; sell_sol does not change cost basis
+    if (s.direction === 'buy_sol' && s.sol_amount > 0 && s.price > 0) {
+      acqEvents.push({ timestamp: s.timestamp, sol: s.sol_amount, price: s.price, swapId: s.id, direction: s.direction });
+    }
+    // Still include sell_sol as a "marker" so we can capture the basis snapshot at that point
+    if (s.direction === 'sell_sol') {
+      acqEvents.push({ timestamp: s.timestamp, sol: 0, price: s.price, swapId: s.id, direction: s.direction });
+    }
+  }
+
+  for (const c of closes) {
+    const sol = c.sol_after - c.sol_before;
+    acqEvents.push({ timestamp: c.timestamp, sol, price: c.price });
+  }
+
+  // Sort by timestamp; swap entries already appear in order relative to close events
+  acqEvents.sort((a, b) => a.timestamp - b.timestamp);
+
+  // 4. Walk through computing running weighted average
+  let totalSol = 0;
+  let totalCost = 0;
+  let runningBasis = 0;
+
+  // Build a map: swapId → { basisBefore, basisAfter }
+  const basisMap = new Map<number, { before: number; after: number }>();
+
+  // Pre-populate with existing basis_before values so we don't overwrite
+  // entries that were already correctly populated at insertion time.
+  for (const s of swaps) {
+    basisMap.set(s.id, { before: 0, after: 0 });
+  }
+
+  for (const ev of acqEvents) {
+    const basisBefore = runningBasis;
+
+    if (ev.sol > 0) {
+      totalSol += ev.sol;
+      totalCost += ev.sol * ev.price;
+      runningBasis = totalSol > 0 ? totalCost / totalSol : ev.price;
+    }
+
+    // Attach basis snapshot to the corresponding swap row
+    if (ev.swapId !== undefined) {
+      basisMap.set(ev.swapId, { before: basisBefore, after: runningBasis });
+    }
+  }
+
+  // 5. Write back only the rows that currently have cost_basis_after = 0 or NULL
+  const updateStmt = db.prepare(
+    `UPDATE swap_ledger SET cost_basis_before = ?, cost_basis_after = ? WHERE id = ? AND (cost_basis_after IS NULL OR cost_basis_after = 0)`,
+  );
+  const updateTx = db.transaction(() => {
+    for (const [id, vals] of basisMap.entries()) {
+      if (vals.after > 0) {
+        updateStmt.run(vals.before, vals.after, id);
+      }
+    }
+  });
+  updateTx();
+
+  console.log(JSON.stringify({
+    level: 'info',
+    msg: `COST_BASIS_BACKFILL: backfilled ${needsBackfill.cnt} swap_ledger rows`,
+    timestamp: Date.now(),
+  }));
+}
+
+// ── Regime Snapshots ─────────────────────────────────────────────────────
+
+export interface RegimeSnapshotRow {
+  ts: number;
+  regime: string;
+  prev_regime: string | null;
+  regime_changed: number;
+  confidence: string;
+  deploy_pct: number | null;
+  veto_fired: number;
+  ta_score_bullish: number | null;
+  ta_score_ranging: number | null;
+  ta_score_bearish: number | null;
+  ta_score_extreme: number | null;
+  ta_winner: string | null;
+  ta_total_score: number | null;
+  ema9: number | null;
+  sma20: number | null;
+  ema_cross: string | null;
+  rsi: number | null;
+  bb_width: number | null;
+  bb_position: number | null;
+  atr: number | null;
+  vol_1h: number | null;
+  sol_change_4h: number | null;
+  fear_greed: number | null;
+  btc_change_4h: number | null;
+  price: number;
+  position_state: string | null;
+  position_age_min: number | null;
+  proximity_lower: number | null;
+  proximity_upper: number | null;
+  reserve_gate: string | null;
+  basis_gate: string | null;
+  churn_guard: string | null;
+  daily_regime: string | null;
+  ta_data_age_min: number;
+}
+
+export function insertRegimeSnapshot(db: Database.Database, snap: RegimeSnapshotRow): void {
+  try {
+    db.prepare(`INSERT INTO regime_snapshots (
+      ts, regime, prev_regime, regime_changed, confidence, deploy_pct, veto_fired,
+      ta_score_bullish, ta_score_ranging, ta_score_bearish, ta_score_extreme, ta_winner, ta_total_score,
+      ema9, sma20, ema_cross, rsi, bb_width, bb_position, atr,
+      vol_1h, sol_change_4h, fear_greed, btc_change_4h,
+      price, position_state, position_age_min, proximity_lower, proximity_upper,
+      reserve_gate, basis_gate, churn_guard, daily_regime, ta_data_age_min
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      snap.ts, snap.regime, snap.prev_regime, snap.regime_changed, snap.confidence, snap.deploy_pct, snap.veto_fired,
+      snap.ta_score_bullish, snap.ta_score_ranging, snap.ta_score_bearish, snap.ta_score_extreme, snap.ta_winner, snap.ta_total_score,
+      snap.ema9, snap.sma20, snap.ema_cross, snap.rsi, snap.bb_width, snap.bb_position, snap.atr,
+      snap.vol_1h, snap.sol_change_4h, snap.fear_greed, snap.btc_change_4h,
+      snap.price, snap.position_state, snap.position_age_min, snap.proximity_lower, snap.proximity_upper,
+      snap.reserve_gate, snap.basis_gate, snap.churn_guard, snap.daily_regime, snap.ta_data_age_min,
+    );
+    // Auto-cleanup: keep 30 days
+    db.prepare(`DELETE FROM regime_snapshots WHERE ts < ?`).run(Date.now() - 30 * 24 * 3600 * 1000);
+  } catch (err) {
+    console.log(JSON.stringify({ level: 'warn', msg: `regime_snapshot insert failed: ${err instanceof Error ? err.message : String(err)}`, timestamp: Date.now() }));
+  }
+}
+
+export function getRegimeSnapshots(db: Database.Database, opts: { limit?: number; since?: number; regime?: string; changed?: boolean }): RegimeSnapshotRow[] {
+  let sql = 'SELECT * FROM regime_snapshots WHERE 1=1';
+  const params: any[] = [];
+  if (opts.since) { sql += ' AND ts >= ?'; params.push(opts.since); }
+  if (opts.regime) { sql += ' AND regime = ?'; params.push(opts.regime); }
+  if (opts.changed) { sql += ' AND regime_changed = 1'; }
+  sql += ' ORDER BY ts DESC LIMIT ?';
+  params.push(opts.limit ?? 100);
+  return db.prepare(sql).all(...params) as RegimeSnapshotRow[];
 }

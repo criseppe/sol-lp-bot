@@ -85,6 +85,7 @@ ${SHARED_NAV}
   </select>
   <button onclick="togglePanel()">Toggle Widgets</button>
   <button onclick="loadAll()">Refresh</button>
+
 </div>
 
 <div class="toggle-panel" id="toggle-panel">
@@ -121,7 +122,7 @@ const WIDGETS = [
   {id:'price-vs-fees',cat:'Market',name:'SOL Price vs Fees',type:'chart'},
   {id:'regime-timeline',cat:'Market',name:'Regime Timeline',type:'table'},
   {id:'vol-history',cat:'Market',name:'Volume & Volatility',type:'chart'},
-  {id:'portfolio-value',cat:'Portfolio',name:'Portfolio Value',type:'chart'},
+  {id:'portfolio-value',cat:'Portfolio',name:'Portfolio Value',type:'table'},
   {id:'capital-alloc',cat:'Portfolio',name:'Capital Allocation',type:'chart'},
   {id:'daily-waterfall',cat:'Portfolio',name:'Daily P&L Breakdown',type:'table'},
 ];
@@ -165,7 +166,8 @@ function renderWidgets() {
 async function loadAll() {
   var days = document.getElementById('days-select').value;
   try {
-    var res = await fetch('/api/analytics-data?days='+days);
+    var res = await fetch('/api/analytics-data?days='+days, {credentials:'same-origin'});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     DATA = await res.json();
     renderWidgets();
   } catch(e) {
@@ -187,26 +189,29 @@ function populateAll() {
   var hourlyFees = buildHourlyFees(snaps);
   var dailyFees = buildDailyFees(snaps);
 
-  populateFeesToday();
-  populateFeesDaily(DATA.dailySummaries || []);
-  populateFeeHeatmap(hourlyFees);
-  populateCumFees(DATA.dailySummaries || []);
-  populateFeesRegime(snaps);
-  populateFeesWeekday(snaps);
-  populatePosDuration(positions);
-  populatePosTable(positions);
-  populateExitReasons(positions);
-  populateFeeVsDuration(positions);
-  populateGasTrend(snaps);
-  populateSwapCosts(events);
-  populateILTracker(positions);
-  populateInRange(snaps);
-  populatePriceVsFees(hourlyFees);
-  populateRegimeTimeline(DATA.regimeHist || [], snaps);
-  populateVolHistory(snaps);
-  populatePortfolioValue(snaps);
-  populateCapitalAlloc(snaps);
-  populateDailyWaterfall(DATA.dailySummaries || []);
+  var fns = [
+    function() { populateFeesToday(); },
+    function() { populateFeesDaily(DATA.dailySummaries || []); },
+    function() { populateFeeHeatmap(hourlyFees); },
+    function() { populateCumFees(DATA.dailySummaries || []); },
+    function() { populateFeesRegime(snaps); },
+    function() { populateFeesWeekday(snaps); },
+    function() { populatePosDuration(positions); },
+    function() { populatePosTable(positions); },
+    function() { populateExitReasons(positions); },
+    function() { populateFeeVsDuration(positions); },
+    function() { populateGasTrend(snaps); },
+    function() { populateSwapCosts(events); },
+    function() { populateILTracker(positions); },
+    function() { populateInRange(snaps); },
+    function() { populatePriceVsFees(hourlyFees); },
+    function() { populateRegimeTimeline(DATA.regimeHist || [], snaps); },
+    function() { populateVolHistory(snaps); },
+    function() { populatePortfolioValue(snaps, DATA.dailySummaries || []); },
+    function() { populateCapitalAlloc(snaps); },
+    function() { populateDailyWaterfall(DATA.dailySummaries || []); },
+  ];
+  fns.forEach(function(fn) { try { fn(); } catch(e) { console.error('Widget error:', e); } });
 }
 
 // ── DATA BUILDERS ──
@@ -405,6 +410,12 @@ function populateFeeHeatmap(hf) {
     html += '</tr>';
   });
   html += '</table></div>';
+  html += '<div style="font-size:10px;color:#8b949e;margin-top:6px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">';
+  html += '<span><span style="display:inline-block;width:10px;height:10px;background:rgba(255,215,0,0.6);border-radius:2px;margin-right:3px"></span>High (>$2)</span>';
+  html += '<span><span style="display:inline-block;width:10px;height:10px;background:rgba(34,197,94,0.4);border-radius:2px;margin-right:3px"></span>Medium ($0.50-$2)</span>';
+  html += '<span><span style="display:inline-block;width:10px;height:10px;background:rgba(34,197,94,0.15);border-radius:2px;margin-right:3px"></span>Low ($0.10-$0.50)</span>';
+  html += '<span><span style="display:inline-block;width:10px;height:10px;background:#161b22;border:1px solid #30363d;border-radius:2px;margin-right:3px"></span>None</span>';
+  html += '</div>';
   makeTable('fee-heatmap',html);
 }
 
@@ -521,15 +532,65 @@ function populateVolHistory(snaps) {
   makeChart('vol-history',{type:'line',data:{labels:labels,datasets:[{label:'SOL Price',data:prices,borderColor:COLORS.blue,pointRadius:0,tension:0.3,fill:false}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(0);}},grid:{color:'#21262d'}},x:{display:false}}}});
 }
 
-function populatePortfolioValue(snaps) {
-  var step=Math.max(1,Math.floor(snaps.length/200));
-  var labels=[],data=[];
-  for(var i=0;i<snaps.length;i+=step){
-    labels.push(new Date(snaps[i].timestamp).toLocaleString('en-US',{timeZone:TZ,month:'short',day:'numeric',hour:'2-digit',hour12:false}));
-    data.push(snaps[i].total_with_position||snaps[i].total_value_usdc||0);
-  }
-  var col = data[data.length-1]>=data[0]?COLORS.green:COLORS.red;
-  makeChart('portfolio-value',{type:'line',data:{labels:labels,datasets:[{label:'Total ($)',data:data,borderColor:col,backgroundColor:col+'20',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return'$'+v.toFixed(0);}},grid:{color:'#21262d'}},x:{display:false}}}});
+function populatePortfolioValue(snaps, dailySummaries) {
+  // Build daily lookup from dailySummaries
+  var dailyMap = {};
+  (dailySummaries || []).forEach(function(s) { dailyMap[s.date] = s; });
+
+  // Get last snapshot per day (end-of-day values)
+  var eodSnaps = {};
+  snaps.forEach(function(s) {
+    var d = new Date(s.timestamp).toLocaleDateString('en-CA', {timeZone: TZ});
+    eodSnaps[d] = s; // overwrites, so last snapshot of the day wins
+  });
+
+  var days = Object.keys(eodSnaps).sort();
+  if (days.length === 0) { makeTable('portfolio-value','<div style="color:#8b949e;padding:12px">No data yet</div>'); return; }
+
+  // Build rows
+  var rows = [];
+  days.forEach(function(d, i) {
+    var s = eodSnaps[d];
+    var ds = dailyMap[d];
+    var totalSol = (s.sol_balance || 0) + (s.position_sol || 0);
+    var solPrice = s.price || 0;
+    var portfolio = (s.total_with_position || s.total_value_usdc || 0);
+    var solImpact = totalSol * solPrice;
+    var newCapital = ds ? (ds.injected_usdc || 0) : 0;
+    var prevRow = i > 0 ? rows[i - 1] : null;
+    var change = prevRow ? portfolio - prevRow.portfolio : 0;
+    var solImpactChange = prevRow ? solImpact - prevRow.solImpact : 0;
+    rows.push({ date: d, portfolio: portfolio, totalSol: totalSol, solPrice: solPrice, solImpact: solImpact, newCapital: newCapital, change: change, solImpactChange: solImpactChange });
+  });
+
+  var f = function(v, d) { return v != null ? Number(v).toFixed(d != null ? d : 2) : '--'; };
+  var colFn = function(v) { return v >= 0 ? COLORS.green : COLORS.red; };
+  var signFn = function(v, d) { return (v >= 0 ? '+' : '-') + '$' + f(Math.abs(v), d != null ? d : 2); };
+
+  var html = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;border-collapse:collapse;font-size:11px">';
+  html += '<thead><tr>';
+  html += '<th style="text-align:left;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">Date</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">Portfolio</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">SOL Impact</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">New Capital</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">Change</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d">SOL Chg</th>';
+  html += '</tr></thead><tbody>';
+
+  rows.slice().reverse().forEach(function(r, idx) {
+    var isFirst = idx === rows.length - 1;
+    html += '<tr style="border-bottom:1px solid #21262d">';
+    html += '<td style="padding:5px 4px;color:#c9d1d9;white-space:nowrap">' + r.date + '</td>';
+    html += '<td style="padding:5px 4px;text-align:right;font-family:monospace;color:#c9d1d9">$' + f(r.portfolio, 0) + '</td>';
+    html += '<td style="padding:5px 4px;text-align:right;font-family:monospace;color:#58a6ff" title="' + f(r.totalSol, 2) + ' SOL × $' + f(r.solPrice, 2) + '">$' + f(r.solImpact, 0) + ' <span style="color:#8b949e;font-size:9px">(' + f(r.totalSol, 1) + ' SOL)</span></td>';
+    html += '<td style="padding:5px 4px;text-align:right;font-family:monospace;color:' + (r.newCapital > 0 ? COLORS.purple : '#8b949e') + '">' + (r.newCapital > 0 ? '$' + f(r.newCapital, 0) : '–') + '</td>';
+    html += '<td style="padding:5px 4px;text-align:right;font-family:monospace;color:' + (isFirst ? '#8b949e' : colFn(r.change)) + '">' + (isFirst ? '–' : signFn(r.change, 0)) + '</td>';
+    html += '<td style="padding:5px 4px;text-align:right;font-family:monospace;color:' + (isFirst ? '#8b949e' : colFn(r.solImpactChange)) + '">' + (isFirst ? '–' : signFn(r.solImpactChange, 0)) + '</td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+  makeTable('portfolio-value', html);
 }
 
 function populateCapitalAlloc(snaps) {

@@ -180,18 +180,19 @@ export function checkAutoDeploy(opts: {
   minIdleSol: number;
   minDeployUsdc: number;
   deployRatioTolerance: number;
+  reserveFloor: number;
 }): AutoDeployCheck {
   const {
     currentPrice, priceLower, priceUpper,
     walletSol, walletUsdc, positionValueUsdc,
     regime, params, lastDeployTime, now, enabled,
     minIdleUsdc, minIdleSol, minDeployUsdc, deployRatioTolerance,
+    reserveFloor,
   } = opts;
 
   const solReserve = runtime.solReserve;
-  const usdcReserve = runtime.usdcReserve;
   const idleSol = Math.max(0, walletSol - solReserve);
-  const idleUsdcRaw = Math.max(0, walletUsdc - usdcReserve);
+  const idleUsdcRaw = Math.max(0, walletUsdc - reserveFloor);
   const idleUsdc = idleSol * currentPrice + idleUsdcRaw;
   const idealPrice = Math.sqrt(priceLower * priceUpper);
   const totalValueUsdc = idleUsdc + positionValueUsdc;

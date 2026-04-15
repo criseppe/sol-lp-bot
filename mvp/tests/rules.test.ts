@@ -213,6 +213,7 @@ describe('Rule 7: checkAutoDeploy', () => {
     minIdleSol: 0.05,
     minDeployUsdc: 10,
     deployRatioTolerance: 0.02,
+    reserveFloor: 0,
   };
 
   it('deploys when all conditions pass', () => {

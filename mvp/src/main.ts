@@ -3,13 +3,13 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { WhirlpoolContext, ORCA_WHIRLPOOL_PROGRAM_ID } from '@orca-so/whirlpools-sdk';
 import { OracleService } from './data/oracle.js';
 import { PoolService } from './data/pool.js';
-import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled } from './db/sqlite.js';
+import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled, insertRegimeSnapshot, pruneOldData } from './db/sqlite.js';
 import { startDashboard } from './output/dashboard.js';
 import { LiveExecutor, type LivePosition } from './live/executor.js';
 import { startTelegramReporter } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
-import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, getRegimeParams } from './engine/regime.js';
+import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, detectRegimeTA, getRegimeParams } from './engine/regime.js';
 import { MarketDataService } from './data/market.js';
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
 import { MINTS } from './constants.js';
@@ -18,7 +18,9 @@ import { runtime, applyConfigFromDb } from './config.js';
 import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries } from './db/sqlite.js';
 import { calculateVarParams, shouldAdjustRange, calculateIdleTarget, shouldRebalanceIdle, calculateSwapPnl } from './engine/var.js';
 import type { VarConfig, SirConfig } from './engine/var.js';
-import { insertSwapLedger } from './db/sqlite.js';
+import { insertSwapLedger, backfillSwapLedgerCostBasis } from './db/sqlite.js';
+import { bootstrapCostBasis, updateCostBasis, readCostBasis, recalculateFromCurrentHoldings, reduceCostBasisHoldings } from './tracking/costBasis.js';
+import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeployGate, checkReserveFloor } from './reserve/reserveManager.js';
 
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
@@ -99,16 +101,32 @@ let lastIdleRebalanceRegime: string | null = null; // track which regime last tr
 let lastIdleRebalanceTime = 0; // timestamp of last idle rebalance (30-min cooldown)
 let lastVarAdjustTime = 0; // timestamp of last VAR range adjustment
 let lastSirSwapTime = 0; // timestamp of last SIR idle swap
-let sirCostBasis = 0; // weighted average SOL cost basis for SIR P&L tracking
-// Restore cost basis from last swap_ledger entry (persists across restarts)
-try {
-  const lastSwap = db.prepare('SELECT cost_basis_after FROM swap_ledger WHERE cost_basis_after > 0 ORDER BY timestamp DESC LIMIT 1').get() as any;
-  if (lastSwap?.cost_basis_after) {
-    sirCostBasis = lastSwap.cost_basis_after;
-    console.log(JSON.stringify({ level: 'info', msg: `Cost basis restored from swap_ledger: $${sirCostBasis.toFixed(2)}`, timestamp: Date.now() }));
-  }
-} catch {}
+// Weighted average SOL cost basis — backed by DB, updated at every acquisition event.
+// Read from DB on startup; bootstraps from history if DB columns are empty.
+let costBasisState = bootstrapCostBasis(db);
+// USDC reserve — seeded and logged during main() startup after wallet balances are available.
+// Kept as module-level var so harvest routing can read it without extra DB reads.
+let liveReserveUsdc = 0;
+backfillSwapLedgerCostBasis(db); // backfill cost_basis_after for historical swap_ledger rows
+pruneOldData(db); // startup cleanup: live_snapshots 7d, decision_log 7d, portfolio_snapshots 30d
+let sirCostBasis = costBasisState.solCostBasis; // kept in sync for legacy references
 let idleRebalancePending = false; // set true after position reopen to trigger check
+let smartSellPending = false; // DISABLED — any SOL sell loses money in downtrends
+let taRegimeCandidate: Regime | null = null;   // TA-first regime hysteresis candidate
+let taRegimeCandidateCount = 0;                // consecutive cycles candidate has held
+let taDeployMultiplier = 1.0;                  // latest deploy multiplier from TA confidence
+let smartSellEntryPrice = 0; // price at position open (cost basis reference)
+let smartSellStartTime = 0; // when the smart sell was triggered
+let positionChangedThisCycle = false; // guards manual swap detection against LP deposit/withdrawal interference
+// Cycle-scoped regime snapshot tracking (module-level so runLiveCycle can write, setInterval can read)
+let cycleGateReserve = 'NA';
+let cycleGateBasis = 'NA';
+let cycleGateChurn = 'NA';
+let cycleTaResult: { confidence: string; vetoFired: boolean; votes: Record<string, number>; candidateRegime: string; score: number } | null = null;
+let cycleDailyRegime: string | null = null;
+let cyclePrevRegime = 'RANGING';
+
+let solConversionLastTs =(() => { try { const r = db.prepare('SELECT sol_conversion_last_ts FROM bot_state WHERE id = 1').get() as any; return r?.sol_conversion_last_ts ?? 0; } catch { return 0; } })();
 
 // ── 4. START DATA SERVICES ────────────────────────────────────────────────
 
@@ -137,6 +155,31 @@ if (savedState?.pullback_active) {
 // Helper: pullback fields for every state save
 function pullbackFields() {
   return { pullback_active: livePullbackActive ? 1 : 0, pullback_peak: livePullbackPeak, pullback_start: livePullbackStart, last_harvest_time: liveLastHarvestTime };
+}
+
+// Helper: cost basis fields for every state save (prevents INSERT OR REPLACE from zeroing them)
+function costBasisFields() {
+  return {
+    sol_cost_basis: costBasisState.solCostBasis,
+    sol_total_acquired: costBasisState.solTotalAcquired,
+    sol_total_cost: costBasisState.solTotalCost,
+    cost_basis_last_updated: costBasisState.costBasisLastUpdated,
+  };
+}
+
+// Helper: reconcile reserve after a position open based on actual wallet USDC
+async function reconcileReserveAfterOpen(label: string): Promise<void> {
+  const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+  const usdcAfterOpen = balances.usdc;
+  const state = getReserveState(db);
+  const floor = state.floor;
+  if (usdcAfterOpen >= floor) {
+    updateReserve(db, floor);
+    console.log(JSON.stringify({ level: 'info', msg: `[Reserve][${label}] Post-open: wallet USDC $${usdcAfterOpen.toFixed(2)} >= floor $${floor.toFixed(2)}. Reserve set to floor $${floor.toFixed(2)}`, timestamp: Date.now() }));
+  } else {
+    updateReserve(db, Math.max(0, usdcAfterOpen));
+    console.log(JSON.stringify({ level: 'warn', msg: `[Reserve][${label}] Post-open: wallet USDC $${usdcAfterOpen.toFixed(2)} below floor $${floor.toFixed(2)}. Reserve set to $${Math.max(0, usdcAfterOpen).toFixed(2)}`, timestamp: Date.now() }));
+  }
 }
 
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
@@ -198,22 +241,73 @@ async function main() {
     liveExecutor.txCount = (savedState as any)?.tx_count ?? 0;
     console.log(JSON.stringify({ level: 'info', msg: `gas from DB: ${liveExecutor.cumGasLamports} lamports (${(liveExecutor.cumGasLamports/1e9).toFixed(6)} SOL), ${liveExecutor.txCount} txs`, timestamp: Date.now() }));
 
+    // ── Startup cost basis reconciliation ────────────────────────────────────
+    // Compare tracked SOL against actual wallet balance. Large discrepancy means
+    // we missed a SOL inflow (external deposit, airdrop, etc.) — warn but do NOT auto-correct.
+    {
+      const trackedSol = costBasisState.solTotalAcquired;
+      const walletSol = balances.sol;
+      if (trackedSol > 0 && walletSol > trackedSol * 1.05) {
+        const untracked = walletSol - trackedSol;
+        console.log(JSON.stringify({
+          level: 'warn',
+          msg: `COST_BASIS reconciliation WARNING: wallet has ${walletSol.toFixed(4)} SOL but only ${trackedSol.toFixed(4)} SOL tracked (${untracked.toFixed(4)} SOL unaccounted). Cost basis may be understated. Review external deposits.`,
+          walletSol, trackedSol, untracked, timestamp: Date.now(),
+        }));
+      } else if (trackedSol > 0) {
+        console.log(JSON.stringify({
+          level: 'info',
+          msg: `COST_BASIS reconciliation OK: wallet ${walletSol.toFixed(4)} SOL, tracked ${trackedSol.toFixed(4)} SOL, basis $${costBasisState.solCostBasis.toFixed(2)}`,
+          timestamp: Date.now(),
+        }));
+      }
+    }
+
+    // ── Reserve initialisation ────────────────────────────────────────────────
+    {
+      const reserveSnap = getReserveState(db);
+      if (!reserveSnap.floor || reserveSnap.floor === 0) {
+        // First ever run — use wallet-only value as temporary floor
+        // Will be corrected by in-cycle seed (Location 2) on first cycle
+        const floor = computeFloor(balances.totalUsdc);
+        if (reserveSnap.current === 0) {
+          const seed = Math.min(balances.usdc, floor);
+          updateReserve(db, seed, floor);
+          liveReserveUsdc = seed;
+          console.log(JSON.stringify({ level: 'info', msg: `[Reserve] First run — seeded reserve: $${seed.toFixed(2)}, temporary floor: $${floor.toFixed(2)} (will correct to full portfolio on first cycle)`, timestamp: Date.now() }));
+        } else {
+          updateReserve(db, reserveSnap.current, floor);
+          liveReserveUsdc = reserveSnap.current;
+          console.log(JSON.stringify({ level: 'info', msg: `[Reserve] Startup: no floor found — temporary floor $${floor.toFixed(2)} (will correct to full portfolio on first cycle)`, timestamp: Date.now() }));
+        }
+      } else {
+        // Valid floor exists — preserve it, never overwrite on restart
+        updateReserve(db, reserveSnap.current); // no floor param → keeps existing floor
+        liveReserveUsdc = reserveSnap.current;
+        console.log(JSON.stringify({ level: 'info', msg: `[Reserve] Startup: preserving existing floor $${reserveSnap.floor.toFixed(2)}, reserve $${reserveSnap.current.toFixed(2)}, state ${reserveSnap.state}`, timestamp: Date.now() }));
+      }
+    }
+
+    // Reserve floor callback — executor reads this to protect USDC reserve
+    liveExecutor.getReserveFloor = () => getReserveState(db).floor;
+    liveExecutor.getProximityDeployThreshold = () => (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).proximityDeployThreshold ?? 0.40;
+
     // P&L guard for auto-deploy ratio matching swaps
-    liveExecutor.shouldAllowSwap = (direction, amount, price) => {
-      const basis = sirCostBasis || price;
-      if (direction === 'sell_sol' && price < basis) {
-        console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell ${amount.toFixed(2)} SOL at $${price.toFixed(2)} (basis $${basis.toFixed(2)}, would lose $${((basis - price) * amount).toFixed(2)})`, timestamp: Date.now() }));
-        return false;
+    liveExecutor.shouldAllowSwap = (direction, _amount, price) => {
+      // Allow SOL sells ONLY when price is above avg cost basis (profitable)
+      if (direction === 'sell_sol') {
+        const basis = sirCostBasis || 0;
+        if (basis > 0 && price < basis) {
+          console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell SOL at $${price.toFixed(2)} (below basis $${basis.toFixed(2)})`, timestamp: Date.now() }));
+          return false;
+        }
       }
-      if (direction === 'buy_sol' && price > basis * 1.005) {
-        console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED buy SOL at $${price.toFixed(2)} (basis $${basis.toFixed(2)}, premium $${((price - basis) * amount).toFixed(2)})`, timestamp: Date.now() }));
-        return false;
-      }
-      return true;
+      return true; // buys always allowed
     };
 
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
+      lastBotSwapTime = Date.now(); // mark bot swap to avoid false manual detection
       const swapPrice = currentLiveData?.solPrice || oracle.getPrice()?.price || 0;
       insertRebalanceEventWithRule2(db, {
         timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: swapPrice, regime: liveRegime,
@@ -232,17 +326,27 @@ async function main() {
       const usdcAmt = isSolSell ? event.toAmount : event.fromAmount;
       const direction = isSolSell ? 'sell_sol' : 'buy_sol';
       const idleSolHolding = 0; // approximate — exact value would need balance check
-      const pnlCalc = calculateSwapPnl(direction as any, solAmt, swapPrice, sirCostBasis || swapPrice, idleSolHolding);
-      sirCostBasis = pnlCalc.newBasis;
+      const basisBefore = sirCostBasis || swapPrice;
+      const pnlCalc = calculateSwapPnl(direction as any, solAmt, swapPrice, basisBefore, idleSolHolding);
+      // COST_BASIS: tracked — update DB-persisted cost basis on every USDC→SOL buy swap
+      if (direction === 'buy_sol') {
+        costBasisState = updateCostBasis(db, solAmt, swapPrice, `swap onSwap (${event.reason.slice(0, 60)})`);
+        sirCostBasis = costBasisState.solCostBasis;
+      } else {
+        reduceCostBasisHoldings(db, solAmt, `swap sell (${event.reason.slice(0, 40)})`);
+        costBasisState = readCostBasis(db);
+        sirCostBasis = costBasisState.solCostBasis;
+      }
       insertSwapLedger(db, {
         timestamp: event.timestamp, direction, sol_amount: solAmt, usdc_amount: usdcAmt,
         price: swapPrice, reason: event.reason, pnl_usdc: pnlCalc.pnlUsdc,
-        cost_basis_before: sirCostBasis || swapPrice, cost_basis_after: pnlCalc.newBasis,
+        cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
+        tx_signature: event.txSignature, fee_lamports: event.feeLamports, price_impact_pct: event.priceImpactPct,
       });
     };
 
     // Restore live position from DB if exists
-    if (savedState?.position_json && savedState.position_json !== 'null') {
+    if (savedState?.position_json && savedState.position_json !== 'null' && savedState.position_json !== null) {
       try {
         const pos = JSON.parse(savedState.position_json);
         if (pos?.positionMint) {
@@ -356,6 +460,20 @@ async function main() {
         console.log(JSON.stringify({ level: 'warn', msg: `orphan scan failed (non-fatal): ${String(err)}`, timestamp: Date.now() }));
       }
     }
+
+    // Cost basis: reset lifetime totals to current actual holdings if wildly off (>2x)
+    {
+      const pos = liveExecutor?.getCurrentPosition();
+      const lpSol = pos ? pos.entrySol : 0;
+      const totalSolHeld = balances.sol + lpSol;
+      recalculateFromCurrentHoldings(db, totalSolHeld);
+      costBasisState = readCostBasis(db);
+      sirCostBasis = costBasisState.solCostBasis;
+
+      // Recalculate reserve floor if portfolio has grown/shrunk significantly
+      const totalPortfolio = balances.sol * (balances.solPrice ?? 84) + balances.usdc + (pos ? pos.entrySol * (balances.solPrice ?? 84) + (pos.entryUsdc ?? 0) : 0);
+      checkReserveFloor(db, totalPortfolio);
+    }
   }
 
   if (!liveExecutor) {
@@ -394,6 +512,10 @@ async function main() {
   // ── DECISION LOOP ─────────────────────────────────────────────────────
 
   let cycleRunning = false;
+  let pendingDashboardAction: (() => Promise<any>) | null = null;
+  let prevBalSol = 0;
+  let prevBalUsdc = 0;
+  let lastBotSwapTime = 0; // track when bot does a swap to avoid false manual detections
   let lastPruneTime = Date.now();
 
   let lastConfigReload = Date.now();
@@ -402,9 +524,14 @@ async function main() {
     if (cycleRunning) return;
     cycleRunning = true;
     try {
+      // Reset cycle-scoped snapshot tracking
+      cycleGateReserve = 'NA'; cycleGateBasis = 'NA'; cycleGateChurn = 'NA';
+      cyclePrevRegime = liveRegime;
+      positionChangedThisCycle = false;
+
       // Reload config from DB every 5 minutes (picks up threshold changes without restart)
       const now0 = Date.now();
-      if (now0 - lastConfigReload > 5 * 60_000) {
+      if (now0 - lastConfigReload > 60_000) { // reload config every 1 min (was 5 min)
         applyConfigFromDb(getConfig(db));
         lastConfigReload = now0;
       }
@@ -479,7 +606,7 @@ async function main() {
               actual24hFeesUsdc = todaySummary[0].fees_earned_usdc;
             }
             actual24hAprPct = positionValueUsdc > 0 ? (actual24hFeesUsdc * 365 / positionValueUsdc) * 100 : 0;
-          } catch {}
+          } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] daily_fee_calc: ${String(e)}`, timestamp: Date.now() })); }
 
           // Calculate IL
           let ilUsdc = 0;
@@ -510,6 +637,9 @@ async function main() {
             cumHarvestedFeesSol: liveCumFeesSol,
             cumHarvestedFeesUsdc: liveCumFeesUsdc,
             totalFeesUsdc,
+            solCostBasis: costBasisState.solCostBasis || 0,
+            solTracked: costBasisState.solTotalAcquired || 0,
+            costBasisLastUpdated: costBasisState.costBasisLastUpdated || 0,
             entryPrice: livePos?.entryPrice ?? null,
             entryTime: livePos?.entryTime ?? null,
             entrySol: livePos?.entrySol ?? positionSol,
@@ -521,6 +651,21 @@ async function main() {
             estAprPct,
             actual24hFeesUsdc,
             actual24hAprPct,
+            positionRegime: livePos?.regime ?? null,
+            ...(() => { const rs = getReserveState(db); return { reserveCurrent: rs.current, reserveFloor: rs.floor, reserveState: rs.state }; })(),
+            reserveLastUpdated: Date.now(),
+            ...(() => {
+              const lastExit = db.prepare("SELECT timestamp, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as { timestamp: number; price: number } | undefined;
+              if (!lastExit) return { churnGuardActive: false, churnGuardReason: null, churnGuardExpiresMin: null, churnGuardLastExitPrice: null, churnGuardLastExitAgeMin: null };
+              const ageMin = (Date.now() - lastExit.timestamp) / 60000;
+              const belowExit = price.price < lastExit.price;
+              const cooldownBlock = ageMin < 15 && belowExit;
+              const priceBlock = belowExit && ageMin < 20;
+              const active = cooldownBlock || priceBlock;
+              const reason = cooldownBlock ? `price $${price.price.toFixed(2)} below exit $${lastExit.price.toFixed(2)}, cooldown ${(15 - ageMin).toFixed(0)}min` : priceBlock ? `price $${price.price.toFixed(2)} below exit $${lastExit.price.toFixed(2)}` : null;
+              const expiresMin = cooldownBlock ? 15 - ageMin : priceBlock ? 20 - ageMin : null;
+              return { churnGuardActive: active, churnGuardReason: reason, churnGuardExpiresMin: expiresMin, churnGuardLastExitPrice: lastExit.price, churnGuardLastExitAgeMin: ageMin };
+            })(),
             regime: liveRegime,
             botState: liveBotState,
             liveEvents: [],
@@ -531,6 +676,49 @@ async function main() {
 
           // Record live snapshot for historical tracking
           const isInRange = posData && price.price >= posData.priceLower && price.price <= posData.priceUpper;
+          // Detect manual swaps: wallet balance changed but bot didn't swap
+          // Skip if position opened/closed this cycle — balance diff includes LP deposit/withdrawal
+          if (positionChangedThisCycle) {
+            // Update previous balances without recording a swap
+          } else if (prevBalSol > 0 && Date.now() - lastBotSwapTime > 30_000) {
+            const solDiff = balances.sol - prevBalSol;
+            const usdcDiff = balances.usdc - prevBalUsdc;
+            // Manual SOL→USDC sell: SOL dropped, USDC increased (not from position close)
+            if (solDiff < -0.5 && usdcDiff > 10 && liveBotState === 'ACTIVE') {
+              const solSold = Math.abs(solDiff);
+              const usdcReceived = usdcDiff;
+              const effectivePrice = usdcReceived / solSold;
+              const pnl = (effectivePrice - sirCostBasis) * solSold;
+              console.log(JSON.stringify({ level: 'info', msg: `Manual swap detected: sold ${solSold.toFixed(2)} SOL → $${usdcReceived.toFixed(0)} USDC @ $${effectivePrice.toFixed(2)} (basis $${sirCostBasis.toFixed(2)}, P&L $${pnl.toFixed(2)})`, timestamp: Date.now() }));
+              try {
+                db.prepare('INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+                  Date.now(), 'sell_sol', solSold, usdcReceived, effectivePrice, 'Manual swap from phone (SOL→USDC)', pnl, sirCostBasis, sirCostBasis, 'manual'
+                );
+                reduceCostBasisHoldings(db, solSold, 'manual_sell');
+                costBasisState = readCostBasis(db);
+                sirCostBasis = costBasisState.solCostBasis;
+              } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_sell_detect: ${String(e)}`, timestamp: Date.now() })); }
+            }
+            // Manual USDC→SOL buy: USDC dropped, SOL increased
+            if (usdcDiff < -10 && solDiff > 0.5 && liveBotState === 'ACTIVE') {
+              const solBought = solDiff;
+              const usdcSpent = Math.abs(usdcDiff);
+              const effectivePrice = usdcSpent / solBought;
+              console.log(JSON.stringify({ level: 'info', msg: `Manual swap detected: bought ${solBought.toFixed(2)} SOL with $${usdcSpent.toFixed(0)} USDC @ $${effectivePrice.toFixed(2)}`, timestamp: Date.now() }));
+              try {
+                db.prepare('INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+                  Date.now(), 'buy_sol', solBought, usdcSpent, effectivePrice, 'Manual swap from phone (USDC→SOL)', 0, sirCostBasis, sirCostBasis, 'manual'
+                );
+                // Update cost basis
+                const { updateCostBasis } = await import('./tracking/costBasis.js');
+                const result = updateCostBasis(db, solBought, effectivePrice, 'manual_buy');
+                sirCostBasis = result.solCostBasis;
+              } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_buy_detect: ${String(e)}`, timestamp: Date.now() })); }
+            }
+          }
+          prevBalSol = balances.sol;
+          prevBalUsdc = balances.usdc;
+
           insertLiveSnapshot(db, {
             timestamp: Date.now(),
             price: price.price,
@@ -550,7 +738,21 @@ async function main() {
             position_value: positionValueUsdc,
             total_with_position: totalWithPosition,
           });
-        } catch {}
+
+          // ── Reserve seed check (every cycle, with full portfolio data) ──
+          {
+            const reserveState = getReserveState(db);
+            if (reserveState.current === 0 && reserveState.floor === 0) {
+              const floor = computeFloor(totalWithPosition);
+              const seed = Math.min(balances.usdc, floor);
+              if (seed > 0) {
+                updateReserve(db, seed, floor);
+                liveReserveUsdc = seed;
+                console.log(JSON.stringify({ level: 'info', msg: `[Reserve] Seeded in cycle: reserve=$${seed.toFixed(2)}, floor=$${floor.toFixed(2)}, portfolio=$${totalWithPosition.toFixed(0)}`, timestamp: Date.now() }));
+              }
+            }
+          }
+        } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] live_data_update: ${String(e)}`, timestamp: Date.now() })); }
       }
 
       // Persist state
@@ -562,10 +764,65 @@ async function main() {
           ? JSON.stringify({ ...livePos2, positionMint: livePos2.positionMint.toBase58(), positionAddress: livePos2.positionAddress.toBase58() })
           : 'null',
         updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
       });
 
       checkAndWriteDailyPnl(price.price);
+
+      // ── Regime snapshot ────────────────────────────────────────────────
+      {
+        const pos = liveExecutor!.getCurrentPosition();
+        const posAgeMin = pos ? (Date.now() - pos.entryTime) / 60_000 : null;
+        let proxLower: number | null = null;
+        let proxUpper: number | null = null;
+        if (pos) {
+          const range = pos.priceUpper - pos.priceLower;
+          if (range > 0) {
+            proxLower = 1 - (price.price - pos.priceLower) / range;
+            proxUpper = (price.price - pos.priceLower) / range;
+          }
+        }
+        const mkt = marketData.getSignals();
+        const ta = mkt?.ta ?? null;
+        const effectiveDeployPct = ((runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).deployPct) * (taDeployMultiplier ?? 1.0);
+        const ctr = cycleTaResult as { confidence: string; vetoFired: boolean; votes: Record<string, number>; candidateRegime: string; score: number } | null;
+        insertRegimeSnapshot(db, {
+          ts: Date.now(),
+          regime: liveRegime,
+          prev_regime: cyclePrevRegime,
+          regime_changed: liveRegime !== cyclePrevRegime ? 1 : 0,
+          confidence: ctr?.confidence ?? 'LOW',
+          deploy_pct: effectiveDeployPct,
+          veto_fired: ctr?.vetoFired ? 1 : 0,
+          ta_score_bullish: ctr?.votes?.['BULLISH_TREND'] ?? null,
+          ta_score_ranging: ctr?.votes?.['RANGING'] ?? null,
+          ta_score_bearish: ctr?.votes?.['BEARISH_TREND'] ?? null,
+          ta_score_extreme: ctr?.votes?.['EXTREME'] ?? null,
+          ta_winner: ctr?.candidateRegime ?? null,
+          ta_total_score: ctr?.score ?? null,
+          ema9: ta?.ema9 ?? null,
+          sma20: ta?.sma20 ?? null,
+          ema_cross: ta?.trendDirection ?? null,
+          rsi: ta?.rsi14 ?? null,
+          bb_width: ta?.bbWidth ?? null,
+          bb_position: ta?.bbPosition ?? null,
+          atr: ta?.atr14 ?? null,
+          vol_1h: mkt?.vol1h ?? null,
+          sol_change_4h: mkt?.solDelta24h ?? null,
+          fear_greed: mkt?.fearGreedIndex ?? null,
+          btc_change_4h: mkt?.btcDelta24h ?? null,
+          price: price.price,
+          position_state: pos ? 'ACTIVE' : 'IDLE',
+          position_age_min: posAgeMin,
+          proximity_lower: proxLower,
+          proximity_upper: proxUpper,
+          reserve_gate: cycleGateReserve,
+          basis_gate: cycleGateBasis,
+          churn_guard: cycleGateChurn,
+          daily_regime: cycleDailyRegime,
+          ta_data_age_min: Math.round((Date.now() - liveLastRegimeCheck) / 60000),
+        });
+      }
 
       // Prune old price ticks once per day
       const now2 = Date.now();
@@ -573,12 +830,20 @@ async function main() {
         lastPruneTime = now2;
         const { pruneOldPriceTicks } = await import('./db/sqlite.js');
         pruneOldPriceTicks(db, 30);
-        console.log(JSON.stringify({ level: 'info', msg: 'pruned price ticks older than 30 days', timestamp: now2 }));
+        pruneOldData(db);
+        if (currentLiveData?.totalValueWithPosition) checkReserveFloor(db, currentLiveData.totalValueWithPosition);
+        console.log(JSON.stringify({ level: 'info', msg: 'daily prune + reserve floor check', timestamp: now2 }));
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'cycle error', error: err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err)), timestamp: Date.now() }));
     } finally {
       cycleRunning = false;
+      if (pendingDashboardAction) {
+        const action = pendingDashboardAction;
+        pendingDashboardAction = null;
+        console.log(JSON.stringify({ level: 'info', msg: '[Dashboard] Executing queued dashboard action', timestamp: Date.now() }));
+        try { await action(); } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[Dashboard] Queued action failed: ${e instanceof Error ? e.message : String(e)}`, timestamp: Date.now() })); }
+      }
     }
   }, runtime.decisionIntervalSeconds * 1000);
 
@@ -590,6 +855,7 @@ async function main() {
     const liveWallet = (executor as any).wallet;
 
     dashboard.onPause(() => {
+      if (cycleRunning) console.log(JSON.stringify({ level: 'info', msg: '[Dashboard] Pause during cycle — flag will apply next cycle', timestamp: Date.now() }));
       botPaused = true;
       liveBotState = 'IDLE';
       console.log(JSON.stringify({ level: 'info', msg: 'Bot PAUSED from dashboard. Position stays open.', timestamp: Date.now() }));
@@ -600,6 +866,7 @@ async function main() {
     });
 
     dashboard.onResume(() => {
+      if (cycleRunning) console.log(JSON.stringify({ level: 'info', msg: '[Dashboard] Resume during cycle — flag will apply next cycle', timestamp: Date.now() }));
       botPaused = false;
       liveBotState = 'ACTIVE';
       console.log(JSON.stringify({ level: 'info', msg: 'Bot RESUMED from dashboard.', timestamp: Date.now() }));
@@ -639,8 +906,15 @@ async function main() {
     });
 
     dashboard.onAddLiquidity(async () => {
+      if (cycleRunning) {
+        console.log(JSON.stringify({ level: 'warn', msg: '[Dashboard] Add liquidity requested during active cycle — queuing', timestamp: Date.now() }));
+        return new Promise<any>((resolve, reject) => { pendingDashboardAction = async () => { try { resolve(await dashboardAddLiquidity()); } catch (e) { reject(e); } }; });
+      }
+      return dashboardAddLiquidity();
+    });
+
+    async function dashboardAddLiquidity() {
       const currentPrice = currentLiveData?.solPrice ?? 0;
-      // Apply regime deploy cap (same as auto-deploy)
       const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
       const balances = await getWalletBalances(conn, (executor as any).wallet.publicKey);
       const posComp = await executor.getPositionComposition();
@@ -662,9 +936,17 @@ async function main() {
         decision: 'LIQUIDITY_ADDED', reasoning: `Added liquidity to existing position from dashboard. Deposited ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}). Position range unchanged.`,
         params_json: null });
       return result;
-    });
+    }
 
     dashboard.onHarvest(async () => {
+      if (cycleRunning) {
+        console.log(JSON.stringify({ level: 'warn', msg: '[Dashboard] Harvest requested during active cycle — queuing', timestamp: Date.now() }));
+        return new Promise<{ feeSol: number; feeUsdc: number }>((resolve, reject) => { pendingDashboardAction = async () => { try { resolve(await dashboardHarvest()); } catch (e) { reject(e); } }; });
+      }
+      return dashboardHarvest();
+    });
+
+    async function dashboardHarvest(): Promise<{ feeSol: number; feeUsdc: number }> {
       const currentPrice = currentLiveData?.solPrice ?? 0;
       console.log(JSON.stringify({ level: 'info', msg: 'Manual fee harvest from dashboard', timestamp: Date.now() }));
       const fees = await executor.collectFees();
@@ -678,9 +960,17 @@ async function main() {
         feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
       });
       return fees;
-    });
+    }
 
     dashboard.onClosePosition(async () => {
+      if (cycleRunning) {
+        console.log(JSON.stringify({ level: 'warn', msg: '[Dashboard] Close requested during active cycle — queuing for after cycle', timestamp: Date.now() }));
+        return new Promise<void>((resolve, reject) => { pendingDashboardAction = async () => { try { await dashboardClosePosition(); resolve(); } catch (e) { reject(e); } }; });
+      }
+      return dashboardClosePosition();
+    });
+
+    async function dashboardClosePosition() {
       console.log(JSON.stringify({ level: 'warn', msg: 'CLOSE POSITION triggered from dashboard', timestamp: Date.now() }));
 
       if (!executor.getCurrentPosition()) {
@@ -714,12 +1004,12 @@ async function main() {
       liveBotState = 'IDLE';
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
-        position_json: 'null', updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+        position_json: null, updated_at: Date.now(),
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
       });
 
       console.log(JSON.stringify({ level: 'info', msg: 'Position closed. Bot paused in IDLE.', timestamp: Date.now() }));
-    });
+    }
 
     dashboard.onEmergencyStop(async () => {
       console.log(JSON.stringify({ level: 'warn', msg: 'EMERGENCY STOP triggered from dashboard', timestamp: Date.now() }));
@@ -755,8 +1045,8 @@ async function main() {
       liveBotState = 'IDLE';
       upsertBotState(db, {
         state: 'IDLE', regime: liveRegime,
-        position_json: 'null', updated_at: Date.now(),
-        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+        position_json: null, updated_at: Date.now(),
+        cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl, tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
       });
 
       console.log(JSON.stringify({ level: 'info', msg: 'Emergency stop complete. Exiting in 3s...', timestamp: Date.now() }));
@@ -811,6 +1101,25 @@ async function main() {
     }
   }, 60_000);
 
+  // Portfolio snapshot — every 4 hours for arcade page
+  let lastPortfolioSnap = 0;
+  setInterval(() => {
+    const now = Date.now();
+    if (now - lastPortfolioSnap < 4 * 3600_000) return;
+    lastPortfolioSnap = now;
+    const total = currentLiveData?.totalValueWithPosition ?? 0;
+    if (total > 0) {
+      try { db.prepare('INSERT INTO portfolio_snapshots (ts, total_value) VALUES (?, ?)').run(now, total); } catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `portfolio_snapshot insert: ${String(e)}`, timestamp: Date.now() })); }
+    }
+  }, 60_000);
+  // Seed first snapshot on startup
+  {
+    const total = currentLiveData?.totalValueWithPosition ?? 0;
+    if (total > 0) {
+      try { db.prepare('INSERT INTO portfolio_snapshots (ts, total_value) VALUES (?, ?)').run(Date.now(), total); } catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `portfolio_snapshot seed: ${String(e)}`, timestamp: Date.now() })); }
+    }
+  }
+
   // Graceful shutdown
   process.on('SIGINT', async () => {
     console.log(JSON.stringify({ level: 'info', msg: 'Shutting down...', timestamp: Date.now() }));
@@ -829,7 +1138,7 @@ async function main() {
         : 'null',
       updated_at: Date.now(),
       cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
     });
 
     console.log(JSON.stringify({ level: 'info', msg: 'State saved. Bye.', timestamp: Date.now() }));
@@ -850,79 +1159,191 @@ async function runLiveCycle(price: number): Promise<void> {
   if (liveRecentPrices.length > 10) liveRecentPrices.shift();
 
   // Regime update (every 1 hour)
-  if (now - liveLastRegimeCheck > 3_600_000) {
+  if (now - liveLastRegimeCheck > runtime.regimeCheckIntervalMs) {
     const closes = getDailyCloses(db, runtime.regimeWindowDays);
     const MIN_CLOSES_FOR_REGIME_CHANGE = 5;
 
-    // Use enhanced regime detection if enabled and market data available
-    const mktSignals = runtime.useEnhancedRegime ? marketData.getSignals() : null;
-    const enhancedResult = detectRegimeEnhanced(closes, runtime.trendThreshold, mktSignals, {
-      vol1hExtremeThreshold: runtime.vol1hExtremeThreshold,
-      vol4hExtremeThreshold: runtime.vol4hExtremeThreshold,
-      volumeSpikeMultiple: runtime.volumeSpikeMultiple,
-      trendDeltaThreshold: runtime.trendDeltaThreshold,
-      btcCorrelationThreshold: runtime.btcCorrelationThreshold,
-      fearGreedExtremeLow: runtime.fearGreedExtremeLow,
-      fearGreedExtremeHigh: runtime.fearGreedExtremeHigh,
-    });
+    // ── TA-first regime detection (primary path) ──────────────────────────
+    const mktSignals = marketData.getSignals();
+    const ta = mktSignals?.ta ?? null;
 
-    const result = enhancedResult;
+    let newRegime: Regime;
+    let reasoningText: string;
+    let paramsJson: Record<string, unknown>;
+    let deployMultiplier = 1.0; // may be reduced by TA confidence
 
-    // Determine thresholds for reasoning
-    const volStatus = result.realisedVol > 0.08 ? 'ABOVE 0.08 threshold → EXTREME' : `${result.realisedVol.toFixed(4)} (below 0.08 threshold)`;
-    const dirStatus = result.dirRatio > runtime.trendThreshold ? `ABOVE ${runtime.trendThreshold} threshold → trending` : `${result.dirRatio.toFixed(3)} (below ${runtime.trendThreshold} threshold → ranging)`;
-    const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
+    if (ta != null) {
+      // Primary path: TA-first detection
+      // Get daily regime as veto-only input
+      const dailyRegime = closes.length >= 3 ? detectRegime(closes, runtime.trendThreshold) : null;
+      const taResult = detectRegimeTA(ta, mktSignals, dailyRegime, taRegimeCandidate, taRegimeCandidateCount);
+      cycleTaResult = taResult;
+      cycleDailyRegime = dailyRegime ?? null;
 
-    // Build market signals summary for logging
-    const sig = result.signals;
-    const mktParts: string[] = [];
-    if (sig.vol1h != null) mktParts.push(`vol1h=${sig.vol1h.toFixed(4)}`);
-    if (sig.vol4h != null) mktParts.push(`vol4h=${sig.vol4h.toFixed(4)}`);
-    if (sig.solDelta24h != null) mktParts.push(`SOL24h=${sig.solDelta24h > 0 ? '+' : ''}${sig.solDelta24h.toFixed(1)}%`);
-    if (sig.btcDelta24h != null) mktParts.push(`BTC24h=${sig.btcDelta24h > 0 ? '+' : ''}${sig.btcDelta24h.toFixed(1)}%`);
-    if (sig.volumeRatio4h != null) mktParts.push(`volRatio=${sig.volumeRatio4h.toFixed(1)}x`);
-    if (sig.fearGreedIndex != null) mktParts.push(`F&G=${sig.fearGreedIndex}`);
-    const mktSummary = mktParts.length > 0 ? ` Market signals: ${mktParts.join(', ')}.` : ' No market data available.';
-    const overrideNote = result.overrideReason ? ` OVERRIDE: ${result.overrideReason} (base was ${result.baseRegime}).` : '';
-    const confidenceNote = ` Confidence: ${result.confidence}/5.`;
+      // Update hysteresis state
+      taRegimeCandidate = taResult.candidateRegime;
+      taRegimeCandidateCount = taResult.newCandidateCount;
+      deployMultiplier = taResult.deployMultiplier;
+      taDeployMultiplier = taResult.deployMultiplier;
 
-    // Suppress regime changes on thin data to prevent flapping (only for base-regime changes)
-    // Allow regime change if: enough daily data, OR market signals override, OR market signals confirm base regime with confidence
-    const marketConfirmed = result.confidence > 0 && mktSignals != null;
-    const changed = result.regime !== liveRegime && (closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE || result.overrideReason != null || marketConfirmed);
+      newRegime = taResult.regime;
+      reasoningText = taResult.log;
+      paramsJson = {
+        method: 'TA-first',
+        score: taResult.score,
+        confidence: taResult.confidence,
+        deployMultiplier: taResult.deployMultiplier,
+        candidateRegime: taResult.candidateRegime,
+        candidateCount: taResult.newCandidateCount,
+        dailyRegime,
+        ta: { rsi14: ta.rsi14, bbWidth: ta.bbWidth, bbPosition: ta.bbPosition, trendDirection: ta.trendDirection, atr14: ta.atr14 },
+        vol1h: mktSignals?.vol1h ?? null,
+        solDelta24h: mktSignals?.solDelta24h ?? null,
+        volumeRatio4h: mktSignals?.volumeRatio4h ?? null,
+        fearGreedIndex: mktSignals?.fearGreedIndex ?? null,
+      };
+    } else {
+      // Fallback: use existing detectRegimeEnhanced when TA not yet available
+      const mktSignalsFallback = runtime.useEnhancedRegime ? mktSignals : null;
+      const enhancedResult = detectRegimeEnhanced(closes, runtime.trendThreshold, mktSignalsFallback, {
+        vol1hExtremeThreshold: runtime.vol1hExtremeThreshold,
+        vol4hExtremeThreshold: runtime.vol4hExtremeThreshold,
+        volumeSpikeMultiple: runtime.volumeSpikeMultiple,
+        trendDeltaThreshold: runtime.trendDeltaThreshold,
+        btcCorrelationThreshold: runtime.btcCorrelationThreshold,
+        fearGreedExtremeLow: runtime.fearGreedExtremeLow,
+        fearGreedExtremeHigh: runtime.fearGreedExtremeHigh,
+      });
+
+      const priceDir = closes.length >= 2 ? (closes[closes.length - 1] > closes[0] ? 'UP' : 'DOWN') : 'N/A';
+      const volStatus = enhancedResult.realisedVol > 0.08 ? 'ABOVE 0.08 threshold → EXTREME' : `${enhancedResult.realisedVol.toFixed(4)} (below 0.08 threshold)`;
+      const dirStatus = enhancedResult.dirRatio > runtime.trendThreshold ? `ABOVE ${runtime.trendThreshold} threshold → trending` : `${enhancedResult.dirRatio.toFixed(3)} (below ${runtime.trendThreshold} threshold → ranging)`;
+      const sig = enhancedResult.signals;
+      const mktParts: string[] = [];
+      if (sig.vol1h != null) mktParts.push(`vol1h=${sig.vol1h.toFixed(4)}`);
+      if (sig.vol4h != null) mktParts.push(`vol4h=${sig.vol4h.toFixed(4)}`);
+      if (sig.solDelta24h != null) mktParts.push(`SOL24h=${sig.solDelta24h > 0 ? '+' : ''}${sig.solDelta24h.toFixed(1)}%`);
+      if (sig.btcDelta24h != null) mktParts.push(`BTC24h=${sig.btcDelta24h > 0 ? '+' : ''}${sig.btcDelta24h.toFixed(1)}%`);
+      if (sig.volumeRatio4h != null) mktParts.push(`volRatio=${sig.volumeRatio4h.toFixed(1)}x`);
+      if (sig.fearGreedIndex != null) mktParts.push(`F&G=${sig.fearGreedIndex}`);
+      const mktSummary = mktParts.length > 0 ? ` Market signals: ${mktParts.join(', ')}.` : ' No market data available.';
+      const overrideNote = enhancedResult.overrideReason ? ` OVERRIDE: ${enhancedResult.overrideReason} (base was ${enhancedResult.baseRegime}).` : '';
+
+      newRegime = enhancedResult.regime;
+      reasoningText = `[Regime] Fallback (no TA): ${enhancedResult.priceCount} daily closes. ` +
+        `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
+        `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'}` +
+        mktSummary + overrideNote + ` Confidence: ${enhancedResult.confidence}/5.` +
+        ` Result: ${newRegime}.`;
+      paramsJson = {
+        method: 'enhanced-fallback',
+        dirRatio: enhancedResult.dirRatio, realisedVol: enhancedResult.realisedVol, priceCount: enhancedResult.priceCount,
+        trendThreshold: runtime.trendThreshold, baseRegime: enhancedResult.baseRegime,
+        overrideReason: enhancedResult.overrideReason, confidence: enhancedResult.confidence,
+        ...enhancedResult.signals,
+      };
+    }
+
+    // Determine if regime has changed (hysteresis in TA path already prevents premature change)
+    const marketConfirmed = mktSignals != null;
+    const changed = newRegime !== liveRegime && (ta != null || closes.length >= MIN_CLOSES_FOR_REGIME_CHANGE || marketConfirmed);
 
     // Log regime changes immediately; unchanged evals only every 1 hour
     if (changed || now - liveLastRegimeEvalLog >= 3_600_000) {
       liveLastRegimeEvalLog = now;
-      insertDecisionLog(db, { timestamp: now, price, regime: result.regime, bot_state: liveBotState,
+      insertDecisionLog(db, { timestamp: now, price, regime: newRegime, bot_state: liveBotState,
         prox_lower: null, prox_upper: null, in_range: null,
         decision: changed ? 'REGIME_CHANGE' : 'REGIME_EVAL',
-        reasoning: `Regime evaluation: ${result.priceCount} daily closes over ${runtime.regimeWindowDays} days. ` +
-          `realisedVol=${volStatus}. dirRatio=${dirStatus}. Price direction: ${priceDir}. ` +
-          `${closes.length >= 2 ? `Price range: $${Math.min(...closes).toFixed(2)}-$${Math.max(...closes).toFixed(2)}.` : 'Insufficient data.'}` +
-          mktSummary + overrideNote + confidenceNote +
-          ` Result: ${result.regime}${changed ? ` (CHANGED from ${liveRegime})` : ' (no change)'}.`,
-        params_json: JSON.stringify({
-          dirRatio: result.dirRatio, realisedVol: result.realisedVol, priceCount: result.priceCount,
-          trendThreshold: runtime.trendThreshold, baseRegime: result.baseRegime,
-          overrideReason: result.overrideReason, confidence: result.confidence,
-          ...result.signals,
-        }) });
+        reasoning: reasoningText + (changed ? ` (CHANGED from ${liveRegime})` : ' (no change)') +
+          (deployMultiplier < 1.0 ? ` Deploy multiplier: ${Math.round(deployMultiplier * 100)}%.` : ''),
+        params_json: JSON.stringify(paramsJson) });
     }
 
     if (changed) {
       const oldRegime = liveRegime;
-      liveRegime = result.regime;
-      console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: result.regime, base: result.baseRegime, override: result.overrideReason ?? 'none', confidence: result.confidence, dirRatio: result.dirRatio.toFixed(3), vol: result.realisedVol.toFixed(4), timestamp: now }));
+      liveRegime = newRegime;
+      console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: newRegime, method: ta != null ? 'TA-first' : 'enhanced-fallback', deployMultiplier, timestamp: now }));
+      const dailyMetrics = closes.length >= 3 ? detectRegimeWithMetrics(closes, runtime.trendThreshold) : null;
       insertRegimeChange(db, {
-        timestamp: now, old_regime: oldRegime, new_regime: result.regime, price,
-        dir_ratio: result.dirRatio, realised_vol: result.realisedVol, price_count: result.priceCount,
+        timestamp: now, old_regime: oldRegime, new_regime: newRegime, price,
+        dir_ratio: dailyMetrics?.dirRatio ?? 0, realised_vol: dailyMetrics?.realisedVol ?? 0, price_count: dailyMetrics?.priceCount ?? 0,
       });
       insertRebalanceEventWithRule2(db, {
-        timestamp: now, eventType: 'REGIME_CHANGE', price, regime: result.regime,
-        note: `WHY: dirRatio=${result.dirRatio.toFixed(3)} (threshold ${runtime.trendThreshold}), realisedVol=${result.realisedVol.toFixed(4)} (threshold 0.08), ${result.priceCount} daily closes, price direction: ${priceDir}.${mktSummary}${overrideNote}${confidenceNote}\nEXECUTED: Regime changed from ${oldRegime} to ${result.regime}. All rule parameters updated.`,
+        timestamp: now, eventType: 'REGIME_CHANGE', price, regime: newRegime,
+        note: reasoningText + `\nEXECUTED: Regime changed from ${oldRegime} to ${newRegime}. All rule parameters updated.` +
+          (deployMultiplier < 1.0 ? ` Deploy multiplier: ${Math.round(deployMultiplier * 100)}%.` : ''),
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
+
+      // ── Regime-change reopen ──
+      if (runtime.regimeChangeReopenEnabled && liveExecutor) {
+        const pos = liveExecutor.getCurrentPosition();
+        if (pos) {
+          const posAgeMin = pos.entryTime ? (now - pos.entryTime) / 60_000 : 0;
+          const confLevel = deployMultiplier >= 1.0 ? 'HIGH' : deployMultiplier >= 0.75 ? 'MEDIUM' : 'LOW';
+          const confOk = confLevel === 'HIGH' || confLevel === 'MEDIUM';
+          const ageOk = posAgeMin > 15;
+
+          // Classify change
+          const isImmediate =
+            newRegime === 'EXTREME' || oldRegime === 'EXTREME' ||
+            (oldRegime === 'BULLISH_TREND' && newRegime === 'BEARISH_TREND') ||
+            (oldRegime === 'BEARISH_TREND' && newRegime === 'BULLISH_TREND');
+
+          // Check proximity for conditional reopen
+          const prox = calcProximity(price, pos as any);
+          const nearExit = Math.max(prox.proxToLower, prox.proxToUpper) > 0.80; // within 20% of exit
+
+          const shouldReopen = ageOk && confOk && (isImmediate || nearExit);
+          const reason = isImmediate ? 'immediate' : (nearExit ? 'conditional (near exit)' : 'conditional (mid-range)');
+
+          if (shouldReopen) {
+            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Closing position: ${oldRegime} → ${newRegime}, reason: ${reason}, age: ${posAgeMin.toFixed(0)}min, confidence: ${confLevel}`, timestamp: now }));
+            insertDecisionLog(db, { timestamp: now, price, regime: newRegime, bot_state: liveBotState,
+              prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
+              decision: 'REGIME_CHANGE', reasoning: `[RegimeReopen] Closing: ${oldRegime} → ${newRegime}, reason: ${reason}. Opening new position with ${newRegime} params immediately.`,
+              params_json: null });
+            try {
+              const closed = await liveClosePosition(price, 'POSITION_CLOSED', `Regime change reopen: ${oldRegime} → ${newRegime} (${reason})`);
+              if (!closed) {
+                console.log(JSON.stringify({ level: 'warn', msg: '[RegimeReopen] Close failed or returned false — aborting reopen. Position unchanged.', timestamp: now }));
+                return;
+              }
+              // Gate 1: ReserveGate
+              {
+                const regimeParamsRR = runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime);
+                const balancesRR = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+                const positionSizeRR = (balancesRR.sol * price + balancesRR.usdc) * regimeParamsRR.deployPct * (taDeployMultiplier ?? 1.0);
+                const usdcNeededRR = positionSizeRR * (regimeParamsRR.usdcDepositPct ?? 0.35);
+                const gateRR = checkDeployGate(db, usdcNeededRR, balancesRR.usdc, balancesRR.sol * price + balancesRR.usdc);
+                if (!gateRR.allowed) {
+                  console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateRR.reason}. Shortfall: $${gateRR.shortfall.toFixed(2)}`, timestamp: Date.now() }));
+                  return;
+                }
+                console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateRR.reason}`, timestamp: Date.now() }));
+                // Gate 2: BasisGate
+                const basisStateRR = readCostBasis(db);
+                const basisThresholdRR = regimeParamsRR.basisGateThreshold ?? 0.999;
+                const basisThresholdPriceRR = basisStateRR.solCostBasis * basisThresholdRR;
+                if (basisStateRR.solCostBasis > 0 && price < basisThresholdPriceRR) {
+                  console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceRR.toFixed(2)} (basis $${basisStateRR.solCostBasis.toFixed(2)} × ${basisThresholdRR})`, timestamp: Date.now() }));
+                  return;
+                }
+                console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceRR.toFixed(2)} (basis $${basisStateRR.solCostBasis.toFixed(2)} × ${basisThresholdRR})`, timestamp: Date.now() }));
+                // Gate 3: ChurnGuard — skipped for regime change reopen
+                console.log(JSON.stringify({ level: 'info', msg: '[ChurnGuard] Skipped — regime change reopen', timestamp: Date.now() }));
+              }
+              await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after regime change: ${oldRegime} → ${newRegime}. New params: width=${(runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime)).rangeWidthPct}%.`);
+              await reconcileReserveAfterOpen('RR');
+            } catch (e) {
+              console.log(JSON.stringify({ level: 'error', msg: '[RegimeReopen] failed', error: String(e), timestamp: now }));
+            }
+          } else {
+            const skipReason = !ageOk ? 'position too young' : !confOk ? 'low confidence' : 'position mid-range';
+            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Skipped: ${skipReason}, will reopen naturally at next exit. ${oldRegime} → ${newRegime}, prox: ${(Math.max(prox.proxToLower, prox.proxToUpper)*100).toFixed(0)}%`, timestamp: now }));
+          }
+        }
+      }
     }
     liveLastRegimeCheck = now;
   }
@@ -938,42 +1359,84 @@ async function runLiveCycle(price: number): Promise<void> {
   const currentPos = liveExecutor.getCurrentPosition();
 
   // ── VAR override: dynamic params from volatility ──
+  // VAR can suggest a width but the regime config width acts as a ceiling.
+  // User sets regime width to control max concentration; VAR only widens up to that.
   if (runtime.varEnabled) {
     const mktSig = marketData.getSignals();
     if (mktSig?.vol1h != null) {
+      const regimeWidth = params.rangeWidthPct; // user-configured width for this regime
       const varConfig: VarConfig = {
         enabled: true, multiplier: runtime.varMultiplier, targetHours: runtime.varTargetHours,
-        minWidth: runtime.varMinWidth, maxWidth: runtime.varMaxWidth,
+        minWidth: runtime.varMinWidth, maxWidth: Math.max(regimeWidth, runtime.varMaxWidth),
         adjustThreshold: runtime.varAdjustThreshold, minPositionAge: runtime.varMinAge,
         cooldownMinutes: runtime.varCooldown,
       };
       const varP = calculateVarParams(mktSig.vol1h, mktSig.solDelta24h ?? 0, varConfig);
-      params.rangeWidthPct = varP.targetWidth;
-      params.proxThresholdLower = varP.proxThresholdLower;
+      // Regime width = user's desired width. VAR does NOT override width.
+      // Width is set by the user via config. VAR only influences thresholds.
+      params.rangeWidthPct = regimeWidth;
+      // Clamp downside threshold: never exceed regime config (65%) to prevent SOL-heavy exits
+      const regimeThreshLower = (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).proxThresholdLower;
+      params.proxThresholdLower = Math.min(varP.proxThresholdLower, regimeThreshLower);
       params.proxThresholdUpper = varP.proxThresholdUpper;
-      params.skewDown = varP.skewDown;
-      params.skewUp = varP.skewUp;
       params.deployPct = varP.deployPct;
 
-      // Check if range adjustment needed (close+reopen with new width)
-      if (currentPos) {
-        const currentWidth = ((currentPos.priceUpper - currentPos.priceLower) / ((currentPos.priceUpper + currentPos.priceLower) / 2)) * 100;
-        const prox = calcProximity(price, currentPos as any);
-        const proxNearest = Math.max(prox.proxToLower, prox.proxToUpper);
-        const posAgeMin = currentPos.entryTime ? (now - currentPos.entryTime) / 60_000 : 999;
-        if (shouldAdjustRange(currentWidth, varP.targetWidth, proxNearest, posAgeMin, lastVarAdjustTime, now, varConfig)) {
-          console.log(JSON.stringify({ level: 'info', msg: `VAR range adjustment: ${currentWidth.toFixed(2)}% → ${varP.targetWidth.toFixed(2)}% (vol1h=${mktSig.vol1h.toFixed(4)})`, timestamp: now }));
-          insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
-            prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
-            decision: 'VAR_ADJUST', reasoning: `VAR range adjustment triggered. Current width ${currentWidth.toFixed(2)}% → target ${varP.targetWidth.toFixed(2)}% (deviation ${(Math.abs(currentWidth - varP.targetWidth) / currentWidth * 100).toFixed(0)}%). Vol1h=${mktSig.vol1h.toFixed(4)}. Closing to reopen with new range.`,
-            params_json: JSON.stringify(varP) });
-          lastVarAdjustTime = now;
-          // Close position — next cycle will reopen with new params
-          try { await liveExecutor.closePosition(); } catch (e) { console.log(JSON.stringify({ level: 'error', msg: 'VAR close failed', error: String(e), timestamp: now })); }
-          return;
+      // ── Technical Analysis adjustments ──
+      const ta = mktSig.ta;
+      if (ta) {
+        // Widen range near support/resistance (breakout likely)
+        if (ta.resistance && ta.support) {
+          const distToResist = ta.resistance > 0 ? Math.abs(price - ta.resistance) / price : 1;
+          const distToSupport = ta.support > 0 ? Math.abs(price - ta.support) / price : 1;
+          if (distToResist < 0.003 || distToSupport < 0.003) {
+            // Price within 0.3% of S/R — widen range for safety
+            params.rangeWidthPct = Math.max(params.rangeWidthPct, regimeWidth * 1.5);
+            console.log(JSON.stringify({ level: 'info', msg: `TA: near S/R level (S=$${ta.support.toFixed(2)} R=$${ta.resistance.toFixed(2)}), widening to ${params.rangeWidthPct.toFixed(2)}%`, timestamp: now }));
+          }
+        }
+
+        // Bollinger squeeze → tighten range (low vol, concentrate for fees)
+        if (ta.bbWidth != null && ta.bbWidth < 0.8) {
+          params.rangeWidthPct = Math.max(regimeWidth * 0.8, params.rangeWidthPct * 0.9);
+          console.log(JSON.stringify({ level: 'info', msg: `TA: Bollinger squeeze (width ${ta.bbWidth.toFixed(1)}%), tightening range`, timestamp: now }));
+        }
+
+        // RSI extreme → adjust skew
+        if (ta.rsi14 != null) {
+          if (ta.rsi14 > 70) {
+            // Overbought — give more upside room (price likely to stay high or pull back)
+            params.skewUp = Math.min(0.70, params.skewUp + 0.10);
+            params.skewDown = 1 - params.skewUp;
+          } else if (ta.rsi14 < 30) {
+            // Oversold — give more downside room
+            params.skewDown = Math.min(0.70, params.skewDown + 0.10);
+            params.skewUp = 1 - params.skewDown;
+          }
         }
       }
+
+      // VAR range adjustment DISABLED — width is user-controlled via config.
+      // VAR only influences thresholds and skew, not width.
+      // Positions are not closed/reopened for width changes.
     }
+  }
+
+  // Apply TA confidence deploy multiplier (reduces deployPct when TA signal is weak)
+  if (taDeployMultiplier < 1.0) {
+    params.deployPct *= taDeployMultiplier;
+  }
+
+  // Force reopen: check for DB flag (set via manual intervention instead of clearing position_json)
+  const forceReopenFlag = getConfig(db)['forceReopen'] === 'true';
+  if (forceReopenFlag && currentPos) {
+    console.log(JSON.stringify({ level: 'info', msg: 'Force reopen requested via DB flag. Closing current position...', timestamp: now }));
+    setConfig(db, 'forceReopen', 'false');
+    try {
+      await liveClosePosition(price, 'POSITION_CLOSED', 'Force reopen requested via config flag.');
+    } catch (e) {
+      console.log(JSON.stringify({ level: 'error', msg: 'Force reopen close failed', error: String(e), timestamp: now }));
+    }
+    return; // next cycle will open fresh
   }
 
   // No position → open one
@@ -1007,14 +1470,91 @@ async function runLiveCycle(price: number): Promise<void> {
         const reason = decision.reason === 'PULLBACK'
           ? `Rule 3 pullback re-entry: price pulled back ${pullPct}% from peak $${livePullbackPeak.toFixed(2)} (threshold: ${runtime.pullbackThresholdPct}%). Waited ${waitH}h.`
           : `Rule 3 timeout re-entry: waited ${waitH}h without sufficient pullback (${pullPct}% vs ${runtime.pullbackThresholdPct}% threshold).`;
+        // Gate 1: ReserveGate
+        const regimeParamsPB = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+        const balancesPB = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+        const positionSizePB = (balancesPB.sol * price + balancesPB.usdc) * regimeParamsPB.deployPct * (taDeployMultiplier ?? 1.0);
+        const usdcNeededPB = positionSizePB * (regimeParamsPB.usdcDepositPct ?? 0.35);
+        const gatePB = checkDeployGate(db, usdcNeededPB, balancesPB.usdc, balancesPB.sol * price + balancesPB.usdc);
+        if (!gatePB.allowed) {
+          console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gatePB.reason}. Shortfall: $${gatePB.shortfall.toFixed(2)}`, timestamp: Date.now() }));
+          return;
+        }
+        console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gatePB.reason}`, timestamp: Date.now() }));
+        // Gate 2: BasisGate
+        const basisStatePB = readCostBasis(db);
+        const basisThresholdPB = regimeParamsPB.basisGateThreshold ?? 0.999;
+        const basisThresholdPricePB = basisStatePB.solCostBasis * basisThresholdPB;
+        if (basisStatePB.solCostBasis > 0 && price < basisThresholdPricePB) {
+          console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPricePB.toFixed(2)} (basis $${basisStatePB.solCostBasis.toFixed(2)} × ${basisThresholdPB})`, timestamp: Date.now() }));
+          return;
+        }
+        console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPricePB.toFixed(2)} (basis $${basisStatePB.solCostBasis.toFixed(2)} × ${basisThresholdPB})`, timestamp: Date.now() }));
+        // Gate 3: ChurnGuard
+        const lastExitPB = db.prepare("SELECT timestamp, decision, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as any;
+        if (lastExitPB) {
+          const exitAgeMinPB = (Date.now() - lastExitPB.timestamp) / 60000;
+          if (exitAgeMinPB < 15 && price < lastExitPB.price) {
+            console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Blocked: downside exit ${exitAgeMinPB.toFixed(1)}min ago, price $${price.toFixed(2)} still below exit $${lastExitPB.price.toFixed(2)}. Cooldown: ${(15 - exitAgeMinPB).toFixed(1)}min remaining`, timestamp: Date.now() }));
+            return;
+          }
+          if (price < lastExitPB.price && exitAgeMinPB < 20) {
+            console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Deploy blocked: price $${price.toFixed(2)} below previous exit $${lastExitPB.price.toFixed(2)}. Waiting for recovery (expires in ${(20 - exitAgeMinPB).toFixed(0)}min).`, timestamp: Date.now() }));
+            return;
+          }
+        }
+        console.log(JSON.stringify({ level: 'info', msg: '[ChurnGuard] Passed', timestamp: Date.now() }));
         await liveOpenPosition(price, 'PULLBACK_REENTRY', reason);
+        await reconcileReserveAfterOpen('PB');
         idleRebalancePending = true; // trigger idle rebalance check on next cycle
       } else {
         if (price > livePullbackPeak) livePullbackPeak = price;
       }
       return;
     }
+    // Gate 1: ReserveGate
+    const regimeParamsID = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+    const balancesID = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+    const positionSizeID = (balancesID.sol * price + balancesID.usdc) * regimeParamsID.deployPct * (taDeployMultiplier ?? 1.0);
+    const usdcNeededID = positionSizeID * (regimeParamsID.usdcDepositPct ?? 0.35);
+    const gateID = checkDeployGate(db, usdcNeededID, balancesID.usdc, balancesID.sol * price + balancesID.usdc);
+    if (!gateID.allowed) {
+      cycleGateReserve = 'BLOCK';
+      console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateID.reason}. Shortfall: $${gateID.shortfall.toFixed(2)}`, timestamp: Date.now() }));
+      return;
+    }
+    cycleGateReserve = 'PASS';
+    console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateID.reason}`, timestamp: Date.now() }));
+    // Gate 2: BasisGate
+    const basisStateID = readCostBasis(db);
+    const basisThresholdID = regimeParamsID.basisGateThreshold ?? 0.999;
+    const basisThresholdPriceID = basisStateID.solCostBasis * basisThresholdID;
+    if (basisStateID.solCostBasis > 0 && price < basisThresholdPriceID) {
+      cycleGateBasis = 'BLOCK';
+      console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceID.toFixed(2)} (basis $${basisStateID.solCostBasis.toFixed(2)} × ${basisThresholdID})`, timestamp: Date.now() }));
+      return;
+    }
+    cycleGateBasis = 'PASS';
+    console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceID.toFixed(2)} (basis $${basisStateID.solCostBasis.toFixed(2)} × ${basisThresholdID})`, timestamp: Date.now() }));
+    // Gate 3: ChurnGuard
+    const lastExitID = db.prepare("SELECT timestamp, decision, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as any;
+    if (lastExitID) {
+      const exitAgeMinID = (Date.now() - lastExitID.timestamp) / 60000;
+      if (exitAgeMinID < 15 && price < lastExitID.price) {
+        cycleGateChurn = 'BLOCK';
+        console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Blocked: downside exit ${exitAgeMinID.toFixed(1)}min ago, price $${price.toFixed(2)} still below exit $${lastExitID.price.toFixed(2)}. Cooldown: ${(15 - exitAgeMinID).toFixed(1)}min remaining`, timestamp: Date.now() }));
+        return;
+      }
+      if (price < lastExitID.price && exitAgeMinID < 20) {
+        cycleGateChurn = 'BLOCK';
+        console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Deploy blocked: price $${price.toFixed(2)} below previous exit $${lastExitID.price.toFixed(2)}. Waiting for recovery (expires in ${(20 - exitAgeMinID).toFixed(0)}min).`, timestamp: Date.now() }));
+        return;
+      }
+    }
+    cycleGateChurn = 'PASS';
+    console.log(JSON.stringify({ level: 'info', msg: '[ChurnGuard] Passed', timestamp: Date.now() }));
     await liveOpenPosition(price, 'POSITION_OPENED', `No open position detected. Bot is idle. Opening new position.`);
+    await reconcileReserveAfterOpen('ID');
     idleRebalancePending = true;
     return;
   }
@@ -1046,9 +1586,9 @@ async function runLiveCycle(price: number): Promise<void> {
         livePullbackStart = now;
         liveBotState = 'WAITING_PULLBACK';
         // Save immediately — crash before next cycle would lose pullback state
-        upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: 'null', updated_at: Date.now(),
+        upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: null, updated_at: Date.now(),
           cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-          tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields() });
+          tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields() });
         return;
       }
     }
@@ -1088,9 +1628,9 @@ async function runLiveCycle(price: number): Promise<void> {
       livePullbackStart = now;
       liveBotState = 'WAITING_PULLBACK';
       // Save immediately — crash before next cycle would lose pullback state
-      upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: 'null', updated_at: Date.now(),
+      upsertBotState(db, { state: liveBotState, regime: liveRegime, position_json: null, updated_at: Date.now(),
         cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-        tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields() });
+        tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields() });
       return;
     }
   }
@@ -1135,6 +1675,23 @@ async function runLiveCycle(price: number): Promise<void> {
           }
         }
 
+        // ── Reserve routing ────────────────────────────────────────────────
+        // Route the USDC portion of harvested fees to the reserve or to compounding.
+        const harvestUsdcAmount = fees.feeUsdc;
+        if (harvestUsdcAmount > 0) {
+          const reserveSnap = getReserveState(db);
+          const split = routeHarvest(db, harvestUsdcAmount);
+          const newReserve = reserveSnap.current + split.toReserve;
+          updateReserve(db, newReserve);
+          liveReserveUsdc = newReserve;
+          const snapAfterHarvest = getReserveState(db);
+          console.log(JSON.stringify({
+            level: 'info',
+            msg: `[Reserve] Harvest routed: $${split.toReserve.toFixed(4)} to reserve, $${split.toCompound.toFixed(4)} to compound. Reserve: $${snapAfterHarvest.current.toFixed(2)} / floor $${snapAfterHarvest.floor.toFixed(2)} (state: ${snapAfterHarvest.state})`,
+            timestamp: now,
+          }));
+        }
+
         insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
           prox_lower: null, prox_upper: null, in_range: null,
           decision: 'FEE_HARVEST', reasoning: `Harvest due: ${daysSinceHarvest} days since last. Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC. Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.${convertNote}`,
@@ -1153,7 +1710,7 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Auto capital deployment — check every 5 minutes for idle wallet funds to deploy
-  if (prox.inRange && now - liveLastAutoDeployCheck >= runtime.autoDeployCheckMinutes * 60_000) {
+  if (prox.inRange && now - liveLastAutoDeployCheck >= runtime.autoDeployCheckIntervalSec * 1_000) {
     liveLastAutoDeployCheck = now;
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
@@ -1175,7 +1732,8 @@ async function runLiveCycle(price: number): Promise<void> {
         minIdleUsdc: runtime.minIdleUsdc,
         minIdleSol: runtime.minIdleSol,
         minDeployUsdc: runtime.minDeployUsdc,
-        deployRatioTolerance: runtime.deployRatioTolerance,
+        deployRatioTolerance: params.deployRatioTolerance ?? runtime.deployRatioTolerance,
+        reserveFloor: getReserveState(db).floor,
       });
 
       if (deployCheck.shouldDeploy) {
@@ -1206,7 +1764,7 @@ async function runLiveCycle(price: number): Promise<void> {
             position_json: JSON.stringify({ ...updatedPos, positionMint: updatedPos.positionMint.toBase58(), positionAddress: updatedPos.positionAddress.toBase58() }),
             updated_at: Date.now(),
             cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-            tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+            tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
           });
         }
         }
@@ -1224,13 +1782,145 @@ async function runLiveCycle(price: number): Promise<void> {
     }
   }
 
+  // ── SOL Conversion: sell small SOL amounts when profitable and USDC needed for deploys ──
+  if (currentPos && liveBotState === 'ACTIVE') {
+    try {
+      const basis = costBasisState.solCostBasis;
+      // Dynamic cooldown per regime, scaled by global multiplier
+      const regimeCooldownMin: Record<string, number> = { RANGING: 3, BULLISH_TREND: 5, BEARISH_TREND: 10, EXTREME: 20 };
+      const baseCooldown = regimeCooldownMin[liveRegime] ?? 10;
+      const cooldownMs = baseCooldown * (runtime.solConversionCooldownMin / 15) * 60_000; // solConversionCooldownMin acts as multiplier (15 = 1x)
+      const timeSinceLast = now - solConversionLastTs;
+
+      if (!runtime.solConversionEnabled) {
+        // silent skip — don't log every cycle
+      } else if (price < basis * runtime.solConversionBasisMultiplier) {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${(basis * runtime.solConversionBasisMultiplier).toFixed(2)} (basis $${basis.toFixed(2)} × ${runtime.solConversionBasisMultiplier})`, timestamp: now }));
+      } else if (liveRegime !== 'RANGING' && liveRegime !== 'BULLISH_TREND') {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: wrong regime (${liveRegime})`, timestamp: now }));
+      } else if (timeSinceLast < cooldownMs) {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: cooldown active (${((cooldownMs - timeSinceLast) / 60_000).toFixed(1)}min remaining, ${baseCooldown}min base for ${liveRegime})`, timestamp: now }));
+      } else {
+        const scBalances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+        const walletSolValue = scBalances.sol * price;
+        const totalPortfolio = walletSolValue + scBalances.usdc;
+        const reserveFloor = getReserveState(db).floor;
+        const deployableUsdc = Math.max(0, scBalances.usdc - reserveFloor);
+        const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+        const positionSize = totalPortfolio * params.deployPct * (taDeployMultiplier ?? 1.0);
+        const targetUsdcForDeploy = positionSize * (params.usdcDepositPct ?? 0.35);
+
+        if (walletSolValue <= totalPortfolio * 0.20) {
+          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: SOL not heavy (${(walletSolValue / totalPortfolio * 100).toFixed(0)}% of portfolio, need >20%)`, timestamp: now }));
+        } else if (deployableUsdc >= targetUsdcForDeploy) {
+          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: USDC sufficient ($${deployableUsdc.toFixed(0)} deployable >= $${targetUsdcForDeploy.toFixed(0)} target)`, timestamp: now }));
+        } else {
+          const needed = targetUsdcForDeploy - deployableUsdc;
+          const maxFromSol = walletSolValue * 0.05;
+          // Dynamic cap: spread conversion across regime-specific number of cycles
+          const targetCycles: Record<string, number> = { RANGING: 6, BULLISH_TREND: 9, BEARISH_TREND: 18, EXTREME: 48 };
+          const cycles = targetCycles[liveRegime] ?? 18;
+          const dynamicCap = Math.min(Math.max(walletSolValue / cycles, 200), 5000);
+          const convertUsdc = Math.min(needed, maxFromSol, dynamicCap);
+          const convertSol = convertUsdc / price;
+
+          if (convertUsdc < 50) {
+            console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: amount too small ($${convertUsdc.toFixed(2)} < $50 min)`, timestamp: now }));
+          } else {
+            const sellAllowed = !liveExecutor!.shouldAllowSwap || liveExecutor!.shouldAllowSwap('sell_sol', convertSol, price);
+            if (!sellAllowed) {
+              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: shouldAllowSwap blocked (price $${price.toFixed(2)} vs basis $${basis.toFixed(2)})`, timestamp: now }));
+            } else {
+              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${dynamicCap.toFixed(0)} (idle $${walletSolValue.toFixed(0)}/${cycles}cyc), cooldown: ${baseCooldown}min`, timestamp: now }));
+              const swapResult = await liveExecutor!.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(convertSol * 1e9), `SolConvert: ${convertSol.toFixed(3)} SOL → USDC (margin ${((price / basis - 1) * 100).toFixed(1)}% above basis)`);
+              if (swapResult) {
+                reduceCostBasisHoldings(db, convertSol, 'sol_convert');
+                costBasisState = readCostBasis(db);
+                sirCostBasis = costBasisState.solCostBasis;
+                solConversionLastTs = now;
+                try { db.prepare('UPDATE bot_state SET sol_conversion_last_ts = ? WHERE id = 1').run(now); } catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `sol_conversion_ts update: ${String(e)}`, timestamp: Date.now() })); }
+                console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converted ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cooldown: ${runtime.solConversionCooldownMin}min`, timestamp: now }));
+              } else {
+                console.log(JSON.stringify({ level: 'warn', msg: '[SolConvert] Swap failed — skipping cycle', timestamp: now }));
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'error', msg: '[SolConvert] check failed', error: err instanceof Error ? err.message : String(err), timestamp: now }));
+    }
+  }
+
   // Rule 8: Idle wallet rebalance — maintain target SOL/USDC split per regime
   // Triggers on: regime change OR after position reopen OR periodic re-check every 30 min
   // The periodic re-check catches drift from auto-deploy consuming SOL disproportionately
+  // ── Smart sell: sell SOL when price reaches upper half of range for better P&L ──
+  if (smartSellPending && currentPos) {
+    const mid = (currentPos.priceLower + currentPos.priceUpper) / 2;
+    const smartSellMaxWait = 30 * 60_000; // 30 min max wait, then fall through to normal rebalance
+    const waitExpired = now - smartSellStartTime > smartSellMaxWait;
+    const priceAboveMid = price > mid;
+    const priceNearTop = price > mid + (currentPos.priceUpper - mid) * 0.5; // upper 25% of range
+
+    if (priceAboveMid || waitExpired) {
+      try {
+        const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+        const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
+        const idleUsdc = Math.max(0, balances.usdc - runtime.usdcReserve);
+        const idleTotal = idleSol * price + idleUsdc;
+        const targetSolPct = liveRegime === 'BEARISH_TREND' ? runtime.idleTargetSolPctBearish : runtime.idleTargetSolPctRanging;
+        const currentSolPct = idleTotal > 0 ? (idleSol * price) / idleTotal : 0;
+
+        if (currentSolPct > targetSolPct + 0.10 && idleSol > 0.01 && idleTotal > 50) {
+          const targetSolUsdc = idleTotal * targetSolPct;
+          const diffUsdc = idleSol * price - targetSolUsdc;
+          const solToSwap = Math.min(diffUsdc / price, idleSol);
+
+          if (solToSwap > 0.01) {
+            const pnlPerSol = price - smartSellEntryPrice;
+            const reason = waitExpired
+              ? `Smart sell (timeout): SOL→USDC after ${((now - smartSellStartTime) / 60000).toFixed(0)}min wait. Price $${price.toFixed(2)}${priceNearTop ? ' (near top ✅)' : ''} vs entry $${smartSellEntryPrice.toFixed(2)}`
+              : `Smart sell: SOL→USDC at $${price.toFixed(2)} (above mid $${mid.toFixed(2)}${priceNearTop ? ', near top ✅' : ''}). Entry $${smartSellEntryPrice.toFixed(2)}, est P&L ${pnlPerSol >= 0 ? '+' : ''}$${(pnlPerSol * solToSwap).toFixed(2)}`;
+
+            console.log(JSON.stringify({ level: 'info', msg: reason, solToSwap: solToSwap.toFixed(4), timestamp: now }));
+            const swapResult = await liveExecutor.doSwapPublic(
+              MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9), reason,
+            );
+            if (swapResult) {
+              smartSellPending = false;
+              lastIdleRebalanceTime = now;
+              lastIdleRebalanceRegime = liveRegime;
+              idleRebalancePending = false;
+              const balAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+              insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+                prox_lower: null, prox_upper: null, in_range: null,
+                decision: 'IDLE_REBALANCE', reasoning: `${reason}. Swapped ${swapResult.inputAmount.toFixed(4)} SOL → ${swapResult.outputAmount.toFixed(2)} USDC via ${swapResult.provider}. Wallet: ${balAfter.sol.toFixed(4)} SOL + ${balAfter.usdc.toFixed(2)} USDC.`,
+                params_json: JSON.stringify({ smartSell: true, entryPrice: smartSellEntryPrice, sellPrice: price, pnlPerSol }) });
+            }
+          } else {
+            smartSellPending = false; // nothing to sell
+          }
+        } else {
+          smartSellPending = false; // wallet already balanced
+        }
+      } catch (err) {
+        console.log(JSON.stringify({ level: 'error', msg: 'smart sell failed', error: err instanceof Error ? err.message : String(err), timestamp: now }));
+        if (waitExpired) smartSellPending = false; // give up after timeout + error
+      }
+    } else {
+      // Still waiting for price to reach upper half — log occasionally
+      if (now % 300000 < 120000) { // log every ~5 min
+        console.log(JSON.stringify({ level: 'info', msg: `Smart sell waiting: price $${price.toFixed(2)} < mid $${mid.toFixed(2)}. Waited ${((now - smartSellStartTime) / 60000).toFixed(0)}min. Will sell when price above mid or after 30min.`, timestamp: now }));
+      }
+    }
+  }
+
   const idleRebalanceCooldownMs = 30 * 60_000;
   const periodicRecheck = now - lastIdleRebalanceTime >= idleRebalanceCooldownMs;
   const idleRebalanceDue = lastIdleRebalanceRegime !== liveRegime || (idleRebalancePending && periodicRecheck) || periodicRecheck;
-  if (runtime.idleRebalanceEnabled && idleRebalanceDue) {
+  // Skip idle rebalance if smart sell is pending
+  if (runtime.idleRebalanceEnabled && idleRebalanceDue && !smartSellPending) {
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
       const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
@@ -1258,23 +1948,26 @@ async function runLiveCycle(price: number): Promise<void> {
           let swapDirection = '';
 
           if (deviation > 0) {
-            // Too much SOL → swap SOL to USDC
-            const solToSwap = Math.min(diffUsdc / price, idleSol);
-            if (solToSwap > 0.01 && diffUsdc > 5) {
-              // P&L awareness: only sell SOL at a loss if deviation is extreme (>25%)
-              const basis = sirCostBasis || price;
-              const wouldLose = price < basis;
-              const extremeDeviation = Math.abs(deviation) > 0.25;
-              if (wouldLose && !extremeDeviation) {
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: selling SOL at $${price.toFixed(2)} below cost basis $${basis.toFixed(2)} (loss $${((basis - price) * solToSwap).toFixed(2)}). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < 25% threshold. Waiting for better price.`, timestamp: now }));
-              } else {
-                if (wouldLose) console.log(JSON.stringify({ level: 'warn', msg: `Idle rebalance: selling SOL at loss ($${price.toFixed(2)} vs basis $${basis.toFixed(2)}) — extreme deviation ${(Math.abs(deviation) * 100).toFixed(0)}% forces rebalance`, timestamp: now }));
-                swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping ${solToSwap.toFixed(4)} SOL ($${(solToSwap * price).toFixed(2)})${!wouldLose ? ' ✅ profitable (price > basis)' : ''}`, timestamp: now }));
+            // Smart rebalance: sell only when price is near or above cost basis
+            const basis = sirCostBasis || price;
+            const lossPerSol = Math.max(0, basis - price);
+            const idealSolToSwap = Math.min(diffUsdc / price, idleSol);
+
+            if (price < basis) {
+              // P&L guard: BLOCKED — price below basis
+              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: SOL sell BLOCKED — price $${price.toFixed(2)} below basis $${basis.toFixed(2)}. Waiting.`, timestamp: now }));
+              lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
+            } else {
+              // Price >= basis — sell full amount (profitable)
+              if (idealSolToSwap >= 0.1) {
+                swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% → ${(targetSolPct * 100).toFixed(0)}%)`;
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: selling ${idealSolToSwap.toFixed(2)} SOL — price $${price.toFixed(2)} >= basis $${basis.toFixed(2)} (profitable).`, timestamp: now }));
                 swapResult = await liveExecutor.doSwapPublic(
-                  MINTS.SOL, MINTS.USDC, Math.floor(solToSwap * 1e9),
-                  `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
+                  MINTS.SOL, MINTS.USDC, Math.floor(idealSolToSwap * 1e9),
+                  `Idle rebalance (${liveRegime}): ${swapDirection} — above basis`,
                 );
+              } else {
+                lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
               }
             }
           } else {
@@ -1366,14 +2059,20 @@ async function runLiveCycle(price: number): Promise<void> {
         } else {
           await liveExecutor.doSwapPublic(MINTS.USDC, MINTS.SOL, Math.floor(sirResult.amountUsdc * 1e6), `SIR: buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
         }
-        sirCostBasis = pnlCalc.newBasis;
+        // COST_BASIS: tracked — SIR USDC→SOL buy updates weighted average cost basis
+        if (sirResult.direction === 'buy_sol') {
+          costBasisState = updateCostBasis(db, solAmount, price, `SIR buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
+          sirCostBasis = costBasisState.solCostBasis;
+        } else {
+          sirCostBasis = pnlCalc.newBasis;
+        }
         lastSirSwapTime = now;
 
         // Track in swap ledger
         insertSwapLedger(db, {
           timestamp: now, direction: sirResult.direction, sol_amount: solAmount,
           usdc_amount: sirResult.amountUsdc, price, reason: `SIR: ${sirResult.direction} to target ${(sirTarget * 100).toFixed(0)}%`,
-          pnl_usdc: pnlCalc.pnlUsdc, cost_basis_before: basisBefore, cost_basis_after: pnlCalc.newBasis,
+          pnl_usdc: pnlCalc.pnlUsdc, cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
         });
         if (pnlCalc.pnlUsdc != null) {
           console.log(JSON.stringify({ level: 'info', msg: `SIR swap P&L: ${pnlCalc.pnlUsdc >= 0 ? '+' : ''}$${pnlCalc.pnlUsdc.toFixed(2)} (sold at $${price.toFixed(2)}, basis $${basisBefore.toFixed(2)})`, timestamp: now }));
@@ -1389,6 +2088,7 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   liveBotState = 'ACTIVE';
+  positionChangedThisCycle = true;
 }
 
 async function liveOpenPosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
@@ -1457,6 +2157,18 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
       prox_lower: null, prox_upper: null, in_range: null,
       decision: eventType, reasoning: `${logic}\n${execution}`,
       params_json: JSON.stringify(params) });
+
+    // Smart sell DISABLED — selling SOL always loses money in downtrends.
+    // The 65% downside exit threshold prevents SOL-heavy wallets at the root.
+    if (false) { // DISABLED
+      const afterSolVal = balancesAfter.sol * price;
+      const afterTotal = afterSolVal + balancesAfter.usdc;
+      const afterSolPct = afterTotal > 0 ? afterSolVal / afterTotal : 0;
+      smartSellPending = true;
+      smartSellEntryPrice = price;
+      smartSellStartTime = Date.now();
+      console.log(JSON.stringify({ level: 'info', msg: `Smart sell activated: wallet ${(afterSolPct*100).toFixed(0)}% SOL after open. Will sell SOL when price reaches upper half of range (above $${((range.priceLower + range.priceUpper) / 2).toFixed(2)} midpoint). Entry: $${price.toFixed(2)}.`, timestamp: Date.now() }));
+    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
     consecutiveTxFailures++;
@@ -1469,10 +2181,65 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 async function liveClosePosition(price: number, eventType: EventType, triggerReason?: string): Promise<boolean> {
   if (!liveExecutor) return false;
   try {
+    // Pre-close harvest: collect fees before closing to ensure they route through reserve
+    try {
+      const pendingFees = await liveExecutor.getPendingFees();
+      const pendingFeesUsdc = pendingFees ? pendingFees.feeTotalUsdc : 0;
+      if (pendingFeesUsdc >= 0.50) {
+        console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Collecting $${pendingFeesUsdc.toFixed(2)} pending fees before close`, timestamp: Date.now() }));
+        const fees = await liveExecutor.collectFees();
+        if (fees && (fees.feeSol > 0.001 || fees.feeUsdc > 0.01)) {
+          liveCumFeesSol += fees.feeSol;
+          liveCumFeesUsdc += fees.feeUsdc;
+          liveLastHarvestTime = Date.now();
+          // Convert SOL fee income to USDC per regime policy.
+          // NOTE: This converts LP fee income (zero cost basis).
+          // shouldAllowSwap is intentionally NOT called here —
+          // fee SOL sells are always profitable regardless of price vs basis.
+          const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+          if (params.harvestSolConvertPct > 0 && fees.feeSol > 0.0001) {
+            if (price < 50) {
+              console.log(JSON.stringify({ level: 'warn', msg: `[PreCloseHarvest] Price $${price.toFixed(2)} below $50 sanity check — skipping SOL conversion`, timestamp: Date.now() }));
+            } else {
+              await liveExecutor.convertHarvestedSol(fees.feeSol, params.harvestSolConvertPct);
+            }
+          }
+          // Route USDC to reserve
+          if (fees.feeUsdc > 0) {
+            const reserveSnap = getReserveState(db);
+            const split = routeHarvest(db, fees.feeUsdc);
+            const newReserve = reserveSnap.current + split.toReserve;
+            updateReserve(db, newReserve);
+            console.log(JSON.stringify({ level: 'info', msg: `[Reserve] Pre-close harvest routed: $${split.toReserve.toFixed(4)} to reserve, $${split.toCompound.toFixed(4)} to compound`, timestamp: Date.now() }));
+          }
+          console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Collected ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(4)} USDC ($${pendingFeesUsdc.toFixed(2)})`, timestamp: Date.now() }));
+        } else {
+          console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Fees too small to harvest ($${pendingFeesUsdc.toFixed(2)}) — skipping conversion`, timestamp: Date.now() }));
+        }
+      } else {
+        console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Skipped — pending fees $${pendingFeesUsdc.toFixed(2)} below $0.50 threshold`, timestamp: Date.now() }));
+      }
+    } catch (e) {
+      // CRITICAL: harvest failure must never block the close
+      console.log(JSON.stringify({ level: 'warn', msg: `[PreCloseHarvest] Failed — proceeding with close anyway. Error: ${e instanceof Error ? e.message : String(e)}`, timestamp: Date.now() }));
+    }
+
     // Capture position ID before close (closePosition clears it)
     const closingPositionId = liveExecutor.getCurrentPosition()?.positionMint?.toBase58() ?? undefined;
     const balancesBefore = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
     const result = await liveExecutor.closePosition();
+
+    positionChangedThisCycle = true;
+    // IMMEDIATELY clear position in DB after successful on-chain close
+    // This prevents ghost positions if any subsequent logging/state update fails
+    upsertBotState(db, {
+      state: 'IDLE', regime: liveRegime, position_json: null,
+      updated_at: Date.now(),
+      cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0,
+      pullback_active: 0, pullback_peak: 0, pullback_start: 0, ...costBasisFields(),
+    });
+
     const balancesAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
 
     // Track fees and IL from the enriched close result
@@ -1483,6 +2250,13 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     liveRealizedIl += result.ilAtClose;
     liveRebalancesThisHour++;
     dailyRebalanceCount++;
+
+    // COST_BASIS: tracked — SOL returned from LP close is a new SOL acquisition at current price
+    const solReturnedFromClose = balancesAfter.sol - balancesBefore.sol;
+    if (solReturnedFromClose > 0.0001) {
+      costBasisState = updateCostBasis(db, solReturnedFromClose, price, `LP close (${eventType})`);
+      sirCostBasis = costBasisState.solCostBasis;
+    }
 
     const why = triggerReason ?? `Position closed (${eventType}).`;
     const posInfo = ` Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}, close at $${result.closePrice.toFixed(2)}.`;
@@ -1535,7 +2309,42 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
     liveLastRegimeCheck = Date.now(); // reset timer since we just checked
   }
 
+  // Gate 1: ReserveGate
+  const regimeParamsCR = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+  const balancesCR = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+  const positionSizeCR = (balancesCR.sol * price + balancesCR.usdc) * regimeParamsCR.deployPct * (taDeployMultiplier ?? 1.0);
+  const usdcNeededCR = positionSizeCR * (regimeParamsCR.usdcDepositPct ?? 0.35);
+  const gateCR = checkDeployGate(db, usdcNeededCR, balancesCR.usdc, balancesCR.sol * price + balancesCR.usdc);
+  if (!gateCR.allowed) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateCR.reason}. Shortfall: $${gateCR.shortfall.toFixed(2)}`, timestamp: Date.now() }));
+    return;
+  }
+  console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateCR.reason}`, timestamp: Date.now() }));
+  // Gate 2: BasisGate
+  const basisStateCR = readCostBasis(db);
+  const basisThresholdCR = regimeParamsCR.basisGateThreshold ?? 0.999;
+  const basisThresholdPriceCR = basisStateCR.solCostBasis * basisThresholdCR;
+  if (basisStateCR.solCostBasis > 0 && price < basisThresholdPriceCR) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceCR.toFixed(2)} (basis $${basisStateCR.solCostBasis.toFixed(2)} × ${basisThresholdCR})`, timestamp: Date.now() }));
+    return;
+  }
+  console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceCR.toFixed(2)} (basis $${basisStateCR.solCostBasis.toFixed(2)} × ${basisThresholdCR})`, timestamp: Date.now() }));
+  // Gate 3: ChurnGuard
+  const lastExitCR = db.prepare("SELECT timestamp, decision, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as any;
+  if (lastExitCR) {
+    const exitAgeMinCR = (Date.now() - lastExitCR.timestamp) / 60000;
+    if (exitAgeMinCR < 15 && price < lastExitCR.price) {
+      console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Blocked: downside exit ${exitAgeMinCR.toFixed(1)}min ago, price $${price.toFixed(2)} still below exit $${lastExitCR.price.toFixed(2)}. Cooldown: ${(15 - exitAgeMinCR).toFixed(1)}min remaining`, timestamp: Date.now() }));
+      return;
+    }
+    if (price < lastExitCR.price && exitAgeMinCR < 20) {
+      console.log(JSON.stringify({ level: 'warn', msg: `[ChurnGuard] Deploy blocked: price $${price.toFixed(2)} below previous exit $${lastExitCR.price.toFixed(2)}. Waiting for recovery (expires in ${(20 - exitAgeMinCR).toFixed(0)}min).`, timestamp: Date.now() }));
+      return;
+    }
+  }
+  console.log(JSON.stringify({ level: 'info', msg: '[ChurnGuard] Passed', timestamp: Date.now() }));
   await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after ${eventType}. Previous position closed due to: ${triggerReason ?? eventType}.`);
+  await reconcileReserveAfterOpen('CR');
   idleRebalancePending = true; // trigger idle rebalance check on next cycle (with cooldown)
 
   // Save position to DB immediately — prevents orphan recovery from killing
@@ -1547,7 +2356,7 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
       position_json: JSON.stringify({ ...newPos, positionMint: newPos.positionMint.toBase58(), positionAddress: newPos.positionAddress.toBase58() }),
       updated_at: Date.now(),
       cum_fees_sol: liveCumFeesSol, cum_fees_usdc: liveCumFeesUsdc, realized_il: liveRealizedIl,
-      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(),
+      tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...pullbackFields(), ...costBasisFields(),
     });
   }
 }

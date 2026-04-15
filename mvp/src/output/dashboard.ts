@@ -3,12 +3,13 @@ import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
 import type { BotState, RebalanceEvent } from '../types.js';
-import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries } from '../db/sqlite.js';
+import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries, getRegimeSnapshots } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
 
 const TZ = 'Europe/Berlin';
+
 
 interface OnChainTx {
   signature: string;
@@ -91,6 +92,9 @@ export interface LiveData {
   cumHarvestedFeesSol: number;
   cumHarvestedFeesUsdc: number;
   totalFeesUsdc: number;
+  solCostBasis: number;
+  solTracked: number;
+  costBasisLastUpdated: number;
   entryPrice: number | null;
   entryTime: number | null;
   entrySol: number | null;
@@ -104,6 +108,16 @@ export interface LiveData {
   estAprPct: number;
   actual24hFeesUsdc: number;
   actual24hAprPct: number;
+  reserveCurrent: number;
+  reserveFloor: number;
+  reserveState: string;
+  reserveLastUpdated: number;
+  positionRegime: string | null;
+  churnGuardActive: boolean;
+  churnGuardReason: string | null;
+  churnGuardExpiresMin: number | null;
+  churnGuardLastExitPrice: number | null;
+  churnGuardLastExitAgeMin: number | null;
   regime: string;
   botState: BotState;
   liveEvents: RebalanceEvent[];
@@ -151,6 +165,107 @@ export function startDashboard(port: number): DashboardServer {
   const app = express();
   app.set('etag', false);
   let server: Server;
+
+  // --- No-auth routes (before auth middleware) ---
+  app.get('/intelligence', async (_req, res) => {
+    const { renderIntelligenceHtml } = await import('./intelligence-page.js');
+    res.type('html').send(renderIntelligenceHtml());
+  });
+  app.get('/api/intelligence', (req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const from = parseInt(req.query?.from as string) || 0;
+      const to = parseInt(req.query?.to as string) || Date.now();
+      // Daily fees from daily_summary
+      const dailyFees = dbRef.prepare("SELECT date, fees_earned_usdc as fees, total_usdc, regime, in_range_pct FROM daily_summary ORDER BY date ASC").all() as any[];
+      // Positions from rebalance_events (open+close pairs)
+      const events = dbRef.prepare("SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, regime, sol_before, sol_after, usdc_before, usdc_after FROM rebalance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC").all(from || 0, to) as any[];
+      const positions: any[] = [];
+      let lastOpen: any = null;
+      for (const e of events) {
+        if (e.event_type === 'POSITION_OPENED' || e.event_type === 'PULLBACK_REENTRY') {
+          lastOpen = { entryTime: e.timestamp, entryPrice: e.price, regime: e.regime };
+        } else if (['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type) && lastOpen) {
+          positions.push({
+            entryTime: lastOpen.entryTime, exitTime: e.timestamp, entryPrice: lastOpen.entryPrice, exitPrice: e.price,
+            durationMin: Math.round((e.timestamp - lastOpen.entryTime) / 60000),
+            feesUsdc: (e.fee_sol || 0) * e.price + (e.fee_usdc || 0), feesSol: e.fee_sol || 0,
+            exitReason: e.event_type, regime: lastOpen.regime, il: e.il_at_close || 0,
+          });
+          lastOpen = null;
+        }
+      }
+      // Regime history from regime_snapshots (sampled)
+      const regimeHistory = dbRef.prepare('SELECT ts, regime, price FROM regime_snapshots WHERE ts >= ? AND ts <= ? ORDER BY ts ASC').all(from || 0, to) as any[];
+      // Gate fires from regime_snapshots
+      const gateRaw = dbRef.prepare("SELECT date(ts/1000,'unixepoch') as date, reserve_gate, basis_gate, churn_guard FROM regime_snapshots WHERE ts >= ? AND ts <= ?").all(from || 0, to) as any[];
+      const gateByDay: Record<string, any> = {};
+      for (const g of gateRaw) {
+        if (!gateByDay[g.date]) gateByDay[g.date] = { date: g.date, reserveBlock: 0, basisBlock: 0, churnBlock: 0, total: 0 };
+        gateByDay[g.date].total++;
+        if (g.reserve_gate === 'BLOCK') gateByDay[g.date].reserveBlock++;
+        if (g.basis_gate === 'BLOCK') gateByDay[g.date].basisBlock++;
+        if (g.churn_guard === 'BLOCK') gateByDay[g.date].churnBlock++;
+      }
+      // Price + cost basis history
+      const priceHistory = dbRef.prepare('SELECT ts, price FROM regime_snapshots WHERE ts >= ? AND ts <= ? ORDER BY ts ASC').all(from || 0, to) as any[];
+      const costBasis = (dbRef.prepare('SELECT sol_cost_basis FROM bot_state WHERE id=1').get() as any)?.sol_cost_basis || 0;
+      // Gas from swap_ledger
+      const gasRaw = dbRef.prepare("SELECT date(timestamp/1000,'unixepoch') as date, SUM(fee_lamports) as gas_lamports, COUNT(*) as swaps FROM swap_ledger WHERE timestamp >= ? AND timestamp <= ? GROUP BY date").all(from || 0, to) as any[];
+      const gasMap: Record<string, number> = {};
+      for (const g of gasRaw) { const price = priceHistory.length > 0 ? priceHistory[priceHistory.length-1].price : 84; gasMap[g.date] = (g.gas_lamports || 0) / 1e9 * price; }
+      // Enrich daily fees with gas
+      const dailyFeesEnriched = dailyFees.map((d: any) => ({ ...d, gas: gasMap[d.date] || 0, net: d.fees - (gasMap[d.date] || 0) }));
+      // Summary — use daily_summary as authoritative fee source (same as arcade)
+      const feesFromSummary = (dbRef.prepare('SELECT COALESCE(SUM(fees_earned_usdc), 0) as total FROM daily_summary').get() as any)?.total ?? 0;
+      const latestPrice = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1].price : 84;
+      const pendingFees = currentLive ? currentLive.pendingFeesTotal : 0;
+      const totalFees = feesFromSummary + pendingFees;
+      const totalGas = Object.values(gasMap).reduce((s: number, g: any) => s + g, 0);
+      const avgDuration = positions.length > 0 ? Math.round(positions.reduce((s: number, p: any) => s + p.durationMin, 0) / positions.length) : 0;
+      res.json({
+        dailyFees: dailyFeesEnriched, positions, regimeHistory: regimeHistory.filter((_: any, i: number) => i % 5 === 0),
+        priceHistory: priceHistory.filter((_: any, i: number) => i % 5 === 0).map((p: any) => ({ ...p, costBasis })),
+        gateFires: Object.values(gateByDay),
+        summary: { totalFees: Math.round(totalFees * 100) / 100, totalGas: Math.round(totalGas * 100) / 100, totalPositions: positions.length, avgDuration, avgApr7d: 0, avgApr30d: 0 },
+      });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+  app.get('/arcade', (_req, res) => {
+    res.type('html').send(renderArcadeHtml());
+  });
+  app.get('/api/arcade-stats', (_req, res) => {
+    if (!dbRef) { res.json({}); return; }
+    try {
+      const live = currentLive;
+      const price = live?.solPrice ?? 0;
+      const portfolioNow = live?.totalValueWithPosition ?? 0;
+      const snap4h = dbRef.prepare('SELECT total_value FROM portfolio_snapshots WHERE ts < ? ORDER BY ts DESC LIMIT 1').get(Date.now() - 4 * 3600_000) as { total_value: number } | undefined;
+      const portfolio4hAgo = snap4h?.total_value ?? portfolioNow;
+      const change = portfolioNow - portfolio4hAgo;
+      const changePct = portfolio4hAgo > 0 ? (change / portfolio4hAgo) * 100 : 0;
+      const feesAllRow = dbRef.prepare('SELECT COALESCE(SUM(fees_earned_usdc), 0) as total FROM daily_summary').get() as { total: number };
+      const feesAllTime = feesAllRow?.total ?? 0;
+      const positionActive = live?.botState === 'ACTIVE';
+      const pendingFees = live ? live.pendingFeesTotal : 0;
+      const fees4hClose = dbRef.prepare('SELECT COALESCE(SUM(fee_usdc),0) + COALESCE(SUM(fee_sol),0) * ? as total FROM rebalance_events WHERE timestamp > ? AND (fee_usdc > 0 OR fee_sol > 0)').get(price, Date.now() - 4 * 3600_000) as { total: number };
+      const fees4h = (fees4hClose?.total ?? 0) + (positionActive ? pendingFees : 0);
+      const feesPrev4hRow = dbRef.prepare('SELECT COALESCE(SUM(fee_usdc),0) + COALESCE(SUM(fee_sol),0) * ? as total FROM rebalance_events WHERE timestamp BETWEEN ? AND ? AND (fee_usdc > 0 OR fee_sol > 0)').get(price, Date.now() - 8 * 3600_000, Date.now() - 4 * 3600_000) as { total: number };
+      const feesPrev4h = feesPrev4hRow?.total ?? 0;
+      const feesVariance = feesPrev4h > 0 ? ((fees4h - feesPrev4h) / feesPrev4h) * 100 : null;
+      const posCount = dbRef.prepare("SELECT COUNT(*) as c FROM rebalance_events WHERE event_type IN ('POSITION_OPENED','PULLBACK_REENTRY')").get() as { c: number };
+      const uptimeDays = parseFloat(((Date.now() - startTime) / 86400_000).toFixed(1));
+      res.json({
+        portfolioNow, portfolio4hAgo, portfolioChange: change, portfolioChangePct: changePct,
+        feesAllTime, fees4h, feesPrev4h, feesVariance,
+        positionsAllTime: posCount?.c ?? 0,
+        status: live?.botState === 'ACTIVE' ? 'ACTIVE' : 'IDLE',
+        regime: live?.regime ?? 'RANGING',
+        uptimeDays,
+        lastUpdated: Date.now(),
+      });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
 
   // --- Basic auth middleware ---
   const dashUser = process.env.DASHBOARD_USER;
@@ -275,6 +390,7 @@ export function startDashboard(port: number): DashboardServer {
   });
 
   // Hourly fees for a given date + events list
+  // Hourly fees for a given date (all dates in CET)
   app.get('/api/hourly-fees', (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not available' }); return; }
     const date = (_req.query as any).date; // YYYY-MM-DD format
@@ -285,44 +401,46 @@ export function startDashboard(port: number): DashboardServer {
     const dateMid = new Date(date + 'T12:00:00Z');
     const fetchFrom = dateMid.getTime() - 36 * 3600000; // 36h before noon = covers prev day
     const fetchTo = dateMid.getTime() + 36 * 3600000;   // 36h after noon = covers next day
-    const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range FROM live_snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC').all(fetchFrom, fetchTo) as any[];
-    const daySnaps = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
+    const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range, position_mint FROM live_snapshots WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC').all(fetchFrom, fetchTo) as any[];
+    const daySnaps = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: TZ }) === date);
 
-    // Build hourly fees by summing ONLY positive deltas between consecutive snapshots.
-    // This avoids counting drops from rebalances (when pending fees reset) as negative.
+    // Get daily summaries (needed for hourly fee scaling)
+    const dailySummaries = dbRef.prepare('SELECT date, fees_earned_usdc FROM daily_summary ORDER BY date ASC').all() as any[];
+    const dates = dailySummaries.map((r: any) => r.date);
+
     const hours: Record<number, { fees: number; inRange: number; total: number }> = {};
     for (let h = 0; h < 24; h++) hours[h] = { fees: 0, inRange: 0, total: 0 };
 
-    // Compute fee deltas using SOL and USDC components separately to avoid
-    // price-change inflation on cumulative SOL fees (which are all-time).
-    // Convert SOL delta to USD using the current snapshot's price.
-    const pendingSol = (s: any) => {
-      const p = (s.pending_fees_sol || 0);
-      return (p * s.price > 1000) ? 0 : p; // skip bogus values
+    // Track fee growth using total fees (cum + pending) but scale hourly proportionally
+    // to match the authoritative daily_summary total. This avoids phantom spikes from
+    // position close/reopen where the same fees get double-counted.
+    // Step 1: compute raw hourly deltas
+    const totalFn = (s: any) => {
+      const pSol = (s.pending_fees_sol || 0);
+      const pUsdc = (s.pending_fees_usdc || 0);
+      const skip = pSol * s.price > 1000; // skip bogus pending values
+      return (s.cum_fees_sol || 0) * s.price + (s.cum_fees_usdc || 0) + (skip ? 0 : pSol * s.price + pUsdc);
     };
-    const pendingUsdc = (s: any) => {
-      const p = (s.pending_fees_usdc || 0);
-      return ((s.pending_fees_sol || 0) * s.price > 1000) ? 0 : p;
-    };
-    const solFees = (s: any) => (s.cum_fees_sol || 0) + pendingSol(s);
-    const usdcFees = (s: any) => (s.cum_fees_usdc || 0) + pendingUsdc(s);
-
     for (let i = 0; i < daySnaps.length; i++) {
       const s = daySnaps[i] as any;
       const d = new Date(s.timestamp);
-      const hStr = d.toLocaleString('en-US', { timeZone: 'Europe/Berlin', hour: 'numeric', hour12: false });
+      const hStr = d.toLocaleString('en-US', { timeZone: TZ, hour: 'numeric', hour12: false });
       const h = parseInt(hStr) % 24;
       if (s.in_range) hours[h].inRange++;
       hours[h].total++;
-      // Sum positive fee deltas within the hour (skip drops from rebalances)
       if (i > 0) {
         const prev = daySnaps[i - 1];
-        const deltaSol = solFees(s) - solFees(prev);
-        const deltaUsdc = usdcFees(s) - usdcFees(prev);
-        // Convert SOL delta at current price, combine with USDC delta
-        const delta = deltaSol * s.price + deltaUsdc;
-        if (delta > 0 && delta < 50) hours[h].fees += delta;
+        const delta = totalFn(s) - totalFn(prev);
+        if (delta > 0 && delta < 20) hours[h].fees += delta;
       }
+    }
+    // Step 2: scale hourly values proportionally to match daily_summary total
+    const rawSum = Object.values(hours).reduce((s: number, h: any) => s + h.fees, 0);
+    const summaryForScale = dailySummaries.find((r: any) => r.date === date);
+    const authTotal = summaryForScale ? summaryForScale.fees_earned_usdc : rawSum;
+    const scale = rawSum > 0 ? authTotal / rawSum : 1;
+    if (Math.abs(scale - 1) > 0.05) { // only scale if >5% deviation
+      for (let h = 0; h < 24; h++) hours[h].fees *= scale;
     }
 
     const hourlyData: Array<{ hour: number; fees: number; cumulative: number; inRangePct: number }> = [];
@@ -335,23 +453,13 @@ export function startDashboard(port: number): DashboardServer {
     }
 
     // Get events for this day
-    // Compute day boundaries in Berlin timezone (handles CET/CEST correctly)
     const dayMid = new Date(date + 'T12:00:00Z');
-    const berlinDate = dayMid.toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
-    // Find first and last snapshot of the target date to determine boundaries
-    const dayBounds = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }) === date);
+    const dayBounds = allSnaps.filter((s: any) => new Date(s.timestamp).toLocaleDateString('en-CA', { timeZone: TZ }) === date);
     const dayStart = dayBounds.length > 0 ? dayBounds[0].timestamp - 60000 : dayMid.getTime() - 12 * 3600000;
     const dayEnd = dayBounds.length > 0 ? dayBounds[dayBounds.length - 1].timestamp + 60000 : dayMid.getTime() + 12 * 3600000;
     const events = dbRef.prepare(`SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, note
       FROM rebalance_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC`).all(dayStart, dayEnd) as any[];
 
-    // Available dates (from daily_summary table — efficient, no full scan)
-    const dailySummaries = dbRef.prepare('SELECT date, fees_earned_usdc FROM daily_summary ORDER BY date ASC').all() as any[];
-    const dates = dailySummaries.map((r: any) => r.date);
-
-    // Use daily_summary.fees_earned_usdc for the day total (accurate, not affected by
-    // price fluctuations on cumulative SOL fees). Fall back to dayCum for today if
-    // daily_summary hasn't been written yet.
     const summaryRow = dailySummaries.find((r: any) => r.date === date);
     const dayTotal = summaryRow ? summaryRow.fees_earned_usdc : dayCum;
 
@@ -426,10 +534,7 @@ export function startDashboard(port: number): DashboardServer {
     res.type('html').send(renderStrategyHtml());
   });
 
-  // Arcade page
-  app.get('/arcade', (_req, res) => {
-    res.type('html').send(renderArcadeHtml());
-  });
+  // Arcade page — moved before auth middleware (no-auth)
 
   // Investors page
   app.get('/investors', async (_req, res) => {
@@ -475,7 +580,10 @@ export function startDashboard(port: number): DashboardServer {
       const days = parseInt((_req.query as any).days ?? '7');
       const since = Date.now() - days * 86400000;
 
-      const snaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range, regime, position_value, sol_balance, usdc_balance, position_sol, position_usdc, total_with_position FROM live_snapshots WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
+      // Downsample to max 500 snapshots to keep response under 500KB for mobile
+      const allSnaps = dbRef.prepare('SELECT timestamp, price, pending_fees_sol, pending_fees_usdc, cum_fees_sol, cum_fees_usdc, in_range, regime, position_value, sol_balance, usdc_balance, position_sol, position_usdc, total_with_position FROM live_snapshots WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
+      const step = Math.max(1, Math.floor(allSnaps.length / 500));
+      const snaps = step === 1 ? allSnaps : allSnaps.filter((_: any, i: number) => i % step === 0 || i === allSnaps.length - 1);
 
       const events = dbRef.prepare('SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, sol_before, usdc_before, sol_after, usdc_after, note, regime FROM rebalance_events WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
 
@@ -506,7 +614,7 @@ export function startDashboard(port: number): DashboardServer {
 
       if (snaps.length < 10) { res.json({ error: 'Not enough data yet', snaps: snaps.length }); return; }
 
-      const TZ = 'Europe/Berlin';
+      // TZ already set by middleware from browser cookie
       const totalHours = (snaps[snaps.length-1].timestamp - snaps[0].timestamp) / 3600000;
 
       // Fee rate by regime
@@ -597,10 +705,23 @@ export function startDashboard(port: number): DashboardServer {
       // Daily summaries for trend
       const dailyFeesArr = summaries.map((s: any) => ({ date: s.date, fees: s.fees_earned_usdc || 0, total: s.total_usdc, regime: s.regime }));
 
+      // SOL/USDC holdings and rolling averages
+      const solHeld = latestSnap.sol_balance + (latestSnap.position_sol || 0);
+      const usdcHeld = latestSnap.usdc_balance + (latestSnap.position_usdc || 0);
+      const now = Date.now();
+      const fees7d = summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 7 * 86400_000).reduce((a: number, s: any) => a + (s.fees_earned_usdc || 0), 0);
+      const fees30d = summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 30 * 86400_000).reduce((a: number, s: any) => a + (s.fees_earned_usdc || 0), 0);
+      const days7 = Math.min(7, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 7 * 86400_000).length || 1);
+      const days30 = Math.min(30, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 30 * 86400_000).length || 1);
+
       res.json({
         totalHours,
         currentCapital: Math.round(currentCapital),
         currentPrice: latestSnap.price,
+        solHeld: parseFloat(solHeld.toFixed(4)),
+        usdcHeld: parseFloat(usdcHeld.toFixed(2)),
+        avgDailyFees7d: parseFloat((fees7d / days7).toFixed(2)),
+        avgDailyFees30d: parseFloat((fees30d / days30).toFixed(2)),
         inRangePct: Math.round(inRangePct * 10) / 10,
         regimeFeeRates: Object.fromEntries(Object.entries(regimeFees).map(([r, d]) => [r, { rate: d.hours > 0 ? d.fees / d.hours : 0, hours: d.hours, irPct: d.total > 0 ? d.inRange / d.total * 100 : 0 }])),
         regimeDistribution: regimeDist,
@@ -677,10 +798,24 @@ export function startDashboard(port: number): DashboardServer {
         return;
       }
       if (!dbRef) { res.status(500).json({ error: 'DB not initialized' }); return; }
-      setConfigBatch(dbRef, entries);
-      applyConfigFromDb(entries);
-      console.log(JSON.stringify({ level: 'info', msg: `Config updated: ${Object.keys(entries).length} keys`, keys: Object.keys(entries), timestamp: Date.now() }));
-      res.json({ success: true, updated: Object.keys(entries).length });
+      // Whitelist: only accept keys that exist in the current exported config
+      const validKeys = new Set(Object.keys(exportConfig()));
+      const filtered: Record<string, string> = {};
+      const rejected: string[] = [];
+      for (const [k, v] of Object.entries(entries)) {
+        if (validKeys.has(k)) { filtered[k] = v; } else { rejected.push(k); }
+      }
+      if (rejected.length > 0) {
+        console.log(JSON.stringify({ level: 'warn', msg: `Config rejected unknown keys: ${rejected.join(', ')}`, timestamp: Date.now() }));
+      }
+      if (Object.keys(filtered).length === 0) {
+        res.status(400).json({ error: 'No valid config keys provided', rejected });
+        return;
+      }
+      setConfigBatch(dbRef, filtered);
+      applyConfigFromDb(filtered);
+      console.log(JSON.stringify({ level: 'info', msg: `Config updated: ${Object.keys(filtered).length} keys`, keys: Object.keys(filtered), timestamp: Date.now() }));
+      res.json({ success: true, updated: Object.keys(filtered).length, rejected });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -905,7 +1040,7 @@ export function startDashboard(port: number): DashboardServer {
     await fetchPoolStats();
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
-    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled));
+    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled, solConversionEnabled));
   });
 
   // Bot control APIs
@@ -1007,6 +1142,135 @@ export function startDashboard(port: number): DashboardServer {
 
   app.get('/api/auto-deploy-status', (_req, res) => {
     res.json({ autoDeployEnabled });
+  });
+
+  // SOL Conversion toggle
+  let solConversionEnabled = runtime.solConversionEnabled;
+  app.post('/api/toggle-sol-conversion', (_req, res) => {
+    solConversionEnabled = !solConversionEnabled;
+    if (dbRef) {
+      try {
+        dbRef.prepare('UPDATE bot_state SET sol_conversion_enabled = ? WHERE id = 1').run(solConversionEnabled ? 1 : 0);
+        // Also write to config table for runtime reload
+        dbRef.prepare("INSERT OR REPLACE INTO config (key, value, updated_at) VALUES ('solConversionEnabled', ?, ?)").run(solConversionEnabled ? '1' : '0', Date.now());
+      } catch {}
+    }
+    res.json({ success: true, solConversionEnabled, msg: solConversionEnabled ? 'SOL Conversion enabled.' : 'SOL Conversion disabled.' });
+  });
+  app.get('/api/sol-conversion-status', (_req, res) => {
+    let lastTs = 0;
+    if (dbRef) {
+      try { const r = dbRef.prepare('SELECT sol_conversion_last_ts FROM bot_state WHERE id = 1').get() as any; lastTs = r?.sol_conversion_last_ts ?? 0; } catch {}
+    }
+    const cooldownMs = 15 * 60_000;
+    const cooldownRemaining = lastTs > 0 ? Math.max(0, (cooldownMs - (Date.now() - lastTs)) / 60_000) : 0;
+    const lastAgo = lastTs > 0 ? `${((Date.now() - lastTs) / 60_000).toFixed(0)}min ago` : 'never';
+    res.json({ enabled: solConversionEnabled, lastConversionTs: lastTs, cooldownRemainingMin: Math.round(cooldownRemaining), lastConversionAgo: lastAgo });
+  });
+
+  // Regime snapshots API
+  app.get('/api/regime-snapshots', (req, res) => {
+    if (!dbRef) { res.json([]); return; }
+    const limit = parseInt(req.query.limit as string) || 100;
+    const since = req.query.since ? parseInt(req.query.since as string) : undefined;
+    const regime = req.query.regime as string | undefined;
+    const changed = req.query.changed === '1';
+    res.json(getRegimeSnapshots(dbRef, { limit, since, regime, changed }));
+  });
+
+  // Regime intelligence API
+  app.get('/api/regime-intelligence', (_req, res) => {
+    if (!dbRef) { res.json(null); return; }
+    try {
+      const snap = getRegimeSnapshots(dbRef, { limit: 1 })[0];
+      if (!snap) { res.json(null); return; }
+      const emaGapPct = snap.ema9 && snap.sma20 && snap.sma20 > 0 ? ((snap.ema9 - snap.sma20) / snap.sma20 * 100) : 0;
+      const regimeParams = runtime.regimeParams[snap.regime as keyof typeof runtime.regimeParams];
+      const deployPct = regimeParams?.deployPct ?? 1;
+      const confMultiplier = snap.confidence === 'HIGH' ? 1.0 : snap.confidence === 'MEDIUM' ? 0.75 : 0.50;
+      res.json({
+        ...snap,
+        emaGapPct: parseFloat(emaGapPct.toFixed(3)),
+        deployPct: parseFloat((deployPct * 100).toFixed(0)),
+        confidenceMultiplier: confMultiplier,
+        effectiveDeployPct: parseFloat((deployPct * confMultiplier * 100).toFixed(0)),
+      });
+    } catch { res.json(null); }
+  });
+
+  // Price triggers API
+  app.get('/api/price-triggers', (_req, res) => {
+    const live = currentLive;
+    if (!live || !dbRef) { res.json(null); return; }
+    try {
+      const price = live.solPrice;
+      const regime = live.regime as keyof typeof runtime.regimeParams;
+      const params = runtime.regimeParams[regime] ?? runtime.regimeParams['RANGING'];
+      const pos = live.positionRange;
+      const basis = live.solCostBasis || 0;
+      const active = live.botState === 'ACTIVE' && pos;
+      const lower = pos?.lower ?? 0;
+      const upper = pos?.upper ?? 0;
+      const range = upper - lower;
+      const centre = (lower + upper) / 2;
+      const hw = range / 2;
+      const triggers: any[] = [];
+      if (active && range > 0) {
+        // Down/Up exit: rules.ts formula — proxToLower = (centre - price) / halfWidth
+        triggers.push({ id: 'downExit', label: 'Down exit', triggerPrice: parseFloat((centre - params.proxThresholdLower * hw).toFixed(2)), direction: 'below', color: '#ef4444' });
+        triggers.push({ id: 'upExit', label: 'Up exit', triggerPrice: parseFloat((centre + params.proxThresholdUpper * hw).toFixed(2)), direction: 'above', color: '#22c55e' });
+        // Auto-deploy: executor.ts formula — proximityToLower = 1 - (price - lower) / range
+        const adThreshold = params.proximityDeployThreshold ?? 0.40;
+        const reserveFloorVal = live.reserveFloor ?? 0;
+        const idleUsdcAboveFloor = Math.max(0, live.usdcBalance - reserveFloorVal);
+        const adBlocked = idleUsdcAboveFloor < 100;
+        triggers.push({ id: 'autoDeploy', label: 'Auto-deploy', triggerPrice: parseFloat((lower + (1 - adThreshold) * range).toFixed(2)), direction: 'above', color: adBlocked ? '#eab308' : '#58a6ff', idleUsdcAboveFloor: parseFloat(idleUsdcAboveFloor.toFixed(2)), autoDeployBlocked: adBlocked });
+      }
+      if (runtime.solConversionEnabled && basis > 0) {
+        triggers.push({ id: 'solConvert', label: 'SOL convert', triggerPrice: parseFloat((basis * runtime.solConversionBasisMultiplier).toFixed(2)), direction: 'above', color: '#a855f7' });
+      }
+      if (live.botState !== 'ACTIVE' && basis > 0) {
+        triggers.push({ id: 'basisGate', label: 'Re-entry gate', triggerPrice: parseFloat((basis * (params.basisGateThreshold ?? 0.999)).toFixed(2)), direction: 'above', color: '#eab308' });
+      }
+      if (live.churnGuardActive && live.churnGuardLastExitPrice) {
+        triggers.push({ id: 'churnGuard', label: 'ChurnGuard', triggerPrice: live.churnGuardLastExitPrice, direction: 'above', color: '#8b949e' });
+      }
+      // Compute fill percentages and distances
+      const currentProxToLower = hw > 0 ? Math.max(0, (centre - price) / hw) : 0;
+      const currentProxToUpper = hw > 0 ? Math.max(0, (price - centre) / hw) : 0;
+      for (const t of triggers) {
+        t.distance = parseFloat((t.triggerPrice - price).toFixed(2));
+        t.distanceAbs = Math.abs(t.distance);
+        if (t.id === 'downExit') {
+          // Fill = how close current proximity is to exit threshold (0%=safe, 100%=at exit)
+          t.pctFilled = params.proxThresholdLower > 0 ? Math.min(100, Math.max(0, (currentProxToLower / params.proxThresholdLower) * 100)) : 0;
+        } else if (t.id === 'upExit') {
+          t.pctFilled = params.proxThresholdUpper > 0 ? Math.min(100, Math.max(0, (currentProxToUpper / params.proxThresholdUpper) * 100)) : 0;
+        } else if (t.id === 'autoDeploy') {
+          if (price >= t.triggerPrice) {
+            t.pctFilled = 100;
+            if (t.autoDeployBlocked) {
+              t.note = 'BLOCKED';
+              t.color = '#eab308';
+              t.subNote = `$${t.idleUsdcAboveFloor.toFixed(0)} above floor`;
+            } else {
+              t.note = 'ACTIVE';
+              t.color = '#22c55e';
+              t.subNote = `deploying $${t.idleUsdcAboveFloor.toFixed(0)}`;
+            }
+          } else {
+            const adRange = t.triggerPrice - lower;
+            t.pctFilled = adRange > 0 ? Math.min(100, Math.max(0, ((price - lower) / adRange) * 100)) : 0;
+          }
+        } else {
+          // For basis gate, SOL convert, churnGuard — simple distance-based
+          t.pctFilled = t.triggerPrice > lower ? Math.min(100, Math.max(0, ((price - lower) / (t.triggerPrice - lower)) * 100)) : 0;
+        }
+        t.pctFilled = parseFloat(t.pctFilled.toFixed(1));
+      }
+      const closest = triggers.length > 0 ? triggers.reduce((a, b) => a.distanceAbs < b.distanceAbs ? a : b) : null;
+      res.json({ currentPrice: price, triggers, closestTrigger: closest ? { label: closest.label, price: closest.triggerPrice, distance: closest.distance } : null });
+    } catch { res.json(null); }
   });
 
   // Add liquidity
@@ -1151,19 +1415,20 @@ td:last-child{color:#8b949e;font-size:11px;line-height:1.4;max-width:500px}
 .range-cursor{position:absolute;top:0;width:3px;height:100%;background:#f0883e}
 @media(max-width:700px){
   body{padding:8px;font-size:12px}
-  .grid{grid-template-columns:1fr;gap:10px}
-  .card{padding:12px}
-  .card h2{font-size:12px;margin-bottom:8px}
-  .banner{padding:10px}
-  .banner h1{font-size:15px}
-  .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:10px}
-  .nav a{padding:7px 3px;font-size:10px;text-align:center;min-width:0}
-  .big-number .val{font-size:22px}
-  .row{font-size:12px}
-  .row .value{font-size:12px}
-  table{font-size:11px}
-  th,td{padding:5px 3px}
-  td:last-child{max-width:200px}
+  .grid{grid-template-columns:1fr;gap:8px}
+  .card{padding:10px}
+  .card h2{font-size:11px;margin-bottom:8px}
+  .banner{padding:8px}
+  .banner h1{font-size:14px}
+  .nav{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:8px}
+  .nav a{padding:6px 3px;font-size:9px;text-align:center;min-width:0}
+  .big-number .val{font-size:20px}
+  .row{font-size:11px}
+  .row .value{font-size:11px}
+  table{font-size:10px}
+  th,td{padding:4px 2px}
+  td:last-child{max-width:150px}
+  .range-bar{height:20px}
 }
 `;
 
@@ -1178,6 +1443,7 @@ const NAV_HTML = `
   <a href="/investors" id="nav-investors">Investors</a>
   <a href="/projection" id="nav-projection">Projection</a>
   <a href="/analysis" id="nav-analysis">Agent</a>
+  <a href="/intelligence" id="nav-intelligence">Intelligence</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
@@ -1315,7 +1581,7 @@ ${NAV_HTML}
 
 // ── Live page ─────────────────────────────────────────────────────────────
 
-function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null, rule2Enabled = true, autoDeployEnabled = true): string {
+function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null, rule2Enabled = true, autoDeployEnabled = true, solConversionEnabled = false): string {
   const regimeColours: Record<string, string> = {
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
@@ -1543,6 +1809,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
 .wallet-half:first-child{border-right:1px solid #21262d}
 @media(max-width:700px){
   .ctrl-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .ctrl-btn{padding:10px 8px;font-size:11px;min-height:44px}
   .fees-grid{grid-template-columns:1fr}
   .fees-cell{border-right:none!important;border-bottom:1px solid #21262d;padding:10px 0}
   .fees-cell:last-child{border-bottom:none}
@@ -1552,6 +1819,11 @@ ${pool ? `<div class="card" style="margin-top:12px">
   .wallet-split{grid-template-columns:1fr}
   .wallet-half{padding:8px 0}
   .wallet-half:first-child{border-right:none;border-bottom:1px solid #21262d}
+  .m-stack{grid-template-columns:1fr!important}
+  .m-stack-3{grid-template-columns:1fr 1fr!important}
+  .m-hide{display:none!important}
+  .m-small{font-size:9px!important}
+  .m-text-sm{font-size:10px!important}
 }
 </style>
 </head>
@@ -1585,12 +1857,15 @@ ${NAV_HTML}
           // VAR deploy or static regime deploy
           const deployPct = varEnabled
             ? Math.max(0.25, Math.min(0.90, 0.95 - (live.marketSignals?.vol1h ?? 0.003) * 5))
-            : (live.regime === 'EXTREME' ? 0.25 : live.regime === 'BEARISH_TREND' ? 0.85 : live.regime === 'BULLISH_TREND' ? 0.85 : 1.0);
+            : (runtime.regimeParams[live.regime as keyof typeof runtime.regimeParams] ?? { deployPct: 1.0 }).deployPct;
           const targetIdlePct = (1 - Math.max(0.10, deployPct)) * 100;
-          // SIR target or static regime target
-          const targetSolPct = sirEnabled
-            ? 50 // SIR base target (deposit ratio ~50%)
-            : (live.regime === 'EXTREME' ? 15 : live.regime === 'BEARISH_TREND' ? 35 : live.regime === 'BULLISH_TREND' ? 60 : 50);
+          // Read target SOL % from runtime config (updated every 1 min from DB)
+          const targetSolPct = Math.round(
+            live.regime === 'EXTREME' ? runtime.idleTargetSolPctExtreme * 100 :
+            live.regime === 'BEARISH_TREND' ? runtime.idleTargetSolPctBearish * 100 :
+            live.regime === 'BULLISH_TREND' ? runtime.idleTargetSolPctBullish * 100 :
+            runtime.idleTargetSolPctRanging * 100
+          );
           const walletSolVal = live.solBalance * live.solPrice;
           const walletTotal = walletSolVal + live.usdcBalance;
           const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
@@ -1718,8 +1993,338 @@ ${NAV_HTML}
   <div class="card full">
     <h2>Position Range</h2>
     ${rangeBarHtml}
-    ${live.positionMint ? `<div style="font-size:11px;color:#8b949e;margin-top:8px">Position: <a href="https://solscan.io/token/${live.positionMint}" target="_blank" class="wallet-addr">${live.positionMint.slice(0, 12)}...</a> | Liquidity: ${live.positionLiquidity || '--'}</div>` : ''}
+    ${live.positionMint ? `<div style="font-size:11px;color:#8b949e;margin-top:8px">Position: <a href="https://solscan.io/token/${live.positionMint}" target="_blank" class="wallet-addr">${live.positionMint.slice(0, 12)}...</a> | Liquidity: ${live.positionLiquidity || '--'}${live.positionRegime ? ` | Opened as <span style="color:${regimeColours[live.positionRegime] || '#888'};font-weight:bold">${live.positionRegime}</span>` : ''}</div>` : ''}
+    ${live.churnGuardLastExitPrice != null ? (() => {
+      const active = live.churnGuardActive;
+      const color = active ? '#eab308' : '#22c55e';
+      const label = active ? 'ACTIVE' : 'CLEAR';
+      const detail = active && live.churnGuardReason ? ` — ${live.churnGuardReason}${live.churnGuardExpiresMin != null ? `, expires in ${Math.max(0, live.churnGuardExpiresMin).toFixed(0)}min` : ''}` : '';
+      return `<div style="font-size:11px;margin-top:6px;padding:4px 8px;background:#0d1117;border:1px solid ${color};border-radius:4px"><span style="color:#8b949e">ChurnGuard: </span><span style="color:${color};font-weight:bold">${label}</span><span style="color:#8b949e">${detail}</span></div>`;
+    })() : ''}
   </div>
+
+  <div class="card full">
+    <h2>Price Triggers</h2>
+    <div id="price-triggers"><div style="color:#8b949e;font-size:11px">Loading...</div></div>
+  </div>
+  <script>
+  (function(){
+    function loadTriggers(){
+      fetch('/api/price-triggers').then(function(r){return r.json()}).then(function(d){
+        var c=document.getElementById('price-triggers');
+        if(!c||!d||!d.triggers){if(c)c.innerHTML='<div style="color:#8b949e;font-size:11px">No data</div>';return;}
+        var h='<div style="font-size:11px;color:#8b949e;margin-bottom:8px">Current price: <b style="color:#c9d1d9">$'+d.currentPrice.toFixed(2)+'</b></div>';
+        d.triggers.forEach(function(t){
+          var isBelow=t.direction==='below';
+          var noteStr=t.note?(' <span style="padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;background:'+t.color+'20;color:'+t.color+'">'+t.note+'</span>'):'';
+          var distStr=t.note?'':' <span style="color:'+(isBelow?(t.distanceAbs<0.50?'#ef4444':t.distanceAbs<1.00?'#eab308':'#22c55e'):'#8b949e')+';font-size:10px">('+(t.distance>=0?'+$':'-$')+t.distanceAbs.toFixed(2)+')</span>';
+          var arrow=isBelow?'▼':'▲';
+          h+='<div style="margin-bottom:6px">';
+          h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">';
+          h+='<span style="font-size:11px;color:'+t.color+'">'+arrow+' '+t.label+noteStr+'</span>';
+          h+='<span style="font-size:11px"><b style="color:#c9d1d9">$'+t.triggerPrice.toFixed(2)+'</b>'+distStr+'</span>';
+          h+='</div>';
+          h+='<div style="background:#21262d;height:8px;border-radius:4px;overflow:hidden">';
+          h+='<div style="width:'+Math.min(100,t.pctFilled)+'%;height:100%;background:'+t.color+';border-radius:4px;transition:width 0.5s"></div>';
+          h+='</div>';
+          if(t.subNote){h+='<div style="font-size:9px;color:'+t.color+';text-align:right;margin-top:1px">'+t.subNote+'</div>';}
+          h+='</div>';
+        });
+        if(d.closestTrigger){
+          var ct=d.closestTrigger;
+          var ctCol=ct.distance<0&&Math.abs(ct.distance)<0.50?'#ef4444':ct.distance<0&&Math.abs(ct.distance)<1.00?'#eab308':'#8b949e';
+          h+='<div style="font-size:10px;color:'+ctCol+';margin-top:8px;text-align:center">Closest: <b>'+ct.label+'</b> at $'+ct.price.toFixed(2)+' ('+(ct.distance>=0?'+':'')+ct.distance.toFixed(2)+')</div>';
+        }
+        c.innerHTML=h;
+      }).catch(function(){});
+    }
+    loadTriggers();setInterval(loadTriggers,30000);
+  })();
+  </script>
+
+  <div class="card full">
+    <h2>Regime Intelligence</h2>
+    <div id="regime-intel"><div style="color:#8b949e;font-size:11px">Loading...</div></div>
+  </div>
+  <script>
+  (function(){
+    var RC={BULLISH_TREND:'#22c55e',BEARISH_TREND:'#ef4444',RANGING:'#4a9eff',EXTREME:'#a855f7'};
+    var TZ='Europe/Berlin';
+    function loadRI(){
+      fetch('/api/regime-intelligence').then(function(r){return r.json()}).then(function(d){
+        var c=document.getElementById('regime-intel');
+        if(!c||!d||!d.regime){if(c)c.innerHTML='<div style="color:#8b949e;font-size:11px">No data yet</div>';return;}
+        var col=RC[d.regime]||'#888';
+        var confCol=d.confidence==='HIGH'?'#22c55e':d.confidence==='MEDIUM'?'#eab308':'#ef4444';
+        // Header
+        var h='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:8px">';
+        h+='<div><span class="badge" style="background:'+col+'20;color:'+col+'">'+d.regime+'</span>';
+        h+=' <span style="color:'+confCol+';font-size:11px;font-weight:bold">'+d.confidence+'</span>';
+        h+=' <span style="color:#8b949e;font-size:10px">Score: '+(d.ta_total_score||'?')+'/7</span></div>';
+        h+='<span style="color:#8b949e;font-size:10px">'+(d.ta_data_age_min||0)+'min ago</span></div>';
+        // TA Voting table
+        var sigs=[
+          {n:'EMA Cross',v:(d.ema_cross||'?')+' ('+(d.emaGapPct>0?'+':'')+d.emaGapPct.toFixed(1)+'%)',vote:d.ema_cross==='UP'?'BULLISH':d.ema_cross==='DOWN'?'BEARISH':'RANGING',pts:2},
+          {n:'BB Width',v:(d.bb_width||0).toFixed(1)+'%',vote:d.bb_width>3?'EXTREME':d.bb_width<1.5?'RANGING':'RANGING',pts:2},
+          {n:'RSI(14)',v:(d.rsi||0).toFixed(0),vote:d.rsi<30?'BEARISH':d.rsi>70?'BULLISH':'RANGING',pts:1},
+          {n:'ATR(14)',v:'$'+(d.atr||0).toFixed(2),vote:d.atr>0.5?'trend':'normal',pts:1},
+          {n:'BB Pos',v:(d.bb_position||0).toFixed(2),vote:'modifier',pts:d.bb_position<0.2?-1:d.bb_position>0.8?-1:0}
+        ];
+        var t='<div style="overflow-x:auto;margin:8px 0"><table style="width:100%;border-collapse:collapse;font-size:11px">';
+        t+='<thead><tr><th style="text-align:left;padding:3px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Signal</th>';
+        t+='<th style="text-align:right;padding:3px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Value</th>';
+        t+='<th style="text-align:left;padding:3px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Vote</th>';
+        t+='<th class="m-hide" style="text-align:left;padding:3px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Pts</th></tr></thead><tbody>';
+        sigs.forEach(function(s){
+          var vc=RC[s.vote]||'#8b949e';
+          var bar=s.pts>0?Array(s.pts+1).join('\\u2588'):s.pts<0?'\\u25BC':'\\u2013';
+          t+='<tr style="border-bottom:1px solid #21262d"><td style="padding:3px 4px;color:#c9d1d9">'+s.n+'</td>';
+          t+='<td style="padding:3px 4px;text-align:right;font-family:monospace;color:#c9d1d9">'+s.v+'</td>';
+          t+='<td style="padding:3px 4px"><span style="padding:1px 6px;border-radius:3px;font-size:9px;background:'+vc+'20;color:'+vc+'">'+s.vote+'</span></td>';
+          t+='<td class="m-hide" style="padding:3px 4px;color:'+vc+'">'+bar+'</td></tr>';
+        });
+        t+='</tbody></table></div>';
+        // Score summary
+        var sc='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;margin:8px 0;font-size:10px;text-align:center">';
+        [{k:'B',v:d.ta_score_bullish,r:'BULLISH_TREND'},{k:'R',v:d.ta_score_ranging,r:'RANGING'},{k:'Be',v:d.ta_score_bearish,r:'BEARISH_TREND'},{k:'E',v:d.ta_score_extreme,r:'EXTREME'}].forEach(function(s){
+          var isW=d.ta_winner===s.r;
+          sc+='<div style="padding:4px;border:1px solid '+(isW?RC[s.r]||'#888':'#30363d')+';border-radius:4px;background:'+(isW?(RC[s.r]||'#888')+'15':'transparent')+'"><span style="color:#8b949e">'+s.k+':</span> <span style="color:#c9d1d9;font-weight:bold">'+(s.v!=null?s.v:'?')+'</span></div>';
+        });
+        sc+='</div>';
+        // Market signals
+        var mk='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;margin:6px 0;font-size:10px">';
+        var v1h=d.vol_1h;var sol4=d.sol_change_4h;var fg=d.fear_greed;var btc=d.btc_change_4h;
+        mk+='<div style="text-align:center;padding:3px;border:1px solid #21262d;border-radius:4px"><span style="color:#8b949e">Vol 1h</span><br><span style="color:'+(v1h>0.06?'#ef4444':v1h>0.04?'#eab308':'#22c55e')+'">'+(v1h!=null?(v1h*100).toFixed(1)+'%':'?')+'</span></div>';
+        mk+='<div style="text-align:center;padding:3px;border:1px solid #21262d;border-radius:4px"><span style="color:#8b949e">SOL 24h</span><br><span style="color:'+(sol4<-4?'#ef4444':sol4>4?'#22c55e':'#c9d1d9')+'">'+(sol4!=null?(sol4>0?'+':'')+sol4.toFixed(1)+'%':'?')+'</span></div>';
+        mk+='<div style="text-align:center;padding:3px;border:1px solid #21262d;border-radius:4px"><span style="color:#8b949e">F&G</span><br><span style="color:'+(fg<25?'#ef4444':fg>75?'#22c55e':'#c9d1d9')+'">'+(fg!=null?fg:'?')+'</span></div>';
+        mk+='<div style="text-align:center;padding:3px;border:1px solid #21262d;border-radius:4px"><span style="color:#8b949e">BTC 24h</span><br><span style="color:'+(btc!=null&&Math.abs(btc)>3?'#eab308':'#c9d1d9')+'">'+(btc!=null?(btc>0?'+':'')+btc.toFixed(1)+'%':'?')+'</span></div>';
+        mk+='</div>';
+        // Veto + deploy
+        var veto='<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin:6px 0;font-size:10px">';
+        veto+='<span style="color:#8b949e">L1 Veto: <span style="color:'+(d.veto_fired?'#ef4444':'#22c55e')+';font-weight:bold">'+(d.veto_fired?'FIRED':'CLEAR')+'</span>'+(d.daily_regime?' (daily: '+d.daily_regime+')':'')+'</span>';
+        veto+='<span style="color:#8b949e">Deploy: <span style="color:#c9d1d9;font-weight:bold">'+d.effectiveDeployPct+'%</span> ('+d.deployPct+'% x '+Math.round(d.confidenceMultiplier*100)+'%)</span>';
+        veto+='</div>';
+        // AI Summary
+        var parts=[];
+        if(d.ema_cross==='DOWN')parts.push('EMA9 is '+Math.abs(d.emaGapPct).toFixed(1)+'% below SMA20 confirming downward momentum');
+        else if(d.ema_cross==='UP')parts.push('EMA9 is '+d.emaGapPct.toFixed(1)+'% above SMA20 confirming upward momentum');
+        else parts.push('EMA9 and SMA20 are flat — no clear trend direction');
+        var rsi=d.rsi||50;
+        if(rsi<25)parts.push('RSI at '+rsi.toFixed(0)+' is deeply oversold — bounce likely');
+        else if(rsi>75)parts.push('RSI at '+rsi.toFixed(0)+' is overbought — pullback likely');
+        else if(rsi<40)parts.push('RSI at '+rsi.toFixed(0)+' shows bearish momentum');
+        else if(rsi>60)parts.push('RSI at '+rsi.toFixed(0)+' shows bullish momentum');
+        else parts.push('RSI at '+rsi.toFixed(0)+' is neutral');
+        var bb=d.bb_width||2;
+        if(bb>3)parts.push('BB width at '+bb.toFixed(1)+'% indicates high volatility');
+        else if(bb<1.5)parts.push('BB width at '+bb.toFixed(1)+'% is squeezed — breakout imminent');
+        else parts.push('BB width at '+bb.toFixed(1)+'% is normal');
+        if(d.veto_fired)parts.push('L1 daily veto fired — confidence reduced');
+        parts.push('Bot deploying at '+d.effectiveDeployPct+'% capacity');
+        var summary='<div style="margin-top:8px;padding:8px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:11px;color:#8b949e;line-height:1.5">'+parts.join('. ')+'.</div>';
+        c.innerHTML=h+t+sc+mk+veto+summary;
+      }).catch(function(){});
+    }
+    loadRI();setInterval(loadRI,120000);
+  })();
+  </script>
+
+  ${live.solCostBasis > 0 ? (() => {
+    const basis = live.solCostBasis;
+    const price = live.solPrice;
+    const walletSol = live.solBalance;
+    const trackedSol = live.solTracked ?? 0;
+    const lpSol = live.entrySol ?? 0;
+    const totalSolHeld = walletSol + lpSol;
+    const lastUpdated = live.costBasisLastUpdated ?? 0;
+    const unrealisedPnl = (price - basis) * totalSolHeld;
+    const unrealisedPnlPct = basis > 0 ? ((price - basis) / basis) * 100 : 0;
+    const pnlSign = unrealisedPnl >= 0 ? '+' : '';
+    const pnlColor = unrealisedPnl >= 0 ? '#22c55e' : '#ef4444';
+    const aboveBasis5Pct = price > basis * 1.05;
+    const belowBasis = price < basis;
+    const borderColor = belowBasis ? '#ef4444' : aboveBasis5Pct ? '#22c55e' : '#30363d';
+    const lastUpdatedStr = lastUpdated > 0
+      ? new Date(lastUpdated).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Berlin' })
+      : '—';
+    return `<div class="card full" style="border-color:${borderColor}">
+      <h2>Cost Basis</h2>
+      <div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px">
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Basis</span>
+          <span style="color:#c9d1d9;font-weight:bold">$${fmt(basis)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Price</span>
+          <span style="color:#c9d1d9;font-weight:bold">$${fmt(price)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Wallet SOL</span>
+          <span style="color:#c9d1d9">${fmt(walletSol, 2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">LP SOL (est)</span>
+          <span style="color:#c9d1d9">${fmt(lpSol, 2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Total SOL held</span>
+          <span style="color:#c9d1d9;font-weight:bold">${fmt(totalSolHeld, 2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Tracked</span>
+          <span style="color:#c9d1d9">${fmt(trackedSol, 2)} SOL</span>
+        </div>
+        ${totalSolHeld > 0 ? (() => {
+          const trackingRatio = trackedSol / totalSolHeld;
+          if (trackingRatio <= 1.05) return `<div style="font-size:10px;color:#22c55e;text-align:right">tracking accurate</div>`;
+          if (trackingRatio <= 2.0) return `<div style="font-size:10px;color:#eab308;text-align:right">tracked ${fmt(trackedSol, 1)} vs held ${fmt(totalSolHeld, 1)} SOL</div>`;
+          return `<div style="font-size:10px;color:#ef4444;text-align:right">tracking diverged — will reset on restart</div>`;
+        })() : ''}
+      </div>
+      <div style="margin-top:8px;padding:8px;background:#0d1117;border:1px solid ${borderColor};border-radius:6px;text-align:center">
+        <div style="font-size:10px;color:#8b949e;margin-bottom:2px">Unrealised P&amp;L</div>
+        <div style="font-size:16px;font-weight:bold;color:${pnlColor}">${pnlSign}$${fmt(Math.abs(unrealisedPnl))} <span style="font-size:12px">(${pnlSign}${unrealisedPnlPct.toFixed(1)}%)</span></div>
+      </div>
+      ${belowBasis ? `<div style="color:#ef4444;font-size:11px;font-weight:bold;margin-top:6px;text-align:center">Price below basis — do not swap</div>` : ''}
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px">
+        <span style="color:#8b949e">Updated</span>
+        <span style="color:#8b949e">${lastUpdatedStr} CET</span>
+      </div>
+    </div>`;
+  })() : ''}
+
+  ${(() => {
+    const resCurrent = live.reserveCurrent ?? 0;
+    const resFloor = live.reserveFloor ?? 0;
+    const resState = live.reserveState ?? 'EMPTY';
+    const deficit = Math.max(0, resFloor - resCurrent);
+    const refillPct = resFloor > 0 ? Math.min(100, (resCurrent / resFloor) * 100) : 0;
+    const walletUsdc = live.usdcBalance ?? 0;
+    const aboveFloor = walletUsdc - resFloor;
+    const stateColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
+    const stateBg = resState === 'FULL' ? 'rgba(34,197,94,0.15)' : resState === 'REFILLING' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.15)';
+    const barColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
+    const borderColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
+    const aboveFloorColor = aboveFloor >= 0 ? '#22c55e' : '#ef4444';
+    const aboveFloorSign = aboveFloor >= 0 ? '+' : '-';
+    const aboveFloorLabel = aboveFloor >= 0 ? 'Above floor' : 'Below floor';
+    const lastUpdatedStr = live.reserveLastUpdated > 0
+      ? new Date(live.reserveLastUpdated).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Berlin' })
+      : '—';
+    return `<div class="card full" style="border-color:${borderColor}">
+      <h2>Reserve Monitor</h2>
+      <div class="m-stack-3" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 12px;font-size:12px;margin-bottom:8px">
+        <div style="text-align:center">
+          <div style="color:#8b949e;font-size:10px">Reserve</div>
+          <div style="color:#c9d1d9;font-weight:bold">$${fmt(resCurrent)}</div>
+        </div>
+        <div style="text-align:center">
+          <div style="color:#8b949e;font-size:10px">Floor</div>
+          <div style="color:#c9d1d9;font-weight:bold">$${fmt(resFloor, 0)}</div>
+        </div>
+        <div style="text-align:center">
+          <div style="color:#8b949e;font-size:10px">State</div>
+          <div style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:bold;color:${stateColor};background:${stateBg}">${resState}</div>
+        </div>
+      </div>
+      <div style="background:#21262d;border-radius:4px;height:16px;overflow:hidden;position:relative;margin-bottom:4px">
+        <div style="background:${barColor};height:100%;width:${refillPct.toFixed(1)}%;border-radius:4px;transition:width 0.3s"></div>
+        <div style="position:absolute;top:0;left:0;right:0;text-align:center;font-size:10px;line-height:16px;color:#c9d1d9">$${fmt(resCurrent, 0)} of $${fmt(resFloor, 0)} (${refillPct.toFixed(1)}%)</div>
+      </div>
+      <div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">Wallet USDC</span>
+          <span style="color:#c9d1d9">$${fmt(walletUsdc, 0)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#8b949e">${aboveFloorLabel}</span>
+          <span style="color:${aboveFloorColor};font-weight:bold">${aboveFloorSign}$${fmt(Math.abs(aboveFloor), 0)}</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px">
+        <span style="color:#8b949e">Updated</span>
+        <span style="color:#8b949e">${lastUpdatedStr} CET</span>
+      </div>
+    </div>`;
+  })()}
+
+  <div class="card full">
+    <h2>Swap History</h2>
+    <div id="live-swaps"><div style="color:#8b949e;font-size:11px">Loading...</div></div>
+  </div>
+  <script>
+  (function(){
+    var TZ='Europe/Berlin';
+    function loadSwaps(){
+    Promise.all([fetch('/api/swap-ledger').then(function(r){return r.json();}),fetch('/api/live').then(function(r){return r.json();}).catch(function(){return null;})]).then(function(results){
+      var data=results[0];var live=results[1];
+      var c=document.getElementById('live-swaps');
+      if(!c||!data.swaps||data.swaps.length===0){if(c)c.innerHTML='<div style="color:#8b949e;font-size:11px">No swaps yet</div>';return;}
+      var swaps=data.swaps.slice(0,50);
+      var html='<div style="overflow-x:auto;max-height:500px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">';
+      html+='<thead style="position:sticky;top:0;background:#161b22;z-index:1"><tr>';
+      html+='<th style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Time</th>';
+      html+='<th style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Dir</th>';
+      html+='<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">SOL</th>';
+      html+='<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">USDC</th>';
+      html+='<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Price</th>';
+      html+='<th class="m-hide" style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Basis</th>';
+      html+='<th style="text-align:right;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">P&L</th>';
+      html+='<th class="m-hide" style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Reason</th>';
+      html+='<th class="m-hide" style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Src</th>';
+      html+='<th class="m-hide" style="text-align:left;padding:4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">TX</th>';
+      html+='</tr></thead><tbody>';
+      var totalPnl=0,totalSolBuy=0,totalSolSell=0,totalUsdcIn=0,totalUsdcOut=0;
+      swaps.forEach(function(sw,i){
+        var t=new Date(sw.timestamp).toLocaleString('en-GB',{timeZone:TZ,day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+        var isBuy=sw.direction==='buy_sol';
+        var isHarvest=(sw.reason||'').indexOf('Harvest')>=0;
+        var reason=(sw.reason||'').slice(0,25);
+        var pnl=sw.pnl_usdc||0;
+        totalPnl+=pnl;
+        if(isBuy){totalSolBuy+=sw.sol_amount;totalUsdcOut+=sw.usdc_amount;}else{totalSolSell+=sw.sol_amount;totalUsdcIn+=sw.usdc_amount;}
+        var pnlCol=pnl>=0?'#22c55e':'#ef4444';
+        var dirCol=isHarvest?'#58a6ff':(isBuy?'#22c55e':'#ef4444');
+        var dirLabel=isHarvest?'HARVEST':(isBuy?'BUY':'SELL');
+        var swPrice=sw.price||0;
+        var bBefore=sw.cost_basis_before||0;
+        var bAfter=sw.cost_basis_after||0;
+        var basisStr=bAfter>0?'$'+bAfter.toFixed(2):'—';
+        if(bBefore>0&&bAfter>0&&Math.abs(bAfter-bBefore)>0.005)basisStr='$'+bBefore.toFixed(2)+' → $'+bAfter.toFixed(2);
+        var src=sw.source||'bot';
+        var srcCol=src==='manual'?'#484f58':'#22c55e';
+        var srcBg=src==='manual'?'#484f5820':'#22c55e15';
+        var txStr=sw.tx_signature?'<a href="https://solscan.io/tx/'+sw.tx_signature+'" target="_blank" style="color:#58a6ff;text-decoration:none">'+sw.tx_signature.slice(0,8)+'</a>':(src==='bot'?'<span style="color:#eab308">no sig</span>':'<span style="color:#484f58">—</span>');
+        var rowBg=i%2===0?'':'background:#0d1117;';
+        html+='<tr style="border-bottom:1px solid #21262d;'+rowBg+'">';
+        html+='<td style="padding:3px 4px;font-size:10px;color:#8b949e;white-space:nowrap">'+t+'</td>';
+        html+='<td style="padding:3px 4px;font-size:10px;color:'+dirCol+';font-weight:bold">'+dirLabel+'</td>';
+        html+='<td style="padding:3px 4px;text-align:right;font-family:monospace">'+sw.sol_amount.toFixed(3)+'</td>';
+        html+='<td style="padding:3px 4px;text-align:right;font-family:monospace">$'+sw.usdc_amount.toFixed(2)+'</td>';
+        html+='<td style="padding:3px 4px;text-align:right;font-family:monospace;color:#c9d1d9">'+(swPrice>0?'$'+swPrice.toFixed(2):'—')+'</td>';
+        html+='<td class="m-hide" style="padding:3px 4px;text-align:right;font-family:monospace;color:#58a6ff;font-size:10px">'+basisStr+'</td>';
+        html+='<td style="padding:3px 4px;text-align:right;color:'+pnlCol+';font-weight:bold">'+(pnl!==0?(pnl>0?'+':'')+pnl.toFixed(2):'—')+'</td>';
+        html+='<td class="m-hide" style="padding:3px 4px;font-size:10px;color:#8b949e;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+(sw.reason||'')+'">'+reason+'</td>';
+        html+='<td class="m-hide" style="padding:3px 4px;font-size:10px"><span style="padding:1px 4px;border-radius:3px;background:'+srcBg+';color:'+srcCol+';font-size:9px">'+src+'</span></td>';
+        html+='<td class="m-hide" style="padding:3px 4px;font-size:10px">'+txStr+'</td>';
+        html+='</tr>';
+      });
+      html+='</tbody><tfoot><tr style="border-top:2px solid #30363d;font-weight:bold">';
+      html+='<td style="padding:4px;color:#c9d1d9" colspan="2">Total ('+swaps.length+' swaps)</td>';
+      html+='<td style="padding:4px;text-align:right;font-family:monospace;color:#c9d1d9">B:'+totalSolBuy.toFixed(1)+' S:'+totalSolSell.toFixed(1)+'</td>';
+      html+='<td style="padding:4px;text-align:right;font-family:monospace;color:#c9d1d9">In:$'+totalUsdcIn.toFixed(0)+' Out:$'+totalUsdcOut.toFixed(0)+'</td>';
+      html+='<td colspan="2"></td>';
+      var netCol=totalPnl>=0?'#22c55e':'#ef4444';
+      html+='<td style="padding:4px;text-align:right;font-size:14px;color:'+netCol+'">'+(totalPnl>=0?'+':'')+totalPnl.toFixed(2)+'</td>';
+      html+='<td class="m-hide"></td><td class="m-hide"></td><td class="m-hide"></td><td class="m-hide"></td></tr></tfoot></table></div>';
+      html+='<div style="font-size:10px;color:#484f58;margin-top:4px">Updated: '+new Date().toLocaleTimeString('en-US',{timeZone:TZ,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' CET</div>';
+      c.innerHTML=html;
+    });
+    }
+    loadSwaps();
+    setInterval(loadSwaps,30000);
+  })();
+  </script>
 
   ${pool ? `<div class="card full">
     <h2>SOL/USDC Pool <span style="font-size:10px;color:#8b949e;font-weight:normal;text-transform:none;letter-spacing:0">(Orca Whirlpool &middot; tick ${pool.tickSpacing} &middot; ${(pool.feeRate / 10000).toFixed(2)}% fee)</span></h2>
@@ -1831,6 +2436,12 @@ ${NAV_HTML}
           ${autoDeployEnabled ? 'Disable' : 'Enable'} Auto Deploy
         </button>
         <div style="font-size:10px;margin-top:4px;text-align:center"><span id="autodeploy-status" style="color:${autoDeployEnabled ? '#22c55e' : '#f97316'};font-weight:600">${autoDeployEnabled ? 'ENABLED' : 'DISABLED'}</span> <span style="color:#8b949e">— Auto capital deployment.</span></div>
+      </div>
+      <div>
+        <button id="solconv-btn" class="ctrl-btn ${solConversionEnabled ? 'ctrl-amber' : 'ctrl-green'}" onclick="showConfirmAction('${solConversionEnabled ? 'Disable' : 'Enable'} SOL Conversion?','${solConversionEnabled ? 'Bot will NOT convert SOL to USDC.' : 'Bot will convert small SOL amounts to USDC when profitable and USDC is needed for deploys.'}','toggleSolConversion()')">
+          ${solConversionEnabled ? 'Disable' : 'Enable'} SOL Convert
+        </button>
+        <div style="font-size:10px;margin-top:4px;text-align:center"><span id="solconv-status" style="color:${solConversionEnabled ? '#22c55e' : '#f97316'};font-weight:600">${solConversionEnabled ? 'ENABLED' : 'DISABLED'}</span> <span style="color:#8b949e">— Profitable SOL→USDC.</span></div>
       </div>
     </div>
     <div id="ctrl-result" style="font-size:12px;text-align:center;min-height:20px"></div>
@@ -2013,6 +2624,40 @@ function toggleAutoDeploy() {
           status.textContent = 'DISABLED';
           status.style.color = '#f97316';
           if (mBadge) { mBadge.textContent = 'DISABLED'; mBadge.style.background = '#f9731620'; mBadge.style.color = '#f97316'; }
+        }
+      } else {
+        result.innerHTML = '<span style="color:#ef4444">' + data.msg + '</span>';
+      }
+      btn.disabled = false;
+    })
+    .catch(function(err) {
+      result.innerHTML = '<span style="color:#ef4444">Error: ' + err + '</span>';
+      btn.disabled = false;
+    });
+}
+
+function toggleSolConversion() {
+  var btn = document.getElementById('solconv-btn');
+  var status = document.getElementById('solconv-status');
+  var result = document.getElementById('ctrl-result');
+  btn.disabled = true;
+  result.innerHTML = '<span style="color:#eab308">Toggling SOL Conversion...</span>';
+
+  fetch('/api/toggle-sol-conversion', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        result.innerHTML = '<span style="color:#22c55e">' + data.msg + '</span>';
+        if (data.solConversionEnabled) {
+          btn.textContent = 'Disable SOL Convert';
+          btn.className = 'ctrl-btn ctrl-amber';
+          status.textContent = 'ENABLED';
+          status.style.color = '#22c55e';
+        } else {
+          btn.textContent = 'Enable SOL Convert';
+          btn.className = 'ctrl-btn ctrl-green';
+          status.textContent = 'DISABLED';
+          status.style.color = '#f97316';
         }
       } else {
         result.innerHTML = '<span style="color:#ef4444">' + data.msg + '</span>';
@@ -2412,11 +3057,64 @@ function renderInsightsHtml(data: InsightsData): string {
 <div class="banner">
   <div class="mode" style="color:#a855f7">Insights &amp; Analytics</div>
   <h1>SOL/USDC LP Bot</h1>
-  <div style="color:#8b949e;font-size:11px">Uptime: ${uptimeStr} | Snapshots: ${snaps.length}</div>
+  <div style="color:#8b949e;font-size:11px">Uptime: ${uptimeStr} | Snapshots: ${snaps.length} | CET</div>
 </div>
 ${NAV_HTML}
 <script>document.getElementById('nav-insights').classList.add('active')</script>
 
+<div style="margin:8px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  <button onclick="document.getElementById('insights-toggles').style.display=document.getElementById('insights-toggles').style.display==='none'?'flex':'none'" style="background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">Toggle Cards</button>
+  <div id="insights-toggles" style="display:none;flex-wrap:wrap;gap:6px">
+  </div>
+</div>
+<script>
+(function(){
+  var sections = [
+    {id:'sec-growth',name:'Portfolio Growth'},
+    {id:'sec-daily7d',name:'Daily Fees'},
+    {id:'sec-hourly',name:'Hourly Fees'},
+    {id:'sec-positions',name:'Position History'},
+    {id:'sec-signals',name:'Market Signals'},
+    {id:'sec-inrange',name:'In-Range'},
+    {id:'sec-regime',name:'Regime History'},
+    {id:'sec-events',name:'Events & Injections'},
+    {id:'sec-txs',name:'On-Chain TXs'},
+    {id:'sec-swappnl',name:'Swap P&L'},
+    {id:'sec-solprice',name:'SOL Daily Price'},
+    {id:'sec-downloads',name:'Download Logs'}
+  ];
+  var stored = localStorage.getItem('insights-visible');
+  var visible = stored ? JSON.parse(stored) : sections.map(function(s){return s.id;});
+  var panel = document.getElementById('insights-toggles');
+  sections.forEach(function(s){
+    var checked = visible.includes(s.id) ? 'checked' : '';
+    var lbl = document.createElement('label');
+    lbl.style.cssText = 'font-size:10px;color:#8b949e;cursor:pointer;white-space:nowrap';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = visible.includes(s.id);
+    cb.addEventListener('change', function(){ toggleInsight(s.id); });
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(' ' + s.name));
+    panel.appendChild(lbl);
+  });
+  window.toggleInsight = function(id){
+    var el = document.getElementById(id);
+    if(!el)return;
+    var stored2 = localStorage.getItem('insights-visible');
+    var vis = stored2 ? JSON.parse(stored2) : sections.map(function(s){return s.id;});
+    if(vis.includes(id)){vis=vis.filter(function(v){return v!==id;});el.style.display='none';}
+    else{vis.push(id);el.style.display='';}
+    localStorage.setItem('insights-visible',JSON.stringify(vis));
+  };
+  sections.forEach(function(s){
+    var el = document.getElementById(s.id);
+    if(el && !visible.includes(s.id)) el.style.display='none';
+  });
+})();
+</script>
+
+<div id="sec-growth">
 ${(() => {
   // Group 7d snapshots by date, take last snapshot of each day
   const dailyMap = new Map<string, { total: number; wallet: number; position: number; solPrice: number; totalSol: number }>();
@@ -2631,15 +3329,17 @@ ${(() => {
 </div>`;
 })()}
 
-${buildDailyFeesChart(data.snapshots7d)}
+</div>
+<div id="sec-daily7d">${buildDailyFeesChart(data.snapshots7d)}</div>
 
-<div class="card" style="margin-bottom:16px">
+<div id="sec-hourly"><div class="card" style="margin-bottom:16px">
   <h2>Hourly Fee Breakdown</h2>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
     <label style="color:#8b949e;font-size:12px">Select day:</label>
     <select id="fee-day-select" style="background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-size:13px"></select>
     <span id="fee-day-total" style="color:#ffd700;font-size:13px;font-weight:bold"></span>
     <span id="fee-day-avg" style="color:#8b949e;font-size:11px"></span>
+    <span style="color:#8b949e;font-size:10px;margin-left:auto">(CET)</span>
   </div>
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;color:#8b949e">
     <span><span style="display:inline-block;width:10px;height:10px;background:#ffd700;border-radius:2px;vertical-align:middle"></span> &gt;$2/hr (high)</span>
@@ -2763,7 +3463,9 @@ ${buildDailyFeesChart(data.snapshots7d)}
   }, msToNextHour);
 })();
 </script>
+</div>
 
+<div id="sec-positions">
 ${(() => {
   // Build position history from rebalance events: pair opens with closes
   const closeTypes = new Set(['T1_DOWNSIDE', 'T1_UPSIDE', 'OOR_BELOW', 'OOR_ABOVE', 'POSITION_CLOSED']);
@@ -2869,7 +3571,8 @@ ${(() => {
 </div>`;
 })()}
 
-<div class="section-title">Market Signals (Enhanced Regime)</div>
+</div>
+<div id="sec-signals"><div class="section-title">Market Signals (Enhanced Regime)</div>
 <div class="card" style="margin-bottom:16px" id="market-signals-card">
   <div style="color:#8b949e;font-size:12px">Loading market signals...</div>
 </div>
@@ -2923,6 +3626,19 @@ ${(() => {
         <div><span style="color:#8b949e">Fear & Greed</span><br><span style="font-size:16px;font-weight:bold;color:\${fgCol(s.fearGreedIndex)}">\${s.fearGreedIndex != null ? s.fearGreedIndex + ' (' + (s.fearGreedLabel || '') + ')' : 'n/a'}</span></div>
         <div><span style="color:#8b949e">Confidence</span><br><span style="font-size:16px;font-weight:bold;color:\${base && base.confidence >= 3 ? '#22c55e' : base && base.confidence >= 2 ? '#eab308' : '#8b949e'}">\${base ? base.confidence + '/5' : 'n/a'}</span></div>
       </div>
+      \${s.ta ? \`
+      <div style="font-size:11px;color:#ffd700;font-weight:bold;margin-top:12px;margin-bottom:6px">Technical Analysis (30min candles)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;font-size:12px">
+        <div><span style="color:#8b949e">RSI(14)</span><br><span style="font-size:16px;font-weight:bold;color:\${s.ta.rsi14 > 70 ? '#ef4444' : s.ta.rsi14 < 30 ? '#22c55e' : '#c9d1d9'}">\${s.ta.rsi14 != null ? fmt(s.ta.rsi14, 0) : 'n/a'}</span><br><span style="font-size:9px;color:#555">\${s.ta.rsi14 > 70 ? 'overbought' : s.ta.rsi14 < 30 ? 'oversold' : 'neutral'}</span></div>
+        <div><span style="color:#8b949e">BB Width</span><br><span style="font-size:16px;font-weight:bold;color:\${s.ta.bbWidth > 3 ? '#ef4444' : s.ta.bbWidth < 1 ? '#22c55e' : '#c9d1d9'}">\${s.ta.bbWidth != null ? fmt(s.ta.bbWidth, 1) + '%' : 'n/a'}</span><br><span style="font-size:9px;color:#555">\${s.ta.bbWidth > 3 ? 'expansion' : s.ta.bbWidth < 1 ? 'squeeze' : 'normal'}</span></div>
+        <div><span style="color:#8b949e">Trend</span><br><span style="font-size:16px;font-weight:bold;color:\${s.ta.trendDirection === 'UP' ? '#22c55e' : s.ta.trendDirection === 'DOWN' ? '#ef4444' : '#c9d1d9'}">\${s.ta.trendDirection || 'n/a'}</span><br><span style="font-size:9px;color:#555">EMA9 vs SMA20</span></div>
+        <div><span style="color:#8b949e">ATR(14)</span><br><span style="font-size:16px;font-weight:bold;color:#c9d1d9">\${s.ta.atr14 != null ? '$' + fmt(s.ta.atr14, 2) : 'n/a'}</span><br><span style="font-size:9px;color:#555">avg range/candle</span></div>
+        <div><span style="color:#8b949e">Support</span><br><span style="font-size:16px;font-weight:bold;color:#22c55e">\${s.ta.support != null ? '$' + fmt(s.ta.support, 2) : 'n/a'}</span></div>
+        <div><span style="color:#8b949e">Resistance</span><br><span style="font-size:16px;font-weight:bold;color:#ef4444">\${s.ta.resistance != null ? '$' + fmt(s.ta.resistance, 2) : 'n/a'}</span></div>
+        <div><span style="color:#8b949e">BB Position</span><br><span style="font-size:16px;font-weight:bold;color:\${s.ta.bbPosition > 0.8 ? '#ef4444' : s.ta.bbPosition < 0.2 ? '#22c55e' : '#c9d1d9'}">\${s.ta.bbPosition != null ? (s.ta.bbPosition * 100).toFixed(0) + '%' : 'n/a'}</span><br><span style="font-size:9px;color:#555">0=lower 100=upper</span></div>
+        <div><span style="color:#8b949e">vs SMA20</span><br><span style="font-size:16px;font-weight:bold;color:\${col(s.ta.priceVsSma)}">\${s.ta.priceVsSma != null ? pct(s.ta.priceVsSma) : 'n/a'}</span><br><span style="font-size:9px;color:#555">mean reversion</span></div>
+      </div>
+      \` : ''}
       \${base && base.overrideReason ? '<div style="margin-top:8px;padding:6px 10px;background:#ef444415;border-left:3px solid #ef4444;border-radius:0 4px 4px 0;font-size:11px;color:#ef4444"><b>Override:</b> ' + base.overrideReason + '</div>' : ''}
       <div style="margin-top:8px;font-size:10px;color:#8b949e">Updated \${age}m ago\${s.errors && s.errors.length > 0 ? ' · Errors: ' + s.errors.join(', ') : ''}</div>
       <div id="mkt-commentary" style="margin-top:12px;padding:10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:12px;line-height:1.6;color:#c9d1d9"></div>
@@ -3008,19 +3724,22 @@ ${(() => {
 })();
 </script>
 
-<div class="section-title">In-Range Performance</div>
+</div>
+<div id="sec-inrange"><div class="section-title">In-Range Performance</div>
 <div class="gauge-row">
   <div class="card">${gauge(data.inRangePct1h, 'Last 1 Hour')}</div>
   <div class="card">${gauge(data.inRangePct24h, 'Last 24 Hours')}</div>
   <div class="card">${gauge(data.inRangePctAll, 'All Time')}</div>
 </div>
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Regime Changes</div>
+</div>
+<div id="sec-regime"><div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Regime Changes</div>
 <div class="card" style="margin-bottom:16px">
   ${regimeCards}
 </div>
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Event Log <span style="font-size:11px;color:#8b949e;font-weight:normal">(last 10 — <a href="/api/events" target="_blank" style="color:#58a6ff">download full log</a>)</span></div>
+</div>
+<div id="sec-events"><div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">Event Log <span style="font-size:11px;color:#8b949e;font-weight:normal">(last 10 — <a href="/api/events" target="_blank" style="color:#58a6ff">download full log</a>)</span></div>
 ${data.events.slice(0, 10).length > 0 ? data.events.slice(0, 10).map(e => {
     const t = new Date(e.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: TZ });
     const typeColors: Record<string, string> = {
@@ -3092,7 +3811,8 @@ ${(() => {
 </div>`;
 })()}
 
-<div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">On-Chain Transactions (last 10)</div>
+</div>
+<div id="sec-txs"><div style="font-size:14px;color:#58a6ff;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #21262d">On-Chain Transactions (last 10)</div>
 <div class="card" style="margin-bottom:16px">
 ${data.recentTxs.length > 0 ? `
   ${(() => {
@@ -3137,7 +3857,8 @@ ${data.recentTxs.length > 0 ? `
 ` : '<div style="color:#8b949e;text-align:center;padding:16px">No transactions found</div>'}
 </div>
 
-<div class="section-title">Swap P&amp;L Tracker</div>
+</div>
+<div id="sec-swappnl"><div class="section-title">Swap P&amp;L Tracker</div>
 <div class="card" style="margin-bottom:16px">
   <div id="swap-pnl-container"><div style="color:#8b949e;text-align:center;padding:20px">Loading swap data...</div></div>
 </div>
@@ -3146,20 +3867,36 @@ ${data.recentTxs.length > 0 ? `
   var TZ = 'Europe/Berlin';
   function sfmt(n, d) { return n != null ? Number(n).toFixed(d != null ? d : 2) : '--'; }
 
-  fetch('/api/swap-ledger').then(function(r) { return r.json(); }).then(function(data) {
+  Promise.all([fetch('/api/swap-ledger').then(function(r) { return r.json(); }), fetch('/api/live').then(function(r) { return r.json(); }).catch(function() { return null; })]).then(function(results) {
+    var data = results[0]; var live = results[1];
     var c = document.getElementById('swap-pnl-container');
     if (!c) return;
     if (!data.swaps || data.swaps.length === 0) {
       c.innerHTML = '<div style="color:#8b949e;text-align:center;padding:20px">No swaps recorded yet. Swaps will appear here when the bot rebalances.</div>';
       return;
     }
+    var globalBasis = live && live.solCostBasis > 0 ? live.solCostBasis : 0;
+    var walletSol = live && live.solBalance > 0 ? live.solBalance : 0;
+    var solPrice = live && live.solPrice > 0 ? live.solPrice : 0;
+    var unrealised = globalBasis > 0 && walletSol > 0 && solPrice > 0 ? (solPrice - globalBasis) * walletSol : null;
+    var basisHeaderHtml = '';
+    if (globalBasis > 0) {
+      var unrStr = unrealised != null ? ((unrealised >= 0 ? '+' : '') + unrealised.toFixed(2)) : '—';
+      var unrCol = unrealised != null ? (unrealised >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
+      basisHeaderHtml = '<div style="font-size:11px;margin-bottom:10px;padding:7px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px">'
+        + '<span style="color:#8b949e">Current SOL Avg Basis: </span><span style="color:#c9d1d9;font-weight:bold">$' + globalBasis.toFixed(2) + '</span>'
+        + (walletSol > 0 ? ' <span style="color:#8b949e;margin-left:8px">| Wallet: </span><span style="color:#c9d1d9">' + walletSol.toFixed(1) + ' SOL</span>' : '')
+        + (unrealised != null ? ' <span style="color:#8b949e;margin-left:8px">| Unrealised: </span><span style="color:' + unrCol + ';font-weight:bold">' + unrStr + '</span>' : '')
+        + '</div>';
+    }
+
     var s = data.summary;
     var pnlCount = s.profitable + s.unprofitable;
     var winRate = pnlCount > 0 ? (s.profitable / pnlCount * 100) : 0;
     var totalPnlCol = s.totalPnl >= 0 ? '#22c55e' : '#ef4444';
     var wrCol = winRate >= 50 ? '#22c55e' : '#ef4444';
 
-    var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px;margin-bottom:14px">';
+    var html = basisHeaderHtml + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px;margin-bottom:14px">';
     html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + totalPnlCol + '">' + (s.totalPnl >= 0 ? '+' : '') + '$' + sfmt(Math.abs(s.totalPnl), 2) + '</div><div style="font-size:9px;color:#8b949e">Sell P&amp;L</div></div>';
     html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#58a6ff">' + (s.buys || 0) + '</div><div style="font-size:9px;color:#8b949e">Buys</div></div>';
     html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:#a855f7">' + (s.sells || 0) + '</div><div style="font-size:9px;color:#8b949e">Sells</div></div>';
@@ -3168,63 +3905,78 @@ ${data.recentTxs.length > 0 ? `
     html += '<div style="text-align:center"><div style="font-size:16px;font-weight:bold;color:' + wrCol + '">' + sfmt(winRate, 0) + '%</div><div style="font-size:9px;color:#8b949e">Win Rate</div></div>';
     html += '</div>';
 
-    html += '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;border-collapse:collapse;font-size:11px">';
-    html += '<thead><tr>';
-    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;white-space:nowrap;font-size:10px">Time</th>';
-    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Source</th>';
-    html += '<th style="text-align:left;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Dir</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">SOL</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">USDC</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Price</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Gas</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Fee</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Gross</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px">Net</th>';
-    html += '<th style="text-align:right;padding:5px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:10px;white-space:nowrap">Cost Basis</th>';
-    html += '</tr></thead><tbody>';
-
-    data.swaps.forEach(function(sw) {
-      var t = new Date(sw.timestamp).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-      var isBuy = sw.direction === 'buy_sol';
-      var dirCol = isBuy ? '#22c55e' : '#ef4444';
-      var dirLabel = isBuy ? 'BUY' : 'SELL';
+    // Store swaps + enrich with computed fields for sorting
+    var swaps = data.swaps.map(function(sw) {
       var price = sw.price || 0;
       var gasEst = 10000 * price / 1e9;
       var protoFee = (sw.usdc_amount || 0) * 0.0006;
       var gross = sw.pnl_usdc != null ? sw.pnl_usdc : null;
       var net = gross != null ? gross - gasEst - protoFee : null;
-      var grossCol = gross != null ? (gross >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
-      var netCol = net != null ? (net >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
-      var cbBefore = sw.cost_basis_before != null ? '$' + sfmt(sw.cost_basis_before, 2) : '--';
-      var cbAfter = sw.cost_basis_after != null ? '$' + sfmt(sw.cost_basis_after, 2) : '--';
-
-      // Determine source from reason
       var reason = sw.reason || '';
       var source = 'unknown';
-      var srcCol = '#8b949e';
-      if (reason.indexOf('SIR') >= 0) { source = 'SIR'; srcCol = '#a855f7'; }
-      else if (reason.indexOf('Pre-open') >= 0) { source = 'Pre-open'; srcCol = '#58a6ff'; }
-      else if (reason.indexOf('Add liquidity') >= 0 || reason.indexOf('match position') >= 0) { source = 'Auto-deploy'; srcCol = '#22c55e'; }
-      else if (reason.indexOf('Idle') >= 0 || reason.indexOf('idle') >= 0) { source = 'Idle Rebal'; srcCol = '#eab308'; }
-      else if (reason.indexOf('harvest') >= 0 || reason.indexOf('Harvest') >= 0) { source = 'Harvest'; srcCol = '#ffd700'; }
-
-      html += '<tr style="border-bottom:1px solid #21262d">';
-      html += '<td style="padding:4px;white-space:nowrap;font-size:10px;color:#8b949e">' + t + '</td>';
-      html += '<td style="padding:4px;font-size:10px;font-weight:bold;color:' + srcCol + '">' + source + '</td>';
-      html += '<td style="padding:4px;color:' + dirCol + ';font-weight:bold;font-size:10px">' + dirLabel + '</td>';
-      html += '<td style="padding:4px;text-align:right;font-family:monospace">' + sfmt(sw.sol_amount, 4) + '</td>';
-      html += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(sw.usdc_amount, 2) + '</td>';
-      html += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(price, 2) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sfmt(gasEst, 4) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px">$' + sfmt(protoFee, 4) + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:' + grossCol + '">' + (gross != null ? (gross >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(gross), 4) : '--') + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:' + netCol + ';font-weight:bold">' + (net != null ? (net >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(net), 4) : '--') + '</td>';
-      html += '<td style="padding:4px;text-align:right;color:#8b949e;font-size:10px;white-space:nowrap">' + cbBefore + ' &rarr; ' + cbAfter + '</td>';
-      html += '</tr>';
+      if (reason.indexOf('SIR') >= 0) source = 'SIR';
+      else if (reason.indexOf('Pre-open') >= 0) source = 'Pre-open';
+      else if (reason.indexOf('Add liquidity') >= 0 || reason.indexOf('match position') >= 0) source = 'Auto-deploy';
+      else if (reason.indexOf('Idle') >= 0 || reason.indexOf('idle') >= 0) source = 'Idle Rebal';
+      else if (reason.indexOf('harvest') >= 0 || reason.indexOf('Harvest') >= 0) source = 'Harvest';
+      return { ts: sw.timestamp, source: source, dir: sw.direction === 'buy_sol' ? 'BUY' : 'SELL', sol: sw.sol_amount, usdc: sw.usdc_amount, price: price, basis: sw.cost_basis_after || 0, gas: gasEst, fee: protoFee, gross: gross, net: net, cbBefore: sw.cost_basis_before, cbAfter: sw.cost_basis_after };
     });
 
-    html += '</tbody></table></div>';
+    var sortCol = 'ts'; var sortAsc = false;
+    function renderTable() {
+      var sorted = swaps.slice().sort(function(a, b) {
+        var va = a[sortCol], vb = b[sortCol];
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1; if (vb == null) return -1;
+        if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+        return sortAsc ? va - vb : vb - va;
+      });
+      var thStyle = 'padding:5px 4px;color:#58a6ff;border-bottom:1px solid #30363d;font-size:10px;cursor:pointer;user-select:none';
+      var arrow = function(col) { return sortCol === col ? (sortAsc ? ' ▲' : ' ▼') : ''; };
+      var tbl = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table id="swap-tbl" style="width:100%;border-collapse:collapse;font-size:11px">';
+      tbl += '<thead><tr>';
+      tbl += '<th style="text-align:left;' + thStyle + '" data-col="ts">Time' + arrow('ts') + '</th>';
+      tbl += '<th style="text-align:left;' + thStyle + '" data-col="source">Source' + arrow('source') + '</th>';
+      tbl += '<th style="text-align:left;' + thStyle + '" data-col="dir">Dir' + arrow('dir') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="sol">SOL' + arrow('sol') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="usdc">USDC' + arrow('usdc') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="price">Price' + arrow('price') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="basis">Avg Basis' + arrow('basis') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="gross">Gross' + arrow('gross') + '</th>';
+      tbl += '<th style="text-align:right;' + thStyle + '" data-col="net">Net' + arrow('net') + '</th>';
+      tbl += '</tr></thead><tbody>';
+      var srcColors = {'SIR':'#a855f7','Pre-open':'#58a6ff','Auto-deploy':'#22c55e','Idle Rebal':'#eab308','Harvest':'#ffd700','unknown':'#8b949e'};
+      sorted.forEach(function(r) {
+        var t = new Date(r.ts).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+        var dirCol = r.dir === 'BUY' ? '#22c55e' : '#ef4444';
+        var grossCol = r.gross != null ? (r.gross >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
+        var netCol = r.net != null ? (r.net >= 0 ? '#22c55e' : '#ef4444') : '#8b949e';
+        tbl += '<tr style="border-bottom:1px solid #21262d">';
+        tbl += '<td style="padding:4px;white-space:nowrap;font-size:10px;color:#8b949e">' + t + '</td>';
+        tbl += '<td style="padding:4px;font-size:10px;font-weight:bold;color:' + (srcColors[r.source]||'#8b949e') + '">' + r.source + '</td>';
+        tbl += '<td style="padding:4px;color:' + dirCol + ';font-weight:bold;font-size:10px">' + r.dir + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;font-family:monospace">' + sfmt(r.sol, 4) + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(r.usdc, 2) + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;font-family:monospace">$' + sfmt(r.price, 2) + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;font-family:monospace;color:#58a6ff">' + (r.basis > 0 ? '$' + sfmt(r.basis, 2) : '--') + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;color:' + grossCol + '">' + (r.gross != null ? (r.gross >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(r.gross), 4) : '--') + '</td>';
+        tbl += '<td style="padding:4px;text-align:right;color:' + netCol + ';font-weight:bold">' + (r.net != null ? (r.net >= 0 ? '+' : '-') + '$' + sfmt(Math.abs(r.net), 4) : '--') + '</td>';
+        tbl += '</tr>';
+      });
+      tbl += '</tbody></table></div>';
+      document.getElementById('swap-tbl-wrap').innerHTML = tbl;
+      // Attach click handlers
+      document.querySelectorAll('#swap-tbl th[data-col]').forEach(function(th) {
+        th.addEventListener('click', function() {
+          var col = th.getAttribute('data-col');
+          if (sortCol === col) sortAsc = !sortAsc; else { sortCol = col; sortAsc = col === 'ts' ? false : true; }
+          renderTable();
+        });
+      });
+    }
+    html += '<div id="swap-tbl-wrap"></div>';
     c.innerHTML = html;
+    renderTable();
   }).catch(function(e) {
     var c = document.getElementById('swap-pnl-container');
     if (c) c.innerHTML = '<div style="color:#ef4444;text-align:center;padding:16px">Failed to load swap data</div>';
@@ -3232,7 +3984,41 @@ ${data.recentTxs.length > 0 ? `
 })();
 </script>
 
+</div>
+<div id="sec-solprice"><div class="section-title">SOL Daily Price</div>
 <div class="card" style="margin-bottom:16px">
+${(() => {
+  const sums = data.dailySummaries;
+  if (!sums || sums.length === 0) return '<div style="color:#8b949e;text-align:center;padding:16px">No daily data yet</div>';
+  const sorted = [...sums].sort((a, b) => b.date.localeCompare(a.date));
+  let html = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="width:100%;border-collapse:collapse;font-size:12px">';
+  html += '<thead><tr>';
+  html += '<th style="text-align:left;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:11px">Date</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:11px">Close Price</th>';
+  html += '<th style="text-align:right;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:11px">Change</th>';
+  html += '<th style="text-align:left;padding:6px 4px;color:#8b949e;border-bottom:1px solid #30363d;font-size:11px">Regime</th>';
+  html += '</tr></thead><tbody>';
+  sorted.forEach((s, i) => {
+    const prev = sorted[i + 1];
+    const change = prev ? ((s.sol_price - prev.sol_price) / prev.sol_price * 100) : null;
+    const chgCol = change === null ? '#8b949e' : change >= 0 ? '#22c55e' : '#ef4444';
+    const chgStr = change === null ? '--' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+    const regimeColours: Record<string, string> = { RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7' };
+    const rCol = regimeColours[s.regime ?? ''] || '#8b949e';
+    html += `<tr style="border-bottom:1px solid #21262d">`;
+    html += `<td style="padding:5px 4px;color:#c9d1d9;white-space:nowrap">${s.date}</td>`;
+    html += `<td style="padding:5px 4px;text-align:right;font-family:monospace;color:#c9d1d9">$${s.sol_price.toFixed(2)}</td>`;
+    html += `<td style="padding:5px 4px;text-align:right;font-family:monospace;color:${chgCol}">${chgStr}</td>`;
+    html += `<td style="padding:5px 4px"><span style="font-size:10px;padding:2px 6px;border-radius:4px;background:${rCol}20;color:${rCol}">${s.regime ?? '--'}</span></td>`;
+    html += `</tr>`;
+  });
+  html += '</tbody></table></div>';
+  return html;
+})()}
+</div>
+
+</div>
+<div id="sec-downloads"><div class="card" style="margin-bottom:16px">
   <h2>Download Logs</h2>
   <p style="color:#8b949e;font-size:12px;margin-bottom:12px">Decision logs are recorded every 30 minutes (HOLD) and regime evaluations every 1 hour. Download for offline analysis.</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -3243,7 +4029,7 @@ ${data.recentTxs.length > 0 ? `
     <a href="/api/rule2-perf" target="_blank" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Rule 2 Performance (JSON)</a>
     <a href="/api/rule2-events.csv" style="background:#21262d;color:#58a6ff;padding:10px 12px;border-radius:6px;text-decoration:none;font-size:12px;text-align:center">Events CSV (with Rule 2 flag)</a>
   </div>
-</div>
+</div></div>
 
 </body>
 </html>`;
@@ -3265,6 +4051,10 @@ function renderConfigHtml(): string {
     { key: 'solReentrySplit', label: 'SOL re-entry split', desc: 'Target SOL fraction of wallet after downside exit (0-1).', ex: '0.50→0.30: hold 30% SOL / 70% USDC. Less SOL exposure on drops.' },
     { key: 'harvestIntervalDays', label: 'Harvest days', desc: 'Collect fees every N days. Lower = lock gains sooner.', ex: '7→3: harvest twice a week instead of once. More TXs but locks gains.' },
     { key: 'harvestSolConvertPct', label: 'SOL→USDC harvest %', desc: 'After harvest, convert this % of SOL fees to USDC (0-1).', ex: '0→0.50: convert half of harvested SOL to USDC. De-risks gains.' },
+    { key: 'usdcDepositPct', label: 'USDC deposit %', desc: 'USDC portion of LP deposit as fraction of position size (0-1).', ex: '0.35→0.40: reserves more USDC for deposit. Affects reserve gate calculation.' },
+    { key: 'deployRatioTolerance', label: 'Deploy ratio tolerance', desc: 'Max price deviation from midpoint for auto-deploy to fire (0-1).', ex: '0.020→0.050: deploys even near range edges. At 0.01: only near center.' },
+    { key: 'basisGateThreshold', label: 'Basis gate threshold', desc: 'Price must be >= basis × threshold to open position. Lower = more permissive.', ex: '0.999 = 0.1% buffer. 0.995 = 0.5% buffer. 0.992 = 0.8% buffer.' },
+    { key: 'proximityDeployThreshold', label: 'Prox deploy threshold', desc: 'Max proximity to lower bound before auto-deploy pauses (0-1).', ex: '0.40→0.55: deploys closer to edge. 0.40: pauses when 40% to lower bound.' },
   ];
 
   // Original defaults from constants (for "Default" column)
@@ -3371,6 +4161,28 @@ ${NAV_HTML}
     ${field('decisionIntervalSeconds', c.decisionIntervalSeconds, 60, 'Cycle interval (sec)', 'How often the bot reads price and makes decisions.', 'At 30s: faster OOR detection but 2x RPC calls. At 120s: saves RPC but slower reaction.')}
     ${field('regimeWindowDays', c.regimeWindowDays, 7, 'Regime window (days)', 'Days of daily closes for regime detection.', 'At 14 days: smoother regime, slower to react. At 3 days: reactive but may flap.')}
     ${field('trendThreshold', c.trendThreshold, 0.35, 'Trend threshold', 'dirRatio above this = trending. Higher = stays RANGING longer.', 'At 0.50: only strong trends flip regime. At 0.20: even mild trends trigger.')}
+  </table>
+</div>
+
+<!-- SECTION 1b: Bot Timing & Control -->
+<div class="cfg-section">
+  <h3>1b. Bot Timing &amp; Control</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('regimeCheckIntervalMs', c.regimeCheckIntervalMs, 120000, 'Regime check interval (ms)', 'How often TA regime detection runs. 120000 = 2 min.', 'At 60000: checks every minute. At 300000: every 5 min. Lower = faster regime changes.')}
+    ${field('autoDeployCheckIntervalSec', c.autoDeployCheckIntervalSec, 10, 'Auto-deploy interval (sec)', 'How often auto-deploy attempts to add idle capital.', 'At 10: checks every cycle. At 60: checks once per minute. At 300: every 5 min.')}
+    ${field('solConversionCooldownMin', c.solConversionCooldownMin, 15, 'SOL conversion cooldown (min)', 'Minutes between automated SOL to USDC conversions.', 'At 15: converts at most once every 15 min. At 30: more conservative.')}
+    ${field('solConversionBasisMultiplier', c.solConversionBasisMultiplier, 1.002, 'SOL conversion basis multiplier', 'Price must be > basis × this to convert. 1.002 = 0.2% above basis.', 'At 1.005: needs 0.5% margin. At 1.002: needs 0.2% margin. At 1.000: any price above basis.')}
+    <tr style="border-bottom:1px solid #21262d">
+      <td style="padding:6px 8px">Regime change reopen<span class="info-btn" onclick="showInfo('Regime change reopen','When regime changes, close current position and reopen with new regime params.','Enabled: bot adapts range/skew to new regime immediately. Disabled: keeps current position until natural exit.')">?</span></td>
+      <td style="color:#30363d">true</td>
+      <td><select class="cfg-input" data-key="regimeChangeReopenEnabled" style="width:80px">
+        <option value="true" ${c.regimeChangeReopenEnabled ? 'selected' : ''}>Enabled</option>
+        <option value="false" ${!c.regimeChangeReopenEnabled ? 'selected' : ''}>Disabled</option>
+      </select></td>
+      <td style="color:#8b949e;font-size:11px">Close and reopen position when regime changes</td>
+      <td style="color:#484f58;font-size:10px">Enabled: adapts immediately. Disabled: waits for natural exit.</td>
+    </tr>
   </table>
 </div>
 
@@ -4321,409 +5133,178 @@ ${NAV_HTML}
 }
 
 // ── ARCADE PAGE ──────────────────────────────────────────────────────────
-// Metal Slug themed, mobile-first, character changes with bot state
 
 function renderArcadeHtml(): string {
   return `<!DOCTYPE html>
-<html><head>
+<html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>METAL LP — ARCADE</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MISSION STATUS</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a18;color:#ddd;font-family:'Press Start 2P',monospace;font-size:9px;overflow-x:hidden;-webkit-tap-highlight-color:transparent}
-body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0.12) 0px,rgba(0,0,0,0.12) 1px,transparent 1px,transparent 3px);pointer-events:none;z-index:9999}
+:root{--bg:#1a1a0a;--orange:#ff6600;--yellow:#ffcc00;--green:#00cc44;--red:#cc0000;--khaki:#8b8b4b;--white:#fff;--pink:#ff00ff}
+body{background:var(--bg);color:var(--white);font-family:'Press Start 2P',monospace;font-size:10px;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow-x:hidden;text-transform:uppercase}
+body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0.15) 0px,rgba(0,0,0,0.15) 2px,transparent 2px,transparent 4px);pointer-events:none;z-index:9999}
+#loading{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9998}
+#loading .lt{color:var(--yellow);font-size:16px;animation:blink 1s step-end infinite}
+#loading .lbar{width:280px;height:14px;background:#222;border:1px solid var(--khaki);margin:16px 0;border-radius:2px;overflow:hidden;position:relative}
+#loading .lbar::after{content:'';position:absolute;top:0;left:-40%;width:40%;height:100%;background:var(--orange);animation:loadSlide 1.2s ease-in-out infinite}
+#loading .lsub{color:var(--khaki);font-size:8px;animation:blink 2s step-end infinite}
+#main{width:min(95vw,860px);border:3px dashed var(--khaki);padding:28px;position:relative;background:rgba(0,0,0,0.3);display:none}
+#main::before,#main::after{content:'';position:absolute;width:12px;height:12px;border-color:var(--khaki);border-style:solid}
+#main::before{top:-1px;left:-1px;border-width:3px 0 0 3px}
+#main::after{top:-1px;right:-1px;border-width:3px 3px 0 0}
+.corners::before,.corners::after{content:'';position:absolute;width:12px;height:12px;border-color:var(--khaki);border-style:solid}
+.corners::before{bottom:-1px;left:-1px;border-width:0 0 3px 3px}
+.corners::after{bottom:-1px;right:-1px;border-width:0 3px 3px 0}
+.title{color:var(--yellow);font-size:14px;margin-bottom:4px}
+.sub{display:flex;justify-content:space-between;color:var(--khaki);font-size:8px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid #333}
+.port{text-align:center;margin:20px 0}
+.port .label{color:var(--yellow);font-size:11px;margin-bottom:8px;letter-spacing:2px}
+.port .val{color:var(--orange);font-size:52px;line-height:1;text-shadow:0 0 20px rgba(255,102,0,0.3)}
+.port .chg{margin-top:8px;font-size:16px}
+.chg.pos{color:var(--green);text-shadow:0 0 8px rgba(0,204,68,0.3);animation:glowG 2s ease-in-out infinite}
+.chg.neg{color:var(--red);text-shadow:0 0 8px rgba(204,0,0,0.3);animation:glowR 2s ease-in-out infinite}
+.intel{color:var(--yellow);font-size:10px;margin:20px 0 10px;letter-spacing:2px}
+.fees{display:flex;gap:16px;margin-bottom:16px}
+.fees .stat{flex:1;text-align:center;padding:10px 6px;border:1px dashed #444}
+.fees .stat .lbl{color:var(--khaki);font-size:8px;margin-bottom:6px}
+.fees .stat .v{font-size:22px}
+.fees .stat .var{font-size:8px;margin-top:4px}
+.regime{margin:16px 0;font-size:14px}
+.meta{margin-top:16px;padding-top:8px;border-top:1px solid #333;font-size:9px;color:#666}
+.meta .row{display:flex;justify-content:space-between;margin-bottom:4px}
+.coin-wrap{text-align:center;margin-top:10px}
+.coin{color:var(--pink);font-size:12px;animation:blink 0.8s step-end infinite}
+.extreme{animation:borderFlash 0.5s step-end infinite}
 @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
-@keyframes walk{0%{transform:scaleX(1) translateY(0)}25%{transform:scaleX(1) translateY(-4px)}50%{transform:scaleX(1) translateY(0)}75%{transform:scaleX(1) translateY(-2px)}}
-@keyframes idle{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
-@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
-@keyframes explode{0%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:0.8}100%{transform:scale(0.8);opacity:0.6}}
-@keyframes coinFloat{0%{transform:translateY(0) rotate(0)}50%{transform:translateY(-8px) rotate(180deg)}100%{transform:translateY(0) rotate(360deg)}}
-@keyframes hpPulse{0%,100%{box-shadow:0 0 4px rgba(0,255,0,0.3)}50%{box-shadow:0 0 12px rgba(0,255,0,0.8)}}
-.s{max-width:480px;margin:0 auto;padding:8px}
-.nav{display:flex;flex-wrap:wrap;justify-content:center;gap:4px;margin-bottom:8px}
-.nav a{color:#666;text-decoration:none;font-size:7px;padding:3px 6px;border:1px solid #333;border-radius:2px}
-.nav a:hover,.nav a.on{color:#ff0;border-color:#ff0}
-
-/* Title */
-.title{text-align:center;font-size:14px;color:#ff4136;text-shadow:2px 2px #000,0 0 10px #f00;margin:10px 0 2px;letter-spacing:2px}
-.sub{text-align:center;font-size:7px;color:#666;margin-bottom:12px}
-
-/* HUD bar - 2x2 grid on mobile */
-.hud{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px}
-.hud-item{background:#111;border:1px solid #333;padding:6px;text-align:center;border-radius:2px}
-.hud-label{color:#888;font-size:6px;margin-bottom:3px;text-transform:uppercase}
-.hud-val{font-size:12px;text-shadow:0 0 6px currentColor}
-.gold{color:#ffd700}.grn{color:#0f0}.red{color:#f44}.cyan{color:#0ff}
-
-/* Arena */
-.arena{position:relative;height:120px;background:linear-gradient(180deg,#0a0a2a 0%,#0a1a0a 70%,#1a2a1a 100%);border:2px solid #333;margin-bottom:8px;overflow:hidden;border-radius:4px;touch-action:none}
-.arena .sky{position:absolute;top:8px;right:8px;font-size:7px;color:#555}
-.arena .ground{position:absolute;bottom:0;left:0;right:0;height:18px;background:repeating-linear-gradient(90deg,#2a3a1a 0px,#2a3a1a 12px,#1a2a0a 12px,#1a2a0a 24px);border-top:2px solid #4a6a2a}
-.arena .range{position:absolute;bottom:0;height:100%;border-left:2px solid #0a0;border-right:2px solid #0a0;background:rgba(0,180,0,0.05)}
-.arena .range-lbl{position:absolute;bottom:20px;font-size:6px;color:#0a0}
-.arena .range-lbl.lo{left:2px}.arena .range-lbl.hi{right:2px}
-.arena .pline{position:absolute;bottom:18px;width:2px;height:70px;background:#ff0;box-shadow:0 0 8px #ff0}
-.arena .ptag{position:absolute;top:6px;font-size:7px;color:#ff0;white-space:nowrap}
-.arena .soldier{position:absolute;bottom:20px;font-size:36px;transition:left 2s ease;z-index:10;filter:drop-shadow(0 0 6px rgba(255,200,0,0.4))}
-.arena .soldier.walk{animation:walk 0.6s steps(4) infinite}
-.arena .soldier.idle{animation:idle 2s ease-in-out infinite}
-.arena .soldier.shake{animation:shake 0.3s ease infinite}
-.arena .soldier.explode{animation:explode 1s ease infinite}
-.arena .speech{position:absolute;bottom:62px;background:#111;border:1px solid #666;padding:3px 6px;font-size:6px;color:#fff;border-radius:4px;white-space:nowrap;z-index:11}
-.arena .speech::after{content:'';position:absolute;bottom:-5px;left:12px;border:4px solid transparent;border-top-color:#666}
-/* Enemies (IL, OOR) */
-.arena .enemy{position:absolute;bottom:20px;font-size:24px;opacity:0.7;transition:left 2s ease}
-.arena .coins{position:absolute;font-size:14px;animation:coinFloat 2s ease-in-out infinite}
-
-/* HP / XP bars */
-.bars{margin-bottom:8px}
-.bar-row{display:flex;align-items:center;gap:4px;margin-bottom:4px}
-.bar-row .lbl{width:28px;font-size:6px;color:#888;flex-shrink:0}
-.bar-bg{flex:1;height:10px;background:#1a1a1a;border:1px solid #333;border-radius:1px;overflow:hidden}
-.bar-fill{height:100%;transition:width 1s ease;position:relative}
-.bar-fill::after{content:'';position:absolute;inset:0;background:repeating-linear-gradient(90deg,rgba(255,255,255,0.08) 0px,rgba(255,255,255,0.08) 3px,transparent 3px,transparent 6px)}
-.bar-row .val{width:40px;font-size:7px;text-align:right;flex-shrink:0}
-
-/* Stats grid */
-.stats{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px}
-.stat-box{background:#111;border:1px solid #333;padding:6px;border-radius:2px}
-.stat-box h3{font-size:7px;margin-bottom:6px;text-shadow:0 0 4px currentColor}
-.stat-box .r{display:flex;justify-content:space-between;margin-bottom:3px}
-.stat-box .k{color:#888;font-size:7px}.stat-box .v{font-size:8px}
-
-/* Mood */
-.mood{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px}
-.mood h3{font-size:7px;color:#f0f;margin-bottom:4px}
-.mood-bar{display:flex;height:8px;border:1px solid #333;overflow:hidden;border-radius:1px;margin-bottom:2px}
-.mood-seg{flex:1;height:100%}
-.mood-labels{display:flex;justify-content:space-between;font-size:6px}
-
-/* Badges */
-.badges{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px}
-.badges h3{font-size:7px;color:#0ff;margin-bottom:6px}
-.badge{display:inline-block;margin:2px;padding:3px 5px;border:1px solid;font-size:6px;border-radius:2px}
-.badge.yes{border-color:#ffd700;color:#ffd700;background:rgba(255,215,0,0.08)}
-.badge.no{border-color:#222;color:#333}
-
-/* Log */
-.log{background:#111;border:1px solid #333;padding:6px;margin-bottom:8px;border-radius:2px;max-height:180px;overflow-y:auto;-webkit-overflow-scrolling:touch}
-.log h3{font-size:7px;color:#f80;margin-bottom:6px}
-.log .ln{margin-bottom:3px;font-size:7px;line-height:1.4}
-.log .t{color:#444}.log .a{color:#0f0}.log .w{color:#ff0}.log .d{color:#f44}.log .l{color:#ffd700}
-
-.blink{animation:blink 1.5s infinite}
-.footer{text-align:center;font-size:7px;color:#444;margin:12px 0}
+@keyframes loadSlide{0%{left:-40%}100%{left:100%}}
+@keyframes glowG{0%,100%{text-shadow:0 0 8px rgba(0,204,68,0.2)}50%{text-shadow:0 0 14px rgba(0,204,68,0.5)}}
+@keyframes glowR{0%,100%{text-shadow:0 0 8px rgba(204,0,0,0.2)}50%{text-shadow:0 0 14px rgba(204,0,0,0.5)}}
+@keyframes borderFlash{0%,49%{border-color:var(--khaki)}50%,100%{border-color:#ff0000}}
+@media(max-width:600px){
+  #main{margin:8px;padding:14px;border-width:2px}
+  .title{font-size:9px}
+  .sub{font-size:7px}
+  .port .label{font-size:8px}
+  .port .val{font-size:30px}
+  .port .chg{font-size:10px}
+  .intel{font-size:8px}
+  .fees{flex-direction:column;gap:8px}
+  .fees .stat .lbl{font-size:7px}
+  .fees .stat .v{font-size:15px}
+  .fees .stat .var{font-size:7px}
+  .regime{font-size:10px}
+  .meta{font-size:8px}
+  .coin{font-size:9px}
+  #loading .lt{font-size:12px}
+  #loading .lbar{width:200px}
+  #loading .lsub{font-size:7px}
+}
 </style></head><body>
-<div class="s">
-<div class="nav">
-  <a href="/">WALLET</a><a href="/insights">INSIGHTS</a><a href="/config">CONFIG</a>
-  <a href="/strategy">STRATEGY</a><a href="/status">STATUS</a><a href="/analytics">ANALYTICS</a><a href="/arcade" class="on">ARCADE</a>
+<div id="loading">
+  <div class="lt">LOADING...</div>
+  <div class="lbar"></div>
+  <div class="lsub" id="load-msg">ESTABLISHING CONNECTION...</div>
 </div>
-<div class="title">METAL LP</div>
-<div class="sub">MISSION: PROVIDE LIQUIDITY</div>
-
-<div id="ld" style="text-align:center;color:#0f0;padding:30px">LOADING<span class="blink">...</span></div>
-<div id="gm" style="display:none">
-
-<div class="hud">
-  <div class="hud-item"><div class="hud-label">SCORE</div><div class="hud-val gold" id="sc">$0</div></div>
-  <div class="hud-item"><div class="hud-label">HP</div><div class="hud-val grn" id="hp">$0</div></div>
-  <div class="hud-item"><div class="hud-label">LVL</div><div class="hud-val cyan" id="lv">1</div></div>
-  <div class="hud-item"><div class="hud-label">STATUS</div><div class="hud-val" id="st">---</div></div>
-</div>
-
-<div class="arena" id="ar">
-  <div class="sky" id="sky"></div>
-  <div class="range" id="rz"></div>
-  <div class="range-lbl lo" id="rl"></div>
-  <div class="range-lbl hi" id="rh"></div>
-  <div class="pline" id="pl"></div>
-  <div class="ptag" id="pt"></div>
-  <div class="soldier idle" id="ch">🔫</div>
-  <div class="speech" id="sp" style="display:none"></div>
-  <div class="enemy" id="en" style="display:none">👾</div>
-  <div class="coins" id="co" style="display:none">🪙</div>
-  <div class="ground"></div>
-</div>
-
-<div class="bars">
-  <div class="bar-row"><span class="lbl" style="color:#0f0">XP</span><div class="bar-bg"><div class="bar-fill" id="xp" style="width:0%;background:linear-gradient(90deg,#0f0,#0ff)"></div></div><span class="val grn" id="xpt">0%</span></div>
-  <div class="bar-row"><span class="lbl" style="color:#f44">HP</span><div class="bar-bg"><div class="bar-fill" id="hpb" style="width:100%;background:linear-gradient(90deg,#f44,#0f0)"></div></div><span class="val" id="hpt">100%</span></div>
-</div>
-
-<div class="stats">
-  <div class="stat-box"><h3 style="color:#ffd700">💰 LOOT</h3>
-    <div class="r"><span class="k">PEND</span><span class="v gold" id="pf">$0</span></div>
-    <div class="r"><span class="k">HARV</span><span class="v gold" id="hf">$0</span></div>
-    <div class="r"><span class="k">TOTAL</span><span class="v gold" id="tf">$0</span></div>
-    <div class="r"><span class="k">/DAY</span><span class="v gold" id="df">$0</span></div>
-    <div class="r"><span class="k">/HOUR</span><span class="v gold" id="fh">$0</span></div>
-    <div class="r"><span class="k">APR</span><span class="v gold" id="ap">0%</span></div>
+<div id="main" class="corners">
+  <span class="title">&#9733; MISSION STATUS</span>
+  <div class="sub"><span>CLASSIFIED</span><span>SOL/USDC LP</span></div>
+  <div class="port">
+    <div class="label">PORTFOLIO VALUE</div>
+    <div class="val" id="portfolio"></div>
+    <div class="chg" id="change"></div>
   </div>
-  <div class="stat-box"><h3 style="color:#f44">⚔️ BATTLE</h3>
-    <div class="r"><span class="k">IL DMG</span><span class="v red" id="il">$0</span></div>
-    <div class="r"><span class="k">GAS</span><span class="v red" id="gs">$0</span></div>
-    <div class="r"><span class="k">NET</span><span class="v" id="nt">$0</span></div>
-    <div class="r"><span class="k">TXS</span><span class="v cyan" id="tx">0</span></div>
+  <div class="intel">&#9472; INTEL REPORT &#9472;</div>
+  <div class="fees">
+    <div class="stat"><div class="lbl">FEES ALL TIME</div><div class="v" style="color:var(--orange)" id="fees"></div></div>
+    <div class="stat"><div class="lbl">FEES LAST 4H</div><div class="v" style="color:var(--green)" id="fees4h"></div><div class="var" id="feesVar"></div></div>
   </div>
+  <div class="regime" id="regime"></div>
+  <div class="meta">
+    <div class="row"><span id="lastUp"></span><span>NEXT IN: <span id="cd">--:--</span></span></div>
+    <div class="row"><span id="lastKnown"></span><span></span></div>
+  </div>
+  <div class="coin-wrap"><span class="coin">[INSERT COIN]</span></div>
 </div>
-
-<div class="stat-box" style="margin-bottom:8px" id="pos-intel"><h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3><div style="color:#555;font-size:7px">No position</div></div>
-
-<div class="mood"><h3>🎮 BATTLEFIELD MOOD</h3><div class="mood-bar" id="mb"></div><div class="mood-labels"><span style="color:#f44">FEAR</span><span id="ml" style="color:#888">---</span><span style="color:#0f0">GREED</span></div></div>
-
-<div class="badges"><h3>🏆 MEDALS</h3><div id="bd"></div></div>
-
-<div class="log"><h3>📜 MISSION LOG</h3><div id="lg"></div></div>
-
-<div class="footer blink">— MISSION IN PROGRESS — AUTO-REFRESH 30s —</div>
-</div></div>
-
 <script>
-const TZ='Europe/Berlin';
-const fmt=(n,d=2)=>Math.abs(n).toFixed(d);
+var REFRESH=4*3600*1000,lastFetch=0,refreshTimer=null;
+var RE={RANGING:'\\u{1F634} RANGING',BULLISH_TREND:'\\u{1F680} BULLISH',BEARISH_TREND:'\\u{1F43B} BEARISH',EXTREME:'\\u{1F4A5} EXTREME'};
 
-// Metal Slug characters by state
-const CHARS = {
-  ACTIVE_SAFE:    '🔫',  // soldier shooting — in range, all good
-  ACTIVE_CLOSE:   '🏃',  // running — getting close to bounds
-  ACTIVE_DANGER:  '😰',  // sweating — very close to bounds
-  OOR:            '💥',  // explosion — out of range
-  HALTED:         '☠️',  // skull — circuit breaker
-  IDLE:           '😴',  // sleeping — no position
-  PULLBACK:       '🎯',  // crosshair — waiting for pullback
-  HARVESTING:     '💰',  // money bag — collecting fees
-  DEPLOYING:      '🚀',  // rocket — deploying capital
-};
+function setLoadMsg(m){document.getElementById('load-msg').textContent=m;}
 
-const SPEECHES = {
-  ACTIVE_SAFE:    ['MISSION PROCEEDING!', 'EARNING FEES SIR!', 'IN RANGE, ALL CLEAR!', 'HOLDING THE LINE!', 'RANGE IS SECURE!'],
-  ACTIVE_CLOSE:   ['APPROACHING BOUNDARY!', 'WATCH YOUR STEP!', 'GETTING HOT!', 'STAY FOCUSED!'],
-  ACTIVE_DANGER:  ['MAYDAY MAYDAY!', 'TAKING IL DAMAGE!', 'NEED BACKUP!', 'ALMOST OOR!'],
-  OOR:            ['MAN DOWN!', 'WE LOST THE RANGE!', 'RETREAT!!', 'ZERO FEES!'],
-  HALTED:         ['GAME OVER', 'INSERT COIN', 'CIRCUIT BREAKER!'],
-  IDLE:           ['ZZZ...', 'WAITING ORDERS...', 'STANDBY...'],
-  PULLBACK:       ['SCOUTING...', 'WAITING FOR PULLBACK', 'PATIENCE...', 'TARGET ACQUIRED?'],
-};
-
-function getState(live) {
-  if (!live) return 'IDLE';
-  if (live.botState === 'HALTED') return 'HALTED';
-  if (live.botState === 'WAITING_PULLBACK') return 'PULLBACK';
-  if (!live.positionMint) return 'IDLE';
-  if (live.positionRange) {
-    const p = live.solPrice, lo = live.positionRange.lower, hi = live.positionRange.upper;
-    if (p < lo || p > hi) return 'OOR';
-    const c = (lo+hi)/2, hw = (hi-lo)/2;
-    const prox = Math.max(Math.max(0,(c-p)/hw), Math.max(0,(p-c)/hw));
-    if (prox > 0.7) return 'ACTIVE_DANGER';
-    if (prox > 0.4) return 'ACTIVE_CLOSE';
-  }
-  return 'ACTIVE_SAFE';
+function isValid(d){
+  return d&&typeof d.portfolioNow==='number'&&d.portfolioNow>100
+    &&typeof d.feesAllTime==='number'&&d.regime&&d.regime.length>0;
 }
 
-function getLevel(f) {
-  if(f>=500)return{l:10,t:'GENERAL',n:999};if(f>=200)return{l:9,t:'COLONEL',n:500};
-  if(f>=100)return{l:8,t:'MAJOR',n:200};if(f>=50)return{l:7,t:'CAPTAIN',n:100};
-  if(f>=25)return{l:6,t:'SERGEANT',n:50};if(f>=10)return{l:5,t:'CORPORAL',n:25};
-  if(f>=5)return{l:4,t:'PRIVATE 1ST',n:10};if(f>=2)return{l:3,t:'PRIVATE',n:5};
-  if(f>=0.5)return{l:2,t:'RECRUIT',n:2};return{l:1,t:'CADET',n:0.5};
+function countUp(el,target,pre,suf,dec,dur){
+  pre=pre||'';suf=suf||'';dec=dec||0;dur=dur||1500;
+  var st=null;
+  function step(ts){if(!st)st=ts;var p=Math.min((ts-st)/dur,1);p=1-Math.pow(1-p,3);
+    el.textContent=pre+(dec>0?(target*p).toFixed(dec):Math.round(target*p).toLocaleString())+suf;
+    if(p<1)requestAnimationFrame(step);}
+  requestAnimationFrame(step);
 }
 
-let lastSpeechTime = 0;
-
-async function refresh() {
-  try {
-    const [lr, sr, mr] = await Promise.all([fetch('/api/live'), fetch('/api/snapshots?hours=24'), fetch('/api/market-signals').catch(()=>null)]);
-    const live = await lr.json(); const snaps = await sr.json();
-    const mkt = mr ? await mr.json() : null;
-    if (!live) return;
-
-    const ir24 = snaps.length > 0 ? (snaps.filter(s=>s.in_range).length/snaps.length*100) : 0;
-    const st = getState(live);
-
-    document.getElementById('ld').style.display='none';
-    document.getElementById('gm').style.display='';
-
-    // HUD
-    const fees = live.totalFeesUsdc||0;
-    const lvl = getLevel(fees);
-    document.getElementById('sc').textContent = '$'+fmt(fees);
-    document.getElementById('hp').textContent = '$'+fmt(live.totalValueWithPosition||0,0);
-    document.getElementById('lv').innerHTML = lvl.l+' <span style="font-size:6px;color:#888">'+lvl.t+'</span>';
-    const stEl = document.getElementById('st');
-    const stColors = {ACTIVE_SAFE:'#0f0',ACTIVE_CLOSE:'#ff0',ACTIVE_DANGER:'#f80',OOR:'#f44',HALTED:'#f44',IDLE:'#888',PULLBACK:'#0ff'};
-    const stNames = {ACTIVE_SAFE:'FIGHTING',ACTIVE_CLOSE:'CAUTION',ACTIVE_DANGER:'DANGER!',OOR:'MAN DOWN',HALTED:'KIA',IDLE:'STANDBY',PULLBACK:'SCOUTING'};
-    stEl.textContent = stNames[st]||st;
-    stEl.style.color = stColors[st]||'#fff';
-
-    // Arena
-    const ch = document.getElementById('ch');
-    ch.textContent = CHARS[st]||'🔫';
-    ch.className = 'soldier ' + (st==='ACTIVE_SAFE'?'walk':st==='OOR'?'shake':st==='HALTED'?'explode':'idle');
-
-    // Speech bubble — change every 10s
-    const now = Date.now();
-    const sp = document.getElementById('sp');
-    if (now - lastSpeechTime > 10000) {
-      lastSpeechTime = now;
-      const lines = SPEECHES[st] || ['...'];
-      sp.textContent = lines[Math.floor(Math.random()*lines.length)];
-      sp.style.display = '';
-    }
-
-    // Enemy (IL monster) and coins
-    const en = document.getElementById('en');
-    const co = document.getElementById('co');
-    const totalIL = (live.ilUsdc||0) + (live.realizedIlUsdc||0);
-    if (Math.abs(totalIL) > 1) { en.style.display=''; en.textContent = totalIL < -5 ? '👹' : '👾'; } else en.style.display='none';
-    if (live.pendingFeesTotal > 0.5) { co.style.display=''; } else co.style.display='none';
-
-    if (live.positionRange) {
-      const lo=live.positionRange.lower, hi=live.positionRange.upper;
-      const pad=(hi-lo)*0.3, vMin=lo-pad, vMax=hi+pad, vW=vMax-vMin;
-      const rz=document.getElementById('rz');
-      rz.style.left=((lo-vMin)/vW*100)+'%'; rz.style.width=((hi-lo)/vW*100)+'%';
-      document.getElementById('rl').textContent='$'+fmt(lo); document.getElementById('rl').style.left=((lo-vMin)/vW*100)+'%';
-      document.getElementById('rh').textContent='$'+fmt(hi); document.getElementById('rh').style.right=(100-(hi-vMin)/vW*100)+'%';
-      const pp=((live.solPrice-vMin)/vW*100);
-      document.getElementById('pl').style.left=Math.max(1,Math.min(99,pp))+'%';
-      const pt=document.getElementById('pt'); pt.style.left=Math.max(1,Math.min(85,pp))+'%'; pt.textContent='$'+fmt(live.solPrice);
-      ch.style.left=Math.max(2,Math.min(88,pp-4))+'%';
-      sp.style.left=Math.max(2,Math.min(75,pp-2))+'%';
-      // Enemy on the closer boundary
-      const c=(lo+hi)/2;
-      if (live.solPrice < c) { en.style.left='8%'; en.style.display=Math.abs(totalIL)>1?'':'none'; }
-      else { en.style.left='85%'; }
-      co.style.left=Math.max(10,Math.min(80,pp+5))+'%'; co.style.top='15px';
-    }
-
-    document.getElementById('sky').textContent = live.regime + ' | $' + fmt(live.solPrice);
-
-    // XP bar (in-range)
-    const xp=document.getElementById('xp');
-    xp.style.width=Math.min(ir24,100)+'%';
-    xp.style.background=ir24>90?'linear-gradient(90deg,#0f0,#ffd700)':ir24>60?'linear-gradient(90deg,#0f0,#0ff)':'linear-gradient(90deg,#f44,#ff0)';
-    document.getElementById('xpt').textContent=fmt(ir24,0)+'%';
-    document.getElementById('xpt').style.color=ir24>90?'#ffd700':ir24>60?'#0f0':'#f44';
-
-    // HP bar (net PnL relative to position value)
-    const net=fees+totalIL-(live.gasUsdc||0);
-    const posVal=live.totalValueWithPosition||1;
-    const hpPct=Math.max(0,Math.min(100,50+net/posVal*5000));
-    document.getElementById('hpb').style.width=hpPct+'%';
-    document.getElementById('hpb').style.background=hpPct>70?'linear-gradient(90deg,#0a0,#0f0)':hpPct>30?'linear-gradient(90deg,#ff0,#0f0)':'linear-gradient(90deg,#f44,#ff0)';
-    document.getElementById('hpt').textContent=(net>=0?'+':'')+fmt(net,0);
-    document.getElementById('hpt').style.color=net>=0?'#0f0':'#f44';
-
-    // Loot
-    document.getElementById('pf').textContent='$'+fmt(live.pendingFeesTotal||0);
-    document.getElementById('hf').textContent='$'+fmt(fees-(live.pendingFeesTotal||0));
-    document.getElementById('tf').textContent='$'+fmt(fees);
-    const actual = live.actual24hFeesUsdc||0;
-    document.getElementById('df').textContent='$'+fmt(actual)+'/d';
-    document.getElementById('fh').textContent='$'+fmt(actual/24,4)+'/h';
-    document.getElementById('ap').textContent=fmt(live.actual24hAprPct||0,1)+'%';
-
-    // Battle
-    document.getElementById('il').textContent='-$'+fmt(Math.abs(totalIL));
-    document.getElementById('gs').textContent='-$'+fmt(live.gasUsdc||0);
-    const ntEl=document.getElementById('nt');
-    ntEl.textContent=(net>=0?'+':'-')+'$'+fmt(Math.abs(net));
-    ntEl.className='v '+(net>=0?'gold':'red');
-    document.getElementById('tx').textContent=live.txCount||0;
-
-    // Position Intel
-    const pi=document.getElementById('pos-intel');
-    if (live.positionMint && live.positionRange) {
-      const lo=live.positionRange.lower, hi=live.positionRange.upper;
-      const c=(lo+hi)/2, hw=(hi-lo)/2;
-      const proxD=hw>0?Math.max(0,(c-live.solPrice)/hw):0;
-      const proxU=hw>0?Math.max(0,(live.solPrice-c)/hw):0;
-      const inR=live.solPrice>=lo&&live.solPrice<=hi;
-      const ageH=live.entryTime?((now-live.entryTime)/3600000):0;
-      const ageStr=ageH>=24?fmt(ageH/24,1)+'d':fmt(ageH,1)+'h';
-      const pxVsEntry=live.entryPrice?((live.solPrice-live.entryPrice)/live.entryPrice*100):0;
-      const entSol=live.entrySol||0, entUsdc=live.entryUsdc||0;
-      const entTotal=entSol*(live.solPrice)+entUsdc;
-      const posSol=live.positionSol||0, posUsdc=live.positionUsdc||0;
-      const posTotal=live.positionValueUsdc||0;
-      // Fees earned this position (pending only — harvested is cumulative across positions)
-      const posFees=live.pendingFeesTotal||0;
-      // Fees per hour for this position
-      const feesPerH=ageH>0?(posFees/ageH):0;
-      // Position P&L: current value - entry value + pending fees
-      const posPnl=posTotal-entTotal+posFees;
-
-      const proxCol=proxD>0.5||proxU>0.5?'#f44':proxD>0.3||proxU>0.3?'#ff0':'#0f0';
-      const pnlCol=posPnl>=0?'#ffd700':'#f44';
-      pi.innerHTML='<h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3>'+
-        '<div class="r"><span class="k">RANGE</span><span class="v" style="color:#0f0">$'+fmt(lo)+' — $'+fmt(hi)+'</span></div>'+
-        '<div class="r"><span class="k">WIDTH</span><span class="v">'+fmt((hi-lo)/c*100,1)+'%</span></div>'+
-        '<div class="r"><span class="k">AGE</span><span class="v cyan">'+ageStr+'</span></div>'+
-        '<div class="r"><span class="k">IN RANGE</span><span class="v" style="color:'+(inR?'#0f0':'#f44')+'">'+(inR?'YES ✅':'NO ❌')+'</span></div>'+
-        '<div class="r"><span class="k">IR 24H</span><span class="v" style="color:'+(ir24>90?'#ffd700':ir24>60?'#0f0':'#f44')+'">'+fmt(ir24,0)+'%</span></div>'+
-        '<div class="r"><span class="k">PROX</span><span class="v" style="color:'+proxCol+'">↓'+fmt(proxD*100,0)+'% ↑'+fmt(proxU*100,0)+'%</span></div>'+
-        '<div class="r"><span class="k">ENTRY</span><span class="v">$'+fmt(live.entryPrice||0)+' ('+(pxVsEntry>=0?'+':'')+fmt(pxVsEntry,1)+'%)</span></div>'+
-        '<div class="r"><span class="k">DEPOSITED</span><span class="v">'+fmt(entSol,4)+' SOL + $'+fmt(entUsdc)+'</span></div>'+
-        '<div class="r"><span class="k">CURRENT</span><span class="v">'+fmt(posSol,4)+' SOL + $'+fmt(posUsdc)+'</span></div>'+
-        '<div class="r"><span class="k">POS VALUE</span><span class="v" style="color:#58a6ff">$'+fmt(posTotal)+'</span></div>'+
-        '<div class="r"><span class="k">PEND FEES</span><span class="v gold">$'+fmt(posFees)+'</span></div>'+
-        '<div class="r"><span class="k">FEES/HR</span><span class="v gold">$'+fmt(feesPerH,4)+'</span></div>'+
-        '<div class="r"><span class="k">POS IL</span><span class="v red">$'+fmt(live.ilUsdc||0)+'</span></div>'+
-        '<div class="r"><span class="k">POS PNL</span><span class="v" style="color:'+pnlCol+'">'+(posPnl>=0?'+':'-')+'$'+fmt(Math.abs(posPnl))+'</span></div>'+
-        '<div class="r"><span class="k">REGIME</span><span class="v">'+live.regime+'</span></div>';
-    } else {
-      pi.innerHTML='<h3 style="color:#58a6ff">🎖️ POSITION INTEL</h3><div style="color:#555;font-size:8px;padding:4px 0">'+(live.botState==='WAITING_PULLBACK'?'🎯 SCOUTING FOR RE-ENTRY...':'😴 NO ACTIVE POSITION')+'</div>';
-    }
-
-    // Mood
-    if (mkt && mkt.fearGreedIndex!=null) {
-      const f=mkt.fearGreedIndex, mb=document.getElementById('mb');
-      mb.innerHTML='';
-      const cs=['#f44','#f44','#f80','#f80','#ff0','#ff0','#8f0','#0f0','#0f0','#0f0'];
-      for(let i=0;i<10;i++){const s=document.createElement('div');s.className='mood-seg';s.style.background=i<Math.floor(f/10)?cs[i]:'#1a1a1a';mb.appendChild(s);}
-      document.getElementById('ml').textContent=f+'/100 '+(mkt.fearGreedLabel||'');
-      document.getElementById('ml').style.color=f<25?'#f44':f>75?'#0f0':'#888';
-    }
-
-    // Badges
-    const ir=ir24, tx=live.txCount||0, tv=live.totalValueWithPosition||0;
-    const badges=[
-      {n:'🌱 1ST LP',e:!!live.positionMint},{n:'💰 $1',e:fees>=1},{n:'💎 $10',e:fees>=10},
-      {n:'👑 $50',e:fees>=50},{n:'🔥 $100',e:fees>=100},{n:'🎯 90%IR',e:ir>=90},
-      {n:'📏 95%IR',e:ir>=95},{n:'⚡ 10TX',e:tx>=10},{n:'🏗️ 50TX',e:tx>=50},{n:'🐋 $5K',e:tv>=5000}
-    ];
-    document.getElementById('bd').innerHTML=badges.map(b=>'<span class="badge '+(b.e?'yes':'no')+'">'+b.n+(b.e?'':' 🔒')+'</span>').join('');
-
-    // Log
-    const er=await fetch('/api/events'); const ev=await er.json();
-    const msgs={
-      POSITION_OPENED:{c:'a',m:'⚔️ DEPLOYED TO BATTLE!'},POSITION_CLOSED:{c:'w',m:'🏃 TACTICAL RETREAT!'},
-      T1_DOWNSIDE:{c:'d',m:'🛡️ SHIELD ACTIVATED!'},T1_UPSIDE:{c:'w',m:'🚀 UPSIDE EVACUATION!'},
-      OOR_BELOW:{c:'d',m:'💥 AMBUSHED FROM BELOW!'},OOR_ABOVE:{c:'w',m:'🌙 OVEREXTENDED UP!'},
-      FEE_HARVEST:{c:'l',m:'💰 LOOT DROPPED!'},AUTO_DEPLOY:{c:'a',m:'🚀 REINFORCEMENTS!'},
-      REGIME_CHANGE:{c:'w',m:'🌊 WEATHER CHANGED!'},PULLBACK_REENTRY:{c:'a',m:'🎯 TARGET HIT!'},
-      PULLBACK_TIMEOUT:{c:'w',m:'⏰ PATIENCE EXPIRED!'},LIQUIDITY_ADDED:{c:'l',m:'💎 POWER UP!'}
-    };
-    document.getElementById('lg').innerHTML=ev.slice(0,12).map(e=>{
-      const t=new Date(e.timestamp).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',timeZone:TZ});
-      const m=msgs[e.eventType]||{c:'',m:e.eventType};
-      return '<div class="ln"><span class="t">['+t+']</span> <span class="'+m.c+'">'+m.m+'</span> <span class="t">$'+fmt(e.price)+'</span></div>';
-    }).join('');
-
-  } catch(e) { console.error('Arcade:',e); }
+function renderData(d){
+  countUp(document.getElementById('portfolio'),d.portfolioNow,'$','',2);
+  countUp(document.getElementById('fees'),d.feesAllTime,'$','',2);
+  countUp(document.getElementById('fees4h'),d.fees4h,'$','',2);
+  var fv=document.getElementById('feesVar');
+  if(d.feesVariance!=null){
+    fv.textContent='vs prev 4h: '+(d.feesVariance>=0?'+':'')+d.feesVariance.toFixed(1)+'%';
+    fv.style.color=d.feesVariance>=0?'#00cc44':'#cc0000';
+  }else{fv.textContent='vs prev 4h: NEW';fv.style.color='#8b8b4b';}
+  var ch=d.portfolioChange,cp=d.portfolioChangePct;
+  var ce=document.getElementById('change');
+  ce.className='chg '+(ch>=0?'pos':'neg');
+  ce.textContent=(ch>=0?'+':'')+ch.toFixed(2)+' ('+(cp>=0?'+':'')+cp.toFixed(1)+'%) '+(ch>=0?'\\u25B2':'\\u25BC');
+  document.getElementById('regime').textContent='REGIME: '+(RE[d.regime]||d.regime);
+  var m=document.getElementById('main');
+  if(d.regime==='EXTREME')m.classList.add('extreme');else m.classList.remove('extreme');
+  if(d.status==='IDLE')document.getElementById('lastKnown').textContent='LAST KNOWN';
+  else document.getElementById('lastKnown').textContent='';
+  var t=new Date(d.lastUpdated);
+  document.getElementById('lastUp').textContent='LAST: '+t.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Europe/Berlin'})+' CET';
 }
-refresh(); setInterval(refresh,30000);
+
+function loadData(){
+  var ctrl=new AbortController();
+  var to=setTimeout(function(){ctrl.abort();},4000);
+  fetch('/api/arcade-stats',{signal:ctrl.signal}).then(function(r){
+    clearTimeout(to);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
+  }).then(function(d){
+    if(!isValid(d)){setLoadMsg('BOT INITIALISING...');setTimeout(loadData,5000);return;}
+    renderData(d);
+    document.getElementById('loading').style.display='none';
+    document.getElementById('main').style.display='block';
+    lastFetch=Date.now();
+    if(!refreshTimer)refreshTimer=setInterval(loadData,REFRESH);
+  }).catch(function(e){
+    clearTimeout(to);
+    setLoadMsg(e&&e.name==='AbortError'?'CONNECTION TIMEOUT...':'RECONNECTING...');
+    setTimeout(loadData,5000);
+  });
+}
+
+function countdown(){
+  if(!lastFetch){document.getElementById('cd').textContent='--:--';return;}
+  var rem=Math.max(0,REFRESH-(Date.now()-lastFetch));
+  var m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);
+  document.getElementById('cd').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+}
+
+loadData();
+setInterval(countdown,1000);
 </script></body></html>`;
 }
 
 // ── ANALYSIS AGENT PAGE ─────────────────────────────────────────────────
 
 function renderAnalysisHtml(enabled: boolean, lastReport: string | null, lastRunTime: number | null): string {
-  const TZ = 'Europe/Berlin';
+  // TZ set by middleware from browser cookie
   const lastRunStr = lastRunTime ? new Date(lastRunTime).toLocaleString('en-US', { timeZone: TZ, dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
 
   return `<!DOCTYPE html><html lang="en"><head>

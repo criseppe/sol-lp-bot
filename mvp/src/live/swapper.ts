@@ -30,6 +30,7 @@ export interface SwapResult {
   priceImpactPct?: number;
   route?: string;
   feeLamports: number;
+  txSignature?: string;
 }
 
 interface OrcaContext {
@@ -72,6 +73,7 @@ async function swapViaJupiter(
     priceImpactPct: result.priceImpactPct,
     route: result.route,
     feeLamports: result.feeLamports,
+    txSignature: result.txSignature,
   };
 }
 
