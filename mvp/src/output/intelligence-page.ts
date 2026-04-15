@@ -447,7 +447,8 @@ function renderAnalyticsWidgets(){
     if(el&&summaries.length>0){
       if(CHS.cCumFees)try{CHS.cCumFees.destroy();}catch{}
       var labels=summaries.map(function(s){return s.date.slice(5);});
-      var data=summaries.map(function(s){return s.cum_fees_usdc||0;});
+      var cumulative=0;
+      var data=summaries.map(function(s){cumulative+=(s.fees_earned_usdc||0);return Math.round(cumulative*100)/100;});
       CHS.cCumFees=new Chart(el,{type:'line',data:{labels:labels,datasets:[{label:'Cumulative Fees ($)',data:data,borderColor:'#ffd700',backgroundColor:'#ffd70020',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
     }
   }catch(e){console.warn('cum-fees error',e);}
