@@ -1876,12 +1876,19 @@ async function runLiveCycle(price: number): Promise<void> {
         } else {
           const needed = targetUsdcForDeploy - deployableUsdc;
           const maxFromSol = walletSolValue * 0.05;
-          // Dynamic cap: spread conversion across regime-specific number of cycles
-          const targetCycles: Record<string, number> = { RANGING: 6, BULLISH_TREND: 9, BEARISH_TREND: 18, EXTREME: 48 };
-          const cycles = targetCycles[liveRegime] ?? 18;
-          const dynamicCap = Math.min(Math.max(walletSolValue / cycles, 200), 5000);
+          // Dynamic cap: spread conversion over target deployment time per regime
+          const targetDeployMin: number = ({
+            RANGING: runtime.solConvertTargetDeployMinRanging ?? 15,
+            BULLISH_TREND: runtime.solConvertTargetDeployMinBullish ?? 30,
+            BEARISH_TREND: runtime.solConvertTargetDeployMinBearish ?? 90,
+            EXTREME: runtime.solConvertTargetDeployMinExtreme ?? 240,
+          } as Record<string, number>)[liveRegime] ?? 90;
+          const scRegimeCooldown: number = ({ RANGING: 3, BULLISH_TREND: 5, BEARISH_TREND: 10, EXTREME: 20 } as Record<string, number>)[liveRegime] ?? 10;
+          const dynamicCapPct = scRegimeCooldown / targetDeployMin;
+          const dynamicCap = Math.min(Math.max(walletSolValue * dynamicCapPct, 200), walletSolValue * 0.50);
+          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Dynamic cap: $${dynamicCap.toFixed(2)} (${(dynamicCapPct * 100).toFixed(1)}% of idle SOL $${walletSolValue.toFixed(0)}, target: ${targetDeployMin}min, cooldown: ${scRegimeCooldown}min)`, timestamp: now }));
 
-          // Step 5: Apply momentum-scaled cap for momentum override path
+          // Apply momentum-scaled cap for momentum override path
           let effectiveCap = dynamicCap;
           if (momentumOverride && !regimeAllows) {
             effectiveCap = dynamicCap * momentumMult;
@@ -1902,7 +1909,7 @@ async function runLiveCycle(price: number): Promise<void> {
               const swapReason = momentumOverride && !regimeAllows
                 ? `SOL→USDC momentum override (+${(priceChange30m * 100).toFixed(1)}% in 30min)`
                 : `SolConvert: ${convertSol.toFixed(3)} SOL → USDC (margin ${((price / basis - 1) * 100).toFixed(1)}% above basis)`;
-              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${effectiveCap.toFixed(0)} (idle $${walletSolValue.toFixed(0)}/${cycles}cyc), cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
+              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${effectiveCap.toFixed(0)} (${(dynamicCapPct * 100).toFixed(1)}% of $${walletSolValue.toFixed(0)}, target ${targetDeployMin}min), cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
               const swapResult = await liveExecutor!.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(convertSol * 1e9), swapReason);
               if (swapResult) {
                 reduceCostBasisHoldings(db, convertSol, 'sol_convert');

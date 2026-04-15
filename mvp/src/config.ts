@@ -96,6 +96,10 @@ export const runtime = {
   solConversionBasisMultiplier: 1.000, // global scaling on regime thresholds (RANGING=1.000, BULLISH=1.010, BEARISH=1.005, EXTREME=disabled). 1.0=defaults, 1.01=1% stricter
   solConvertMomentumThreshold: 0.02, // 30-min price change required to trigger momentum override in BEARISH/EXTREME
   solConvertMomentumCooldownMin: 10, // cooldown minutes for momentum-triggered conversions
+  solConvertTargetDeployMinRanging: 15, // minutes to fully convert idle SOL in RANGING
+  solConvertTargetDeployMinBullish: 30, // minutes to fully convert idle SOL in BULLISH
+  solConvertTargetDeployMinBearish: 90, // minutes to fully convert idle SOL in BEARISH
+  solConvertTargetDeployMinExtreme: 240, // minutes to fully convert idle SOL in EXTREME
 
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
@@ -171,6 +175,10 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const scBasis = nv('solConversionBasisMultiplier', 1.000, 1.050); if (scBasis != null) runtime.solConversionBasisMultiplier = scBasis;
   const scMomThresh = nv('solConvertMomentumThreshold', 0.005, 0.10); if (scMomThresh != null) runtime.solConvertMomentumThreshold = scMomThresh;
   const scMomCool = nv('solConvertMomentumCooldownMin', 1, 120); if (scMomCool != null) runtime.solConvertMomentumCooldownMin = scMomCool;
+  const scTdR = nv('solConvertTargetDeployMinRanging', 5, 60); if (scTdR != null) runtime.solConvertTargetDeployMinRanging = scTdR;
+  const scTdB = nv('solConvertTargetDeployMinBullish', 10, 120); if (scTdB != null) runtime.solConvertTargetDeployMinBullish = scTdB;
+  const scTdBe = nv('solConvertTargetDeployMinBearish', 30, 240); if (scTdBe != null) runtime.solConvertTargetDeployMinBearish = scTdBe;
+  const scTdE = nv('solConvertTargetDeployMinExtreme', 60, 480); if (scTdE != null) runtime.solConvertTargetDeployMinExtreme = scTdE;
 
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
@@ -281,6 +289,10 @@ export function exportConfig(): Record<string, string> {
   out['solConversionBasisMultiplier'] = String(runtime.solConversionBasisMultiplier);
   out['solConvertMomentumThreshold'] = String(runtime.solConvertMomentumThreshold);
   out['solConvertMomentumCooldownMin'] = String(runtime.solConvertMomentumCooldownMin);
+  out['solConvertTargetDeployMinRanging'] = String(runtime.solConvertTargetDeployMinRanging);
+  out['solConvertTargetDeployMinBullish'] = String(runtime.solConvertTargetDeployMinBullish);
+  out['solConvertTargetDeployMinBearish'] = String(runtime.solConvertTargetDeployMinBearish);
+  out['solConvertTargetDeployMinExtreme'] = String(runtime.solConvertTargetDeployMinExtreme);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);
