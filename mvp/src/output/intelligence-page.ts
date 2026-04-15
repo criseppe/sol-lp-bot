@@ -162,8 +162,6 @@ function render(){
   h+=renderFeesIntelligence();
   // W1: Fee Income
   h+='<div class="w"><h3>Fee Income</h3><canvas id="c1"></canvas></div>';
-  // Cumulative Fees (from analytics)
-  h+='<div class="w"><h3>Cumulative Fees</h3><canvas id="cCumFees"></canvas></div>';
   // Portfolio Growth (from analytics)
   h+='<div class="w full"><h3>Portfolio Growth (7D)</h3><canvas id="cPortGrowth"></canvas><div class="tbl-wrap" id="wPortGrowthTbl"></div></div>';
   // Hourly Performance
@@ -441,19 +439,7 @@ function renderAnalyticsWidgets(){
   var hourlyFees=buildHourlyFees(snaps);
   var summaries=ANALYTICS.dailySummaries||[];
 
-  // 1. Cumulative Fees
-  try{
-    var el=document.getElementById('cCumFees');
-    if(el&&summaries.length>0){
-      if(CHS.cCumFees)try{CHS.cCumFees.destroy();}catch{}
-      var labels=summaries.map(function(s){return s.date.slice(5);});
-      var cumulative=0;
-      var data=summaries.map(function(s){cumulative+=(s.fees_earned_usdc||0);return Math.round(cumulative*100)/100;});
-      CHS.cCumFees=new Chart(el,{type:'line',data:{labels:labels,datasets:[{label:'Cumulative Fees ($)',data:data,borderColor:'#ffd700',backgroundColor:'#ffd70020',fill:true,pointRadius:0,tension:0.3}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(0);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
-    }
-  }catch(e){console.warn('cum-fees error',e);}
-
-  // 1b. Portfolio Growth (stacked bar: wallet+position per day, organic P&L line)
+  // 1. Portfolio Growth (stacked bar: wallet+position per day, organic P&L line)
   try{
     var elPG=document.getElementById('cPortGrowth');
     var elPGTbl=document.getElementById('wPortGrowthTbl');
