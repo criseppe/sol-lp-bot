@@ -223,14 +223,201 @@ export function startDashboard(port: number): DashboardServer {
       const totalFees = feesFromSummary + pendingFees;
       const totalGas = Object.values(gasMap).reduce((s: number, g: any) => s + g, 0);
       const avgDuration = positions.length > 0 ? Math.round(positions.reduce((s: number, p: any) => s + p.durationMin, 0) / positions.length) : 0;
+      // SOL Conversion stats
+      const scEnabled = runtime.solConversionEnabled;
+      const scLastTs = (() => { try { return (dbRef.prepare('SELECT sol_conversion_last_ts FROM bot_state WHERE id = 1').get() as any)?.sol_conversion_last_ts ?? 0; } catch { return 0; } })();
+      const scBasis = costBasis;
+      const scThreshold = scBasis * runtime.solConversionBasisMultiplier;
+      const scPrice = currentLive?.solPrice ?? 0;
+      const scRegime = currentLive?.regime ?? 'RANGING';
+      const regimeCooldowns: Record<string, number> = { RANGING: 3, BULLISH_TREND: 5, BEARISH_TREND: 10, EXTREME: 20 };
+      const scCooldownMin = regimeCooldowns[scRegime] ?? 10;
+      const scCooldownMs = scCooldownMin * (runtime.solConversionCooldownMin / 15) * 60_000;
+      const scCooldownRemaining = Math.max(0, scCooldownMs - (Date.now() - scLastTs));
+      const scRegimeAllows = scRegime === 'RANGING' || scRegime === 'BULLISH_TREND';
+      // Check momentum override for BEARISH/EXTREME
+      const scPrice30mRow = (() => { try { return dbRef.prepare('SELECT price FROM regime_snapshots WHERE ts <= ? ORDER BY ts DESC LIMIT 1').get(Date.now() - 30 * 60 * 1000) as {price: number} | undefined; } catch { return undefined; } })();
+      const scPrice30mAgo = scPrice30mRow?.price ?? null;
+      const scPriceChange30m = scPrice30mAgo ? (scPrice - scPrice30mAgo) / scPrice30mAgo : 0;
+      const scMarginAboveBasis = scBasis > 0 ? (scPrice - scBasis) / scBasis : 0;
+      const scMomentumOverride = (scRegime === 'BEARISH_TREND' || scRegime === 'EXTREME') && scPriceChange30m >= (runtime.solConvertMomentumThreshold ?? 0.02) && scMarginAboveBasis >= 0.005;
+      const scBlocked = !scRegimeAllows && !scMomentumOverride;
+      const scStatus = !scEnabled ? 'DISABLED' : (scRegimeAllows && scPrice < scThreshold) || scBlocked ? 'BLOCKED' : scCooldownRemaining > 0 ? 'COOLDOWN' : scMomentumOverride ? 'MOMENTUM' : 'FIRING';
+      const walletSolVal = (currentLive?.solBalance ?? 0) * scPrice;
+      const targetCycles: Record<string, number> = { RANGING: 6, BULLISH_TREND: 9, BEARISH_TREND: 18, EXTREME: 48 };
+      const scDynCap = Math.min(Math.max(walletSolVal / (targetCycles[scRegime] ?? 18), 200), 5000);
+      const scToday = (() => { try { return dbRef.prepare("SELECT COUNT(*) as c, COALESCE(SUM(sol_amount),0) as sol, COALESCE(SUM(usdc_amount),0) as usdc FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' AND timestamp > ?").get(Date.now() - 86400_000) as any; } catch { return { c: 0, sol: 0, usdc: 0 }; } })();
+      const scWeek = (() => { try { return dbRef.prepare("SELECT COUNT(*) as c, COALESCE(SUM(sol_amount),0) as sol, COALESCE(SUM(usdc_amount),0) as usdc FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' AND timestamp > ?").get(Date.now() - 7 * 86400_000) as any; } catch { return { c: 0, sol: 0, usdc: 0 }; } })();
+      const scLast = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 1").get() as any; } catch { return null; } })();
+      const scRecent = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 10").all() as any[]; } catch { return []; } })();
+
       res.json({
         dailyFees: dailyFeesEnriched, positions, regimeHistory: regimeHistory.filter((_: any, i: number) => i % 5 === 0),
         priceHistory: priceHistory.filter((_: any, i: number) => i % 5 === 0).map((p: any) => ({ ...p, costBasis })),
         gateFires: Object.values(gateByDay),
         summary: { totalFees: Math.round(totalFees * 100) / 100, totalGas: Math.round(totalGas * 100) / 100, totalPositions: positions.length, avgDuration, avgApr7d: 0, avgApr30d: 0 },
+        solConversion: {
+          enabled: scEnabled, status: scStatus, lastConversionTs: scLastTs,
+          cooldownRemainingMs: Math.round(scCooldownRemaining), cooldownTotalMin: scCooldownMin,
+          threshold: parseFloat(scThreshold.toFixed(2)), priceAboveThreshold: scPrice >= scThreshold,
+          dynamicCap: Math.round(scDynCap), idleSolValue: Math.round(walletSolVal),
+          todayCount: scToday.c, todaySol: parseFloat((scToday.sol).toFixed(3)), todayUsdc: parseFloat((scToday.usdc).toFixed(2)),
+          weekCount: scWeek.c, weekSol: parseFloat((scWeek.sol).toFixed(3)), weekUsdc: parseFloat((scWeek.usdc).toFixed(2)),
+          last: scLast ? { ts: scLast.timestamp, sol: scLast.sol_amount, usdc: scLast.usdc_amount, price: scLast.price, tx: scLast.tx_signature } : null,
+          recent: scRecent.map((r: any) => ({ ts: r.timestamp, sol: r.sol_amount, usdc: r.usdc_amount, price: r.price, tx: r.tx_signature })),
+        },
       });
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
+
+  // Daily Fees Intelligence endpoint
+  app.get('/api/daily-fees-intelligence', (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const now = Date.now();
+      const todayStr = new Date(now).toLocaleDateString('en-CA', { timeZone: 'UTC' });
+      const startOfTodayMs = new Date(todayStr + 'T00:00:00Z').getTime();
+      const todayElapsedMs = now - startOfTodayMs;
+      const hoursElapsed = todayElapsedMs / 3600000;
+      const hoursRemaining = 24 - hoursElapsed;
+      const price = currentLive?.solPrice ?? 0;
+
+      // Today's closed-position fees from rebalance_events
+      const todayRow = dbRef.prepare(`
+        SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees,
+               COUNT(*) as positions
+        FROM rebalance_events
+        WHERE timestamp >= ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `).get(price, startOfTodayMs) as any;
+      const feesToday = todayRow?.fees ?? 0;
+      const positionsToday = todayRow?.positions ?? 0;
+
+      // Pending fees from current open position
+      const feesPending = currentLive?.pendingFeesTotal ?? 0;
+      const feesTodayTotal = feesToday + feesPending;
+
+      // Yesterday's full-day fees
+      const yesterdayStart = startOfTodayMs - 86400000;
+      const yesterdayRow = dbRef.prepare(`
+        SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees
+        FROM rebalance_events
+        WHERE timestamp >= ? AND timestamp < ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `).get(price, yesterdayStart, startOfTodayMs) as any;
+      const feesYesterday = yesterdayRow?.fees ?? 0;
+
+      // Yesterday fees at same elapsed time
+      const yesterdaySameRow = dbRef.prepare(`
+        SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees
+        FROM rebalance_events
+        WHERE timestamp >= ? AND timestamp <= ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `).get(price, yesterdayStart, yesterdayStart + todayElapsedMs) as any;
+      const feesYesterdaySameTime = yesterdaySameRow?.fees ?? 0;
+
+      // 7-day average at same elapsed time
+      let sum7d = 0;
+      let days7dWithData = 0;
+      for (let n = 1; n <= 7; n++) {
+        const dayStartMs = startOfTodayMs - n * 86400000;
+        const dayEndAtSameTime = dayStartMs + todayElapsedMs;
+        const dayRow = dbRef.prepare(`
+          SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as fees,
+                 COUNT(*) as cnt
+          FROM rebalance_events
+          WHERE timestamp >= ? AND timestamp <= ?
+          AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+          AND (fee_usdc > 0 OR fee_sol > 0)
+        `).get(price, dayStartMs, dayEndAtSameTime) as any;
+        if ((dayRow?.cnt ?? 0) > 0) {
+          sum7d += dayRow.fees;
+          days7dWithData++;
+        }
+      }
+      const fees7dAvgSameTime = days7dWithData > 0 ? sum7d / days7dWithData : 0;
+
+      // Expected fees for full day (run rate projection)
+      const currentRunRate = hoursElapsed > 0 ? feesTodayTotal / hoursElapsed : 0;
+      const feesExpectedToday = hoursElapsed > 0 ? feesTodayTotal + (currentRunRate * hoursRemaining) : 0;
+      const confidence = hoursElapsed < 2 ? 'LOW' : hoursElapsed <= 6 ? 'MEDIUM' : 'HIGH';
+
+      // % comparisons
+      const vsYesterdaySameTime = feesYesterdaySameTime > 0 ? ((feesTodayTotal - feesYesterdaySameTime) / feesYesterdaySameTime) * 100 : 0;
+      const vs7dAvg = fees7dAvgSameTime > 0 ? ((feesTodayTotal - fees7dAvgSameTime) / fees7dAvgSameTime) * 100 : 0;
+
+      // Avg fees per position
+      const avgFeesPerPosition = positionsToday > 0 ? feesToday / positionsToday : 0;
+
+      // Best position today
+      const bestRow = dbRef.prepare(`
+        SELECT MAX(fee_usdc + fee_sol * ?) as best
+        FROM rebalance_events
+        WHERE timestamp >= ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `).get(price, startOfTodayMs) as any;
+      const bestPosition = bestRow?.best ?? 0;
+
+      // Hourly breakdown for chart
+      const hourlyRows = dbRef.prepare(`
+        SELECT CAST(strftime('%H', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) as hour,
+               SUM(fee_usdc + fee_sol * ?) as fees
+        FROM rebalance_events
+        WHERE timestamp >= ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+        GROUP BY hour
+        ORDER BY hour
+      `).all(price, startOfTodayMs) as any[];
+      const hourlyToday: number[] = new Array(24).fill(0);
+      for (const r of hourlyRows) { hourlyToday[r.hour] = r.fees; }
+
+      // 7-day average hourly breakdown
+      const hourly7dRows = dbRef.prepare(`
+        SELECT CAST(strftime('%H', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) as hour,
+               SUM(fee_usdc + fee_sol * ?) as fees
+        FROM rebalance_events
+        WHERE timestamp >= ? AND timestamp < ?
+        AND event_type IN ('T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','FEE_HARVEST')
+        AND (fee_usdc > 0 OR fee_sol > 0)
+        GROUP BY hour
+        ORDER BY hour
+      `).all(price, startOfTodayMs - 7 * 86400000, startOfTodayMs) as any[];
+      const hourly7dAvg: number[] = new Array(24).fill(0);
+      const daysForAvg = Math.max(days7dWithData, 1);
+      for (const r of hourly7dRows) { hourly7dAvg[r.hour] = r.fees / daysForAvg; }
+
+      // Current hour (UTC)
+      const currentHour = new Date(now).getUTCHours();
+
+      res.json({
+        feesToday,
+        feesPending,
+        feesTodayTotal,
+        feesYesterday,
+        feesYesterdaySameTime,
+        fees7dAvgSameTime,
+        feesExpectedToday,
+        currentRunRate,
+        hoursElapsed: parseFloat(hoursElapsed.toFixed(1)),
+        hoursRemaining: parseFloat(hoursRemaining.toFixed(1)),
+        confidence,
+        vsYesterdaySameTime: parseFloat(vsYesterdaySameTime.toFixed(1)),
+        vs7dAvg: parseFloat(vs7dAvg.toFixed(1)),
+        positionsToday,
+        avgFeesPerPosition: parseFloat(avgFeesPerPosition.toFixed(4)),
+        bestPosition: parseFloat(bestPosition.toFixed(4)),
+        hourlyToday,
+        hourly7dAvg,
+        currentHour,
+      });
+    } catch (err) { res.status(500).json({ error: String(err) }); }
+  });
+
   app.get('/arcade', (_req, res) => {
     res.type('html').send(renderArcadeHtml());
   });
@@ -255,6 +442,15 @@ export function startDashboard(port: number): DashboardServer {
       const feesVariance = feesPrev4h > 0 ? ((fees4h - feesPrev4h) / feesPrev4h) * 100 : null;
       const posCount = dbRef.prepare("SELECT COUNT(*) as c FROM rebalance_events WHERE event_type IN ('POSITION_OPENED','PULLBACK_REENTRY')").get() as { c: number };
       const uptimeDays = parseFloat(((Date.now() - startTime) / 86400_000).toFixed(1));
+      const investorRows = dbRef.prepare(`
+        SELECT name, SUM(amount_usdc) as total_invested, COUNT(*) as investments, MIN(invest_date) as first_investment
+        FROM investors GROUP BY LOWER(name) ORDER BY total_invested DESC
+      `).all() as { name: string; total_invested: number; investments: number; first_investment: string }[];
+      const players = investorRows.map(r => ({
+        name: r.name, totalInvested: r.total_invested,
+        investments: r.investments, firstInvestment: r.first_investment,
+      }));
+      const totalInvested = players.reduce((s, p) => s + p.totalInvested, 0);
       res.json({
         portfolioNow, portfolio4hAgo, portfolioChange: change, portfolioChangePct: changePct,
         feesAllTime, fees4h, feesPrev4h, feesVariance,
@@ -263,6 +459,8 @@ export function startDashboard(port: number): DashboardServer {
         regime: live?.regime ?? 'RANGING',
         uptimeDays,
         lastUpdated: Date.now(),
+        players,
+        totalInvested,
       });
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
@@ -1227,13 +1425,29 @@ export function startDashboard(port: number): DashboardServer {
         triggers.push({ id: 'autoDeploy', label: 'Auto-deploy', triggerPrice: parseFloat((lower + (1 - adThreshold) * range).toFixed(2)), direction: 'above', color: adBlocked ? '#eab308' : '#58a6ff', idleUsdcAboveFloor: parseFloat(idleUsdcAboveFloor.toFixed(2)), autoDeployBlocked: adBlocked });
       }
       if (runtime.solConversionEnabled && basis > 0) {
-        triggers.push({ id: 'solConvert', label: 'SOL convert', triggerPrice: parseFloat((basis * runtime.solConversionBasisMultiplier).toFixed(2)), direction: 'above', color: '#a855f7' });
+        const scRegimeMult: Record<string, number | null> = { RANGING: 1.000, BULLISH_TREND: 1.010, BEARISH_TREND: 1.005, EXTREME: null };
+        const scMult = scRegimeMult[regime] ?? null;
+        if (scMult !== null) {
+          const scEffective = scMult * runtime.solConversionBasisMultiplier;
+          triggers.push({ id: 'solConvert', label: 'SOL convert', triggerPrice: parseFloat((basis * scEffective).toFixed(2)), direction: 'above', color: '#a855f7' });
+        }
       }
       if (live.botState !== 'ACTIVE' && basis > 0) {
         triggers.push({ id: 'basisGate', label: 'Re-entry gate', triggerPrice: parseFloat((basis * (params.basisGateThreshold ?? 0.999)).toFixed(2)), direction: 'above', color: '#eab308' });
       }
       if (live.churnGuardActive && live.churnGuardLastExitPrice) {
         triggers.push({ id: 'churnGuard', label: 'ChurnGuard', triggerPrice: live.churnGuardLastExitPrice, direction: 'above', color: '#8b949e' });
+      }
+      // Pullback target — show when bot is waiting for pullback
+      if (live.botState === 'WAITING_PULLBACK') {
+        try {
+          const pbState = dbRef.prepare('SELECT pullback_peak, pullback_start FROM bot_state WHERE id = 1').get() as any;
+          if (pbState?.pullback_peak > 0) {
+            const pullbackPct = runtime.pullbackThresholdPct / 100;
+            const pullbackTarget = parseFloat((pbState.pullback_peak * (1 - pullbackPct)).toFixed(2));
+            triggers.push({ id: 'pullback', label: 'Pullback target', triggerPrice: pullbackTarget, direction: 'below', color: '#f97316', note: `peak $${pbState.pullback_peak.toFixed(2)}` });
+          }
+        } catch {}
       }
       // Compute fill percentages and distances
       const currentProxToLower = hw > 0 ? Math.max(0, (centre - price) / hw) : 0;
@@ -1262,6 +1476,12 @@ export function startDashboard(port: number): DashboardServer {
             const adRange = t.triggerPrice - lower;
             t.pctFilled = adRange > 0 ? Math.min(100, Math.max(0, ((price - lower) / adRange) * 100)) : 0;
           }
+        } else if (t.id === 'pullback') {
+          // Pullback: how far price has dropped from peak toward target (100% = at target)
+          const peak = parseFloat(t.note?.replace('peak $', '') ?? '0') || price;
+          const dropNeeded = peak - t.triggerPrice;
+          const dropSoFar = peak - price;
+          t.pctFilled = dropNeeded > 0 ? Math.min(100, Math.max(0, (dropSoFar / dropNeeded) * 100)) : 0;
         } else {
           // For basis gate, SOL convert, churnGuard — simple distance-based
           t.pctFilled = t.triggerPrice > lower ? Math.min(100, Math.max(0, ((price - lower) / (t.triggerPrice - lower)) * 100)) : 0;
@@ -4173,6 +4393,8 @@ ${NAV_HTML}
     ${field('autoDeployCheckIntervalSec', c.autoDeployCheckIntervalSec, 10, 'Auto-deploy interval (sec)', 'How often auto-deploy attempts to add idle capital.', 'At 10: checks every cycle. At 60: checks once per minute. At 300: every 5 min.')}
     ${field('solConversionCooldownMin', c.solConversionCooldownMin, 15, 'SOL conversion cooldown (min)', 'Minutes between automated SOL to USDC conversions.', 'At 15: converts at most once every 15 min. At 30: more conservative.')}
     ${field('solConversionBasisMultiplier', c.solConversionBasisMultiplier, 1.002, 'SOL conversion basis multiplier', 'Price must be > basis × this to convert. 1.002 = 0.2% above basis.', 'At 1.005: needs 0.5% margin. At 1.002: needs 0.2% margin. At 1.000: any price above basis.')}
+    ${field('solConvertMomentumThreshold', c.solConvertMomentumThreshold, 0.02, 'Momentum threshold (30min %)', 'Min 30-min price rise to trigger SOL conversion in BEARISH/EXTREME. 0.02 = 2%.', 'At 0.01: 1% spike triggers. At 0.02: 2% spike. At 0.05: 5% spike needed. Only fires in BEARISH_TREND and EXTREME.')}
+    ${field('solConvertMomentumCooldownMin', c.solConvertMomentumCooldownMin, 10, 'Momentum cooldown (min)', 'Cooldown for momentum-triggered conversions. Overrides regime cooldown when shorter.', 'At 5: aggressive, converts every 5 min during spikes. At 10: moderate. At 30: conservative.')}
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:6px 8px">Regime change reopen<span class="info-btn" onclick="showInfo('Regime change reopen','When regime changes, close current position and reopen with new regime params.','Enabled: bot adapts range/skew to new regime immediately. Disabled: keeps current position until natural exit.')">?</span></td>
       <td style="color:#30363d">true</td>
@@ -5172,6 +5394,14 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .fees .stat .lbl{color:var(--khaki);font-size:8px;margin-bottom:6px}
 .fees .stat .v{font-size:22px}
 .fees .stat .var{font-size:8px;margin-top:4px}
+.players-label{color:var(--yellow);font-size:10px;margin:20px 0 10px;letter-spacing:2px}
+.player-row{display:flex;align-items:center;gap:8px;height:28px;font-size:9px}
+.player-rank{width:32px;text-align:right;font-size:9px;flex-shrink:0}
+.player-name{width:100px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.player-pts{width:70px;color:var(--yellow);text-align:right;flex-shrink:0}
+.player-bar-wrap{flex:1;height:8px;background:#1a1a1a;border-radius:4px;overflow:hidden;min-width:40px}
+.player-bar-fill{height:100%;border-radius:4px;transition:width 1.5s cubic-bezier(0.22,1,0.36,1)}
+.players-total{text-align:center;color:var(--khaki);font-size:8px;margin-top:10px;letter-spacing:1px}
 .regime{margin:16px 0;font-size:14px}
 .meta{margin-top:16px;padding-top:8px;border-top:1px solid #333;font-size:9px;color:#666}
 .meta .row{display:flex;justify-content:space-between;margin-bottom:4px}
@@ -5196,6 +5426,13 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   .fees .stat .v{font-size:15px}
   .fees .stat .var{font-size:7px}
   .regime{font-size:10px}
+  .player-row{font-size:8px;height:24px}
+  .player-rank{width:24px;font-size:8px}
+  .player-name{width:80px;font-size:8px}
+  .player-pts{width:60px;font-size:8px}
+  .player-bar-wrap{display:none}
+  .players-label{font-size:8px}
+  .players-total{font-size:7px}
   .meta{font-size:8px}
   .coin{font-size:9px}
   #loading .lt{font-size:12px}
@@ -5221,6 +5458,9 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div class="stat"><div class="lbl">FEES ALL TIME</div><div class="v" style="color:var(--orange)" id="fees"></div></div>
     <div class="stat"><div class="lbl">FEES LAST 4H</div><div class="v" style="color:var(--green)" id="fees4h"></div><div class="var" id="feesVar"></div></div>
   </div>
+  <div class="players-label">&#9472; PLAYERS &#9472;</div>
+  <div id="players"></div>
+  <div class="players-total" id="players-total"></div>
   <div class="regime" id="regime"></div>
   <div class="meta">
     <div class="row"><span id="lastUp"></span><span>NEXT IN: <span id="cd">--:--</span></span></div>
@@ -5257,6 +5497,26 @@ function renderData(d){
     fv.textContent='vs prev 4h: '+(d.feesVariance>=0?'+':'')+d.feesVariance.toFixed(1)+'%';
     fv.style.color=d.feesVariance>=0?'#00cc44':'#cc0000';
   }else{fv.textContent='vs prev 4h: NEW';fv.style.color='#8b8b4b';}
+  function fmtScore(n){return Math.round(n).toLocaleString();}
+  var colors=['#ffcc00','#ffffff','#cd7f32'];
+  var pc=document.getElementById('players');pc.innerHTML='';
+  if(d.players&&d.players.length){
+    var hdr=document.createElement('div');hdr.className='player-row';
+    hdr.innerHTML='<span class="player-rank" style="color:#8b8b4b">RANK</span><span class="player-name" style="color:#8b8b4b">NAME</span><span class="player-pts" style="color:#8b8b4b">SCORE</span><span class="player-bar-wrap"></span>';
+    pc.appendChild(hdr);
+    var maxP=d.players[0].totalInvested;
+    d.players.forEach(function(p,i){
+      var rc=i<3?colors[i]:'#444';
+      var pct=maxP>0?((p.totalInvested/maxP)*100).toFixed(1):'0';
+      var row=document.createElement('div');row.className='player-row';
+      row.innerHTML='<span class="player-rank" style="color:'+rc+'">'+(i===0?'👑 ':'')+'#'+(i+1)+'</span>'
+        +'<span class="player-name">'+p.name.toUpperCase()+'</span>'
+        +'<span class="player-pts">'+fmtScore(p.totalInvested)+'</span>'
+        +'<span class="player-bar-wrap"><span class="player-bar-fill" style="width:'+pct+'%;background:'+rc+'"></span></span>';
+      pc.appendChild(row);
+    });
+    document.getElementById('players-total').textContent='TOTAL SCORE: '+d.totalInvested.toLocaleString()+' PTS';
+  }
   var ch=d.portfolioChange,cp=d.portfolioChangePct;
   var ce=document.getElementById('change');
   ce.className='chg '+(ch>=0?'pos':'neg');

@@ -290,8 +290,8 @@ export class LiveExecutor {
 
     // Quote with the constraining token — deposit what we can
     // Auto-deploy (Rule 7) will add remaining idle funds within minutes.
-    // Reserve 0.02 SOL extra for position account rent + TX fees
-    const solForQuote = Math.max(0, solAvailable - 0.02);
+    // Reserve SOL for position account rent + TX fees (0.02 rent + 0.03 gas buffer)
+    const solForQuote = Math.max(0, solAvailable - 0.05);
     let quote = solForQuote > 0.01 ? increaseLiquidityQuoteByInputToken(
       solMint, new Decimal(solForQuote),
       range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,

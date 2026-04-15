@@ -269,7 +269,7 @@ async function main() {
       if (!reserveSnap.floor || reserveSnap.floor === 0) {
         // First ever run — use wallet-only value as temporary floor
         // Will be corrected by in-cycle seed (Location 2) on first cycle
-        const floor = computeFloor(balances.totalUsdc);
+        const floor = computeFloor(balances.totalUsdc, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
         if (reserveSnap.current === 0) {
           const seed = Math.min(balances.usdc, floor);
           updateReserve(db, seed, floor);
@@ -472,7 +472,7 @@ async function main() {
 
       // Recalculate reserve floor if portfolio has grown/shrunk significantly
       const totalPortfolio = balances.sol * (balances.solPrice ?? 84) + balances.usdc + (pos ? pos.entrySol * (balances.solPrice ?? 84) + (pos.entryUsdc ?? 0) : 0);
-      checkReserveFloor(db, totalPortfolio);
+      checkReserveFloor(db, totalPortfolio, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
     }
   }
 
@@ -831,7 +831,7 @@ async function main() {
         const { pruneOldPriceTicks } = await import('./db/sqlite.js');
         pruneOldPriceTicks(db, 30);
         pruneOldData(db);
-        if (currentLiveData?.totalValueWithPosition) checkReserveFloor(db, currentLiveData.totalValueWithPosition);
+        if (currentLiveData?.totalValueWithPosition) checkReserveFloor(db, currentLiveData.totalValueWithPosition, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
         console.log(JSON.stringify({ level: 'info', msg: 'daily prune + reserve floor check', timestamp: now2 }));
       }
     } catch (err) {
@@ -1263,6 +1263,11 @@ async function runLiveCycle(price: number): Promise<void> {
       const oldRegime = liveRegime;
       liveRegime = newRegime;
       console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: newRegime, method: ta != null ? 'TA-first' : 'enhanced-fallback', deployMultiplier, timestamp: now }));
+      // Update reserve floor for new regime
+      const newFloorPct = (runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime)).reserveFloorPct ?? 0.20;
+      if (currentLiveData?.totalValueWithPosition) {
+        checkReserveFloor(db, currentLiveData.totalValueWithPosition, newFloorPct);
+      }
       const dailyMetrics = closes.length >= 3 ? detectRegimeWithMetrics(closes, runtime.trendThreshold) : null;
       insertRegimeChange(db, {
         timestamp: now, old_regime: oldRegime, new_regime: newRegime, price,
@@ -1285,10 +1290,16 @@ async function runLiveCycle(price: number): Promise<void> {
           const ageOk = posAgeMin > 15;
 
           // Classify change
-          const isImmediate =
+          let isImmediate =
             newRegime === 'EXTREME' || oldRegime === 'EXTREME' ||
             (oldRegime === 'BULLISH_TREND' && newRegime === 'BEARISH_TREND') ||
             (oldRegime === 'BEARISH_TREND' && newRegime === 'BULLISH_TREND');
+
+          // Immediate reopens require HIGH confidence — downgrade MEDIUM/LOW to conditional
+          if (isImmediate && confLevel !== 'HIGH') {
+            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Immediate change downgraded to conditional — confidence ${confLevel} not HIGH`, timestamp: now }));
+            isImmediate = false;
+          }
 
           // Check proximity for conditional reopen
           const prox = calcProximity(price, pos as any);
@@ -1786,21 +1797,69 @@ async function runLiveCycle(price: number): Promise<void> {
   if (currentPos && liveBotState === 'ACTIVE') {
     try {
       const basis = costBasisState.solCostBasis;
+
+      // Step 1: Get price 30 minutes ago for momentum calculation
+      const price30mRow = db.prepare(`
+        SELECT price FROM regime_snapshots
+        WHERE ts <= ?
+        ORDER BY ts DESC LIMIT 1
+      `).get(now - 30 * 60 * 1000) as {price: number} | undefined;
+      const price30mAgo = price30mRow?.price ?? null;
+
+      // Step 2: Calculate momentum and margin above basis
+      const marginAboveBasis = basis > 0
+        ? (price - basis) / basis
+        : 0;
+      const priceChange30m = price30mAgo
+        ? (price - price30mAgo) / price30mAgo
+        : 0;
+
+      // Step 3: Momentum multiplier tiers (scales conversion cap)
+      const getMomentumMultiplier = (margin: number): number => {
+        if (margin >= 0.030) return 1.00;
+        if (margin >= 0.020) return 0.75;
+        if (margin >= 0.010) return 0.50;
+        if (margin >= 0.005) return 0.25;
+        return 0;
+      };
+      const momentumMult = getMomentumMultiplier(marginAboveBasis);
+      const MOMENTUM_THRESHOLD = runtime.solConvertMomentumThreshold ?? 0.02;
+      const momentumOverride =
+        (liveRegime === 'BEARISH_TREND' || liveRegime === 'EXTREME') &&
+        priceChange30m >= MOMENTUM_THRESHOLD &&
+        momentumMult > 0;
+
       // Dynamic cooldown per regime, scaled by global multiplier
       const regimeCooldownMin: Record<string, number> = { RANGING: 3, BULLISH_TREND: 5, BEARISH_TREND: 10, EXTREME: 20 };
       const baseCooldown = regimeCooldownMin[liveRegime] ?? 10;
-      const cooldownMs = baseCooldown * (runtime.solConversionCooldownMin / 15) * 60_000; // solConversionCooldownMin acts as multiplier (15 = 1x)
+      const regimeCooldownMs = baseCooldown * (runtime.solConversionCooldownMin / 15) * 60_000; // solConversionCooldownMin acts as multiplier (15 = 1x)
+      // Step 6: Momentum cooldown — shorter cooldown when momentum is strong
+      const momentumCooldownMs = (runtime.solConvertMomentumCooldownMin ?? 10) * 60 * 1000;
+      const effectiveCooldownMs = momentumOverride ? Math.min(regimeCooldownMs, momentumCooldownMs) : regimeCooldownMs;
       const timeSinceLast = now - solConversionLastTs;
+
+      // Per-regime basis multiplier (null = disabled for this regime)
+      const regimeBasisMult: Record<string, number | null> = { RANGING: 1.000, BULLISH_TREND: 1.010, BEARISH_TREND: 1.005, EXTREME: null };
+      const regimeMult = regimeBasisMult[liveRegime] ?? null;
+      const effectiveMult = regimeMult != null ? regimeMult * runtime.solConversionBasisMultiplier : null;
+
+      // Step 4: Regime gate — RANGING/BULLISH always allowed, BEARISH/EXTREME only via momentum
+      const regimeAllows = liveRegime === 'RANGING' || liveRegime === 'BULLISH_TREND';
 
       if (!runtime.solConversionEnabled) {
         // silent skip — don't log every cycle
-      } else if (price < basis * runtime.solConversionBasisMultiplier) {
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${(basis * runtime.solConversionBasisMultiplier).toFixed(2)} (basis $${basis.toFixed(2)} × ${runtime.solConversionBasisMultiplier})`, timestamp: now }));
-      } else if (liveRegime !== 'RANGING' && liveRegime !== 'BULLISH_TREND') {
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: wrong regime (${liveRegime})`, timestamp: now }));
-      } else if (timeSinceLast < cooldownMs) {
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: cooldown active (${((cooldownMs - timeSinceLast) / 60_000).toFixed(1)}min remaining, ${baseCooldown}min base for ${liveRegime})`, timestamp: now }));
+      } else if (!regimeAllows && !momentumOverride) {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: regime ${liveRegime} blocked, no momentum override (30m change: ${(priceChange30m * 100).toFixed(2)}%, margin: ${(marginAboveBasis * 100).toFixed(2)}%, need: >${(MOMENTUM_THRESHOLD * 100).toFixed(0)}% momentum + >0.5% margin above basis)`, timestamp: now }));
+      } else if (regimeAllows && effectiveMult !== null && price < basis * effectiveMult) {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${(basis * effectiveMult).toFixed(2)} (basis $${basis.toFixed(2)} × ${effectiveMult.toFixed(3)} = regime ${regimeMult} × global ${runtime.solConversionBasisMultiplier})`, timestamp: now }));
+      } else if (timeSinceLast < effectiveCooldownMs) {
+        const effectiveCooldownMin = effectiveCooldownMs / 60_000;
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: cooldown active (${((effectiveCooldownMs - timeSinceLast) / 60_000).toFixed(1)}min remaining, ${effectiveCooldownMin.toFixed(0)}min effective${momentumOverride ? ' [momentum]' : ''} for ${liveRegime})`, timestamp: now }));
       } else {
+        if (momentumOverride) {
+          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Momentum override active in ${liveRegime}: +${(priceChange30m * 100).toFixed(2)}% in 30min, margin +${(marginAboveBasis * 100).toFixed(2)}% above basis, cap multiplier ${(momentumMult * 100).toFixed(0)}%`, timestamp: now }));
+        }
+
         const scBalances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
         const walletSolValue = scBalances.sol * price;
         const totalPortfolio = walletSolValue + scBalances.usdc;
@@ -1821,7 +1880,15 @@ async function runLiveCycle(price: number): Promise<void> {
           const targetCycles: Record<string, number> = { RANGING: 6, BULLISH_TREND: 9, BEARISH_TREND: 18, EXTREME: 48 };
           const cycles = targetCycles[liveRegime] ?? 18;
           const dynamicCap = Math.min(Math.max(walletSolValue / cycles, 200), 5000);
-          const convertUsdc = Math.min(needed, maxFromSol, dynamicCap);
+
+          // Step 5: Apply momentum-scaled cap for momentum override path
+          let effectiveCap = dynamicCap;
+          if (momentumOverride && !regimeAllows) {
+            effectiveCap = dynamicCap * momentumMult;
+            console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Momentum cap: $${effectiveCap.toFixed(2)} (${(momentumMult * 100).toFixed(0)}% × $${dynamicCap.toFixed(2)} base)`, timestamp: now }));
+          }
+
+          const convertUsdc = Math.min(needed, maxFromSol, effectiveCap);
           const convertSol = convertUsdc / price;
 
           if (convertUsdc < 50) {
@@ -1831,15 +1898,19 @@ async function runLiveCycle(price: number): Promise<void> {
             if (!sellAllowed) {
               console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: shouldAllowSwap blocked (price $${price.toFixed(2)} vs basis $${basis.toFixed(2)})`, timestamp: now }));
             } else {
-              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${dynamicCap.toFixed(0)} (idle $${walletSolValue.toFixed(0)}/${cycles}cyc), cooldown: ${baseCooldown}min`, timestamp: now }));
-              const swapResult = await liveExecutor!.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(convertSol * 1e9), `SolConvert: ${convertSol.toFixed(3)} SOL → USDC (margin ${((price / basis - 1) * 100).toFixed(1)}% above basis)`);
+              // Step 7: Tag swap reason based on path
+              const swapReason = momentumOverride && !regimeAllows
+                ? `SOL→USDC momentum override (+${(priceChange30m * 100).toFixed(1)}% in 30min)`
+                : `SolConvert: ${convertSol.toFixed(3)} SOL → USDC (margin ${((price / basis - 1) * 100).toFixed(1)}% above basis)`;
+              console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${effectiveCap.toFixed(0)} (idle $${walletSolValue.toFixed(0)}/${cycles}cyc), cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
+              const swapResult = await liveExecutor!.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(convertSol * 1e9), swapReason);
               if (swapResult) {
                 reduceCostBasisHoldings(db, convertSol, 'sol_convert');
                 costBasisState = readCostBasis(db);
                 sirCostBasis = costBasisState.solCostBasis;
                 solConversionLastTs = now;
                 try { db.prepare('UPDATE bot_state SET sol_conversion_last_ts = ? WHERE id = 1').run(now); } catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `sol_conversion_ts update: ${String(e)}`, timestamp: Date.now() })); }
-                console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converted ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cooldown: ${runtime.solConversionCooldownMin}min`, timestamp: now }));
+                console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converted ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
               } else {
                 console.log(JSON.stringify({ level: 'warn', msg: '[SolConvert] Swap failed — skipping cycle', timestamp: now }));
               }

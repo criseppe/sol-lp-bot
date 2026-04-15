@@ -93,7 +93,9 @@ export const runtime = {
   // SOL Conversion — sell SOL to USDC when profitable and USDC needed for deploys
   solConversionEnabled: false,
   solConversionCooldownMin: 15,
-  solConversionBasisMultiplier: 1.000, // price must be > basis * this to convert
+  solConversionBasisMultiplier: 1.000, // global scaling on regime thresholds (RANGING=1.000, BULLISH=1.010, BEARISH=1.005, EXTREME=disabled). 1.0=defaults, 1.01=1% stricter
+  solConvertMomentumThreshold: 0.02, // 30-min price change required to trigger momentum override in BEARISH/EXTREME
+  solConvertMomentumCooldownMin: 10, // cooldown minutes for momentum-triggered conversions
 
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
@@ -119,7 +121,7 @@ export const runtime = {
 const REGIME_KEYS = ['RANGING', 'BULLISH_TREND', 'BEARISH_TREND', 'EXTREME'] as const;
 const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
   'rangeWidthPct', 'skewDown', 'skewUp', 'proxThresholdLower', 'proxThresholdUpper',
-  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold',
+  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold', 'reserveFloorPct',
 ];
 
 /**
@@ -167,6 +169,8 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const scEnabled = g('solConversionEnabled'); if (scEnabled != null) runtime.solConversionEnabled = scEnabled === 'true' || scEnabled === '1';
   const scCooldown = nv('solConversionCooldownMin', 1, 120); if (scCooldown != null) runtime.solConversionCooldownMin = scCooldown;
   const scBasis = nv('solConversionBasisMultiplier', 1.000, 1.050); if (scBasis != null) runtime.solConversionBasisMultiplier = scBasis;
+  const scMomThresh = nv('solConvertMomentumThreshold', 0.005, 0.10); if (scMomThresh != null) runtime.solConvertMomentumThreshold = scMomThresh;
+  const scMomCool = nv('solConvertMomentumCooldownMin', 1, 120); if (scMomCool != null) runtime.solConvertMomentumCooldownMin = scMomCool;
 
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
@@ -275,6 +279,8 @@ export function exportConfig(): Record<string, string> {
   out['solConversionEnabled'] = runtime.solConversionEnabled ? '1' : '0';
   out['solConversionCooldownMin'] = String(runtime.solConversionCooldownMin);
   out['solConversionBasisMultiplier'] = String(runtime.solConversionBasisMultiplier);
+  out['solConvertMomentumThreshold'] = String(runtime.solConvertMomentumThreshold);
+  out['solConvertMomentumCooldownMin'] = String(runtime.solConvertMomentumCooldownMin);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);

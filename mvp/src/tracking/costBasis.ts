@@ -125,14 +125,16 @@ export function reduceCostBasisHoldings(
   const newTotalAcquired = Math.max(0, state.solTotalAcquired - solSoldAmount);
   const reductionRatio = state.solTotalAcquired > 0 ? newTotalAcquired / state.solTotalAcquired : 0;
   const newTotalCost = state.solTotalCost * reductionRatio;
+  // Write basis explicitly to prevent floating point drift from accumulated proportional reductions
+  const newBasis = newTotalAcquired > 0 ? newTotalCost / newTotalAcquired : state.solCostBasis;
 
   db.prepare(
-    `UPDATE bot_state SET sol_total_acquired = ?, sol_total_cost = ?, cost_basis_last_updated = ? WHERE id = 1`,
-  ).run(newTotalAcquired, newTotalCost, Date.now());
+    `UPDATE bot_state SET sol_total_acquired = ?, sol_total_cost = ?, sol_cost_basis = ?, cost_basis_last_updated = ? WHERE id = 1`,
+  ).run(newTotalAcquired, newTotalCost, newBasis, Date.now());
 
   console.log(JSON.stringify({
     level: 'info',
-    msg: `[CostBasis] Holdings reduced [${label}]: sold ${solSoldAmount.toFixed(3)} SOL. Tracked: ${state.solTotalAcquired.toFixed(3)} → ${newTotalAcquired.toFixed(3)} SOL. Basis unchanged: $${state.solCostBasis.toFixed(2)}`,
+    msg: `[CostBasis] Holdings reduced [${label}]: sold ${solSoldAmount.toFixed(3)} SOL. Tracked: ${state.solTotalAcquired.toFixed(3)} → ${newTotalAcquired.toFixed(3)} SOL. Basis: $${newBasis.toFixed(2)}`,
     timestamp: Date.now(),
   }));
 }

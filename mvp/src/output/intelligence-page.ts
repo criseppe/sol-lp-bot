@@ -39,6 +39,13 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 .pag button{padding:3px 8px;font-size:10px;border:1px solid #30363d;background:transparent;color:#8b949e;border-radius:3px;cursor:pointer}
 .pag button.on{border-color:#58a6ff;color:#58a6ff}
 .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.fees-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+.fees-card{padding:8px;border:1px solid #21262d;border-radius:6px;text-align:center;background:#0d1117}
+.fees-card-val{font-size:18px;font-weight:bold;font-family:monospace}
+.fees-card-sub{font-size:9px;color:#8b949e;margin-top:1px}
+.fees-card-label{font-size:9px;color:#484f58;margin-top:3px;text-transform:uppercase;letter-spacing:0.5px}
+.fees-compare{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:11px;padding:8px 0;border-top:1px solid #21262d;border-bottom:1px solid #21262d}
+.fees-bottom{display:flex;gap:16px;justify-content:center;font-size:11px;color:#8b949e;padding:10px 0 0}
 @media(max-width:700px){
   body{padding:8px}
   .grid{grid-template-columns:1fr}
@@ -50,6 +57,11 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
   .sum .s .v{font-size:15px}
   .w th,.w td{padding:3px 4px;font-size:10px}
   .m-hide{display:none!important}
+  .fees-cards{grid-template-columns:1fr 1fr}
+  .fees-card-val{font-size:15px}
+  .fees-compare{grid-template-columns:1fr 1fr}
+  .fees-bottom{flex-wrap:wrap;gap:8px;font-size:10px}
+  #cFees{max-height:200px!important}
 }
 </style></head><body>
 <div class="nav">
@@ -71,7 +83,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 <div class="grid" id="widgets"></div>
 
 <script>
-var DATA=null,CHS={},rangeDays=30;
+var DATA=null,CHS={},rangeDays=30,FEES_DATA=null;
 
 function setRange(d){rangeDays=d;document.querySelectorAll('#df button').forEach(function(b){b.classList.remove('on')});
   if(d===7)document.getElementById('df7').classList.add('on');
@@ -105,6 +117,8 @@ function render(){
   document.getElementById('summary').innerHTML=sh;
 
   var h='';
+  // W0: Daily Fees Intelligence
+  h+=renderFeesIntelligence();
   // W1: Fee Income
   h+='<div class="w"><h3>Fee Income</h3><canvas id="c1"></canvas></div>';
   // W2: Position P&L Table
@@ -126,6 +140,52 @@ function render(){
   h+='<div class="w"><h3>Churn Rate (Positions/Day)</h3><canvas id="c11"></canvas></div>';
   // W12: Gate Fire Rate
   h+='<div class="w"><h3>Gate Block Rate</h3><canvas id="c12"></canvas></div>';
+
+  // W13: SOL Conversion Monitor
+  var sc=DATA.solConversion;
+  if(sc){
+    var stCol=sc.status==='FIRING'?'#22c55e':sc.status==='COOLDOWN'?'#eab308':sc.status==='BLOCKED'?'#ef4444':'#484f58';
+    var scH='<div class="w full"><h3>SOL Conversion Monitor <span class="badge" style="background:'+stCol+'20;color:'+stCol+';margin-left:8px">'+sc.status+'</span></h3>';
+    // Status row
+    scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;font-size:11px">';
+    var cdText=sc.cooldownRemainingMs>0?Math.floor(sc.cooldownRemainingMs/60000)+':'+String(Math.floor((sc.cooldownRemainingMs%60000)/1000)).padStart(2,'0'):'Ready';
+    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Next fire</span><br><span id="sc-cd" style="color:'+(sc.cooldownRemainingMs>0?'#eab308':'#22c55e')+';font-weight:bold;font-size:14px">'+cdText+'</span></div>';
+    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Cooldown</span><br><span style="color:#c9d1d9;font-weight:bold">'+sc.cooldownTotalMin+'min <span style="color:#8b949e;font-size:10px">('+DATA.regimeHistory?.[0]?.regime?.replace('_TREND','') || 'RANGING'+')</span></span></div>';
+    scH+='<div style="padding:6px;border:1px solid #21262d;border-radius:4px;text-align:center"><span style="color:#8b949e">Threshold</span><br><span style="color:#c9d1d9;font-weight:bold">$'+sc.threshold.toFixed(2)+'</span> <span style="color:'+(sc.priceAboveThreshold?'#22c55e':'#ef4444')+';font-size:10px">'+(sc.priceAboveThreshold?'\\u2713':'\\u2717')+'</span></div>';
+    scH+='</div>';
+    // Conditions
+    scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Cap: $'+sc.dynamicCap+' · Idle SOL: $'+sc.idleSolValue+'</div>';
+    // Today
+    scH+='<div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
+    scH+='<div class="s"><div class="v" style="color:#a855f7;font-size:16px">'+sc.todayCount+'</div><div class="l">Today</div></div>';
+    scH+='<div class="s"><div class="v" style="color:#c9d1d9;font-size:16px">'+sc.todaySol.toFixed(1)+' SOL</div><div class="l">Converted</div></div>';
+    scH+='<div class="s"><div class="v" style="color:#22c55e;font-size:16px">$'+sc.todayUsdc.toFixed(0)+'</div><div class="l">Received</div></div>';
+    scH+='</div>';
+    // Week summary
+    if(sc.weekCount>0){
+      var avgP=sc.weekSol>0?(sc.weekUsdc/sc.weekSol):0;
+      scH+='<div style="font-size:10px;color:#8b949e;margin-bottom:10px">Week: '+sc.weekCount+' conversions · '+sc.weekSol.toFixed(1)+' SOL → $'+sc.weekUsdc.toFixed(0)+' USDC · avg $'+avgP.toFixed(2)+'/SOL</div>';
+    }
+    // Last conversion
+    if(sc.last){
+      var ago=Math.round((Date.now()-sc.last.ts)/60000);
+      var agoStr=ago<60?ago+'min ago':(ago/60).toFixed(1)+'h ago';
+      var txLink=sc.last.tx?'<a href="https://solscan.io/tx/'+sc.last.tx+'" target="_blank" style="color:#58a6ff;text-decoration:none;font-size:10px">'+sc.last.tx.slice(0,8)+'</a>':'';
+      scH+='<div style="font-size:11px;color:#c9d1d9;margin-bottom:8px">Last: <b>'+agoStr+'</b> — '+sc.last.sol.toFixed(3)+' SOL → $'+sc.last.usdc.toFixed(2)+' @ $'+sc.last.price.toFixed(2)+' '+txLink+'</div>';
+    }
+    // Recent table
+    if(sc.recent&&sc.recent.length>0){
+      scH+='<div class="tbl-wrap"><table><thead><tr><th>Time</th><th style="text-align:right">SOL</th><th style="text-align:right">USDC</th><th style="text-align:right">Price</th><th class="m-hide">TX</th></tr></thead><tbody>';
+      sc.recent.forEach(function(r){
+        var t=new Date(r.ts).toLocaleTimeString('en-US',{timeZone:'Europe/Berlin',hour:'2-digit',minute:'2-digit',hour12:false});
+        var tx=r.tx?'<a href="https://solscan.io/tx/'+r.tx+'" target="_blank" style="color:#58a6ff;text-decoration:none">'+r.tx.slice(0,8)+'</a>':'—';
+        scH+='<tr><td>'+t+'</td><td style="text-align:right;font-family:monospace">'+r.sol.toFixed(3)+'</td><td style="text-align:right;font-family:monospace">$'+r.usdc.toFixed(2)+'</td><td style="text-align:right;font-family:monospace">$'+r.price.toFixed(2)+'</td><td class="m-hide">'+tx+'</td></tr>';
+      });
+      scH+='</tbody></table></div>';
+    }
+    scH+='</div>';
+    h+=scH;
+  }
 
   document.getElementById('widgets').innerHTML=h;
 
@@ -234,9 +294,104 @@ function render(){
       {label:'ChurnGuard',data:gf.map(function(g){return g.churnBlock;}),backgroundColor:'#a855f780'}
     ]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{stacked:true,ticks:{color:'#8b949e'},grid:{color:'#21262d'}},x:{stacked:true,ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
   }
+
+  // Hourly fees chart for Daily Fees Intelligence
+  renderFeesChart();
+}
+
+function renderFeesIntelligence(){
+  if(!FEES_DATA)return '<div class="w full" id="fees-widget"><div class="loading">Loading daily fees…</div></div>';
+  var d=FEES_DATA;
+  var todayCol=d.feesTodayTotal>d.fees7dAvgSameTime?'#22c55e':d.feesTodayTotal<d.fees7dAvgSameTime*0.80?'#ef4444':'#c9d1d9';
+  var progressPct=d.feesExpectedToday>0?Math.min(100,d.feesTodayTotal/d.feesExpectedToday*100):0;
+  var onTrack=d.fees7dAvgSameTime>0&&d.feesTodayTotal>=d.fees7dAvgSameTime*0.90;
+  var barCol=onTrack?'#22c55e':'#eab308';
+  var vsYCol=d.vsYesterdaySameTime>=0?'#22c55e':'#ef4444';
+  var vs7Col=d.vs7dAvg>=0?'#22c55e':'#ef4444';
+  var vsYSign=d.vsYesterdaySameTime>=0?'+':'';
+  var vs7Sign=d.vs7dAvg>=0?'+':'';
+  var confCol=d.confidence==='HIGH'?'#22c55e':d.confidence==='MEDIUM'?'#eab308':'#ef4444';
+
+  var s='<div class="w full" id="fees-widget">';
+  s+='<h3>Daily Fees Intelligence <span style="font-size:9px;color:#484f58;font-weight:normal;text-transform:none;letter-spacing:0">Updated every 5 min · Day resets at 00:00 UTC</span></h3>';
+
+  // Header metrics - 4 cards
+  s+='<div class="fees-cards">';
+  s+='<div class="fees-card" style="border-color:'+todayCol+'30"><div class="fees-card-val" style="color:'+todayCol+'">$'+fmt(d.feesTodayTotal)+'</div><div class="fees-card-sub">'+fmt(d.feesPending,3)+' pending</div><div class="fees-card-label">Today so far</div></div>';
+  s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesYesterday)+'</div><div class="fees-card-sub">full day</div><div class="fees-card-label">Yesterday</div></div>';
+  s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.fees7dAvgSameTime)+'</div><div class="fees-card-sub">at '+d.hoursElapsed+'h elapsed</div><div class="fees-card-label">7D avg (same time)</div></div>';
+  s+='<div class="fees-card"><div class="fees-card-val">$'+fmt(d.feesExpectedToday)+'</div><div class="fees-card-sub" style="color:'+confCol+'">'+d.confidence+' confidence</div><div class="fees-card-label">Expected today</div></div>';
+  s+='</div>';
+
+  // Progress bar
+  s+='<div style="margin:10px 0">';
+  s+='<div style="display:flex;justify-content:space-between;font-size:10px;color:#8b949e;margin-bottom:3px"><span>Today: $'+fmt(d.feesTodayTotal)+' of expected $'+fmt(d.feesExpectedToday)+'</span><span>'+fmt(progressPct,0)+'%</span></div>';
+  s+='<div style="background:#21262d;border-radius:4px;height:8px;overflow:hidden"><div style="width:'+progressPct+'%;height:100%;background:'+barCol+';border-radius:4px;transition:width 0.5s"></div></div>';
+  s+='</div>';
+
+  // Comparison row
+  s+='<div class="fees-compare">';
+  s+='<div><span style="color:#8b949e">vs Yesterday (same time):</span> <span style="color:'+vsYCol+';font-weight:bold">'+vsYSign+fmt(d.vsYesterdaySameTime,1)+'%</span></div>';
+  s+='<div><span style="color:#8b949e">vs 7D average:</span> <span style="color:'+vs7Col+';font-weight:bold">'+vs7Sign+fmt(d.vs7dAvg,1)+'%</span></div>';
+  s+='<div><span style="color:#8b949e">Run rate:</span> <span style="color:#c9d1d9;font-weight:bold">$'+fmt(d.currentRunRate)+'/hr</span> <span style="color:#484f58">('+d.hoursElapsed+'h)</span></div>';
+  s+='<div><span style="color:#8b949e">Pending fees:</span> <span style="color:#eab308;font-weight:bold">$'+fmt(d.feesPending)+'</span></div>';
+  s+='</div>';
+
+  // Hourly chart
+  s+='<div style="margin-top:12px"><canvas id="cFees" style="width:100%;max-height:220px"></canvas></div>';
+
+  // Bottom row
+  s+='<div class="fees-bottom">';
+  s+='<span>Positions today: <b>'+d.positionsToday+'</b></span>';
+  s+='<span>Avg per position: <b>$'+fmt(d.avgFeesPerPosition)+'</b></span>';
+  s+='<span>Best position: <b>$'+fmt(d.bestPosition)+'</b></span>';
+  s+='</div>';
+
+  s+='</div>';
+  return s;
+}
+
+function renderFeesChart(){
+  if(!FEES_DATA)return;
+  var el=document.getElementById('cFees');if(!el)return;
+  var d=FEES_DATA;
+  var labels=[];for(var i=0;i<24;i++)labels.push(String(i).padStart(2,'0'));
+  var todayBg=d.hourlyToday.map(function(_,i){return i===d.currentHour?'#58a6ff':'#22c55e80';});
+  CHS.cFees=new Chart(el,{type:'bar',data:{labels:labels,datasets:[
+    {label:'Today',data:d.hourlyToday,backgroundColor:todayBg,order:2},
+    {label:'7D Avg',data:d.hourly7dAvg,type:'line',borderColor:'#eab308',borderDash:[5,3],backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5,order:1}
+  ]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{
+    y:{ticks:{callback:function(v){return '$'+Number(v).toFixed(2);},color:'#8b949e'},grid:{color:'#21262d'}},
+    x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}
+  }}});
+}
+
+async function loadFeesData(){
+  try{
+    var r=await fetch('/api/daily-fees-intelligence');
+    if(r.ok){
+      FEES_DATA=await r.json();
+      var w=document.getElementById('fees-widget');
+      if(w){
+        var parent=w.parentNode;
+        var tmp=document.createElement('div');
+        tmp.innerHTML=renderFeesIntelligence();
+        var newW=tmp.firstChild;
+        parent.replaceChild(newW,w);
+        if(CHS.cFees){try{CHS.cFees.destroy();}catch{}}
+        renderFeesChart();
+      }
+    }
+  }catch(e){console.warn('fees intelligence load failed',e);}
 }
 
 load();
+loadFeesData();
+setInterval(loadFeesData,300000); // refresh every 5 min
+var scCdStart=0,scCdTotal=0;
+function updateScCd(){var el=document.getElementById('sc-cd');if(!el)return;var rem=Math.max(0,scCdTotal-(Date.now()-scCdStart));if(rem<=0){el.textContent='Ready';el.style.color='#22c55e';}else{var m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);el.textContent=m+':'+String(s).padStart(2,'0');}}
+setInterval(updateScCd,1000);
+var _origRender=render;render=function(){_origRender();if(DATA&&DATA.solConversion){scCdStart=Date.now();scCdTotal=DATA.solConversion.cooldownRemainingMs||0;}};
 </script>
 </body></html>`;
 }

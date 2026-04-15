@@ -13,7 +13,7 @@ export const MINTS = {
 // Regime parameter map — all rule thresholds by regime
 export const REGIME_PARAMS = {
   RANGING: {
-    rangeWidthPct:        1.2,
+    rangeWidthPct:        1.5,
     skewDown:             0.30,
     skewUp:               0.70,
     proxThresholdLower:   0.65,
@@ -21,11 +21,12 @@ export const REGIME_PARAMS = {
     deployPct:            1.00,
     solReentrySplit:      0.50,
     harvestIntervalDays:  7,
-    harvestSolConvertPct: 0.00,
+    harvestSolConvertPct: 0.50,
     usdcDepositPct:       0.35,
     deployRatioTolerance: 0.020,
-    basisGateThreshold:   0.999,
+    basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.40,
+    reserveFloorPct: 0.10,
   },
   BULLISH_TREND: {
     rangeWidthPct:        3,
@@ -39,8 +40,9 @@ export const REGIME_PARAMS = {
     harvestSolConvertPct: 0.70,
     usdcDepositPct:       0.30,
     deployRatioTolerance: 0.035,
-    basisGateThreshold:   0.999,
+    basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.55,
+    reserveFloorPct: 0.15,
   },
   BEARISH_TREND: {
     rangeWidthPct:        2,
@@ -56,6 +58,7 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.030,
     basisGateThreshold:   0.992,
     proximityDeployThreshold: 0.55,
+    reserveFloorPct: 0.20,
   },
   EXTREME: {
     rangeWidthPct:        5,
@@ -71,6 +74,7 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.050,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.40,
+    reserveFloorPct: 0.25,
   },
 } as const;
 

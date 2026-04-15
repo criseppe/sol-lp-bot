@@ -44,8 +44,8 @@ export interface DeployGate {
 /**
  * Compute the USDC floor for the given total portfolio value.
  */
-export function computeFloor(totalPortfolioUsdc: number): number {
-  return totalPortfolioUsdc * RESERVE_FLOOR_PCT;
+export function computeFloor(totalPortfolioUsdc: number, floorPct?: number): number {
+  return totalPortfolioUsdc * (floorPct ?? RESERVE_FLOOR_PCT);
 }
 
 /**
@@ -176,11 +176,11 @@ export function checkDeployGate(db: Database.Database, usdcNeededForDeposit: num
  * Recalculate reserve floor when portfolio value drifts >20% from expected.
  * Only adjusts floor — does not change current reserve amount.
  */
-export function checkReserveFloor(db: Database.Database, totalPortfolioUsdc: number): void {
+export function checkReserveFloor(db: Database.Database, totalPortfolioUsdc: number, floorPct?: number): void {
   const state = getReserveState(db);
   if (state.floor === 0 || totalPortfolioUsdc <= 0) return;
 
-  const expectedFloor = totalPortfolioUsdc * RESERVE_FLOOR_PCT;
+  const expectedFloor = totalPortfolioUsdc * (floorPct ?? RESERVE_FLOOR_PCT);
   const floorDrift = (expectedFloor - state.floor) / state.floor;
 
   if (Math.abs(floorDrift) > 0.20) {
