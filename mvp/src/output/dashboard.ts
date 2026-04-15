@@ -166,12 +166,38 @@ export function startDashboard(port: number): DashboardServer {
   app.set('etag', false);
   let server: Server;
 
-  // --- No-auth routes (before auth middleware) ---
-  app.get('/intelligence', async (_req, res) => {
+  // --- Auth helper (reusable per-route and as global middleware) ---
+  const dashUserEarly = process.env.DASHBOARD_USER;
+  const dashPassEarly = process.env.DASHBOARD_PASS;
+  const requireAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (!dashUserEarly || !dashPassEarly) { next(); return; }
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Basic ')) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="SOL LP Bot Dashboard"');
+      res.status(401).send('Authentication required');
+      return;
+    }
+    const [user, pass] = Buffer.from(auth.slice(6), 'base64').toString().split(':');
+    const userBuf = Buffer.from(user ?? '');
+    const passBuf = Buffer.from(pass ?? '');
+    const expectUser = Buffer.from(dashUserEarly);
+    const expectPass = Buffer.from(dashPassEarly);
+    const userMatch = userBuf.length === expectUser.length && crypto.timingSafeEqual(userBuf, expectUser);
+    const passMatch = passBuf.length === expectPass.length && crypto.timingSafeEqual(passBuf, expectPass);
+    if (!userMatch || !passMatch) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="SOL LP Bot Dashboard"');
+      res.status(401).send('Invalid credentials');
+      return;
+    }
+    next();
+  };
+
+  // --- Intelligence routes (auth-protected) ---
+  app.get('/intelligence', requireAuth, async (_req, res) => {
     const { renderIntelligenceHtml } = await import('./intelligence-page.js');
     res.type('html').send(renderIntelligenceHtml());
   });
-  app.get('/api/intelligence', (req, res) => {
+  app.get('/api/intelligence', requireAuth, (req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
     try {
       const from = parseInt(req.query?.from as string) || 0;
@@ -270,7 +296,7 @@ export function startDashboard(port: number): DashboardServer {
   });
 
   // Daily Fees Intelligence endpoint
-  app.get('/api/daily-fees-intelligence', (_req, res) => {
+  app.get('/api/daily-fees-intelligence', requireAuth, (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
     try {
       const now = Date.now();
@@ -417,78 +443,17 @@ export function startDashboard(port: number): DashboardServer {
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
 
+  // Arcade — temporarily offline
   app.get('/arcade', (_req, res) => {
-    res.type('html').send(renderArcadeHtml());
+    res.status(503).send(`<html><head><title>Arcade — Offline</title><style>body{background:#0d1117;color:#8b949e;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px}h1{color:#ffcc00;font-size:24px}p{font-size:14px}</style></head><body><h1>[ ARCADE OFFLINE ]</h1><p>INSERT COIN LATER</p></body></html>`);
   });
   app.get('/api/arcade-stats', (_req, res) => {
-    if (!dbRef) { res.json({}); return; }
-    try {
-      const live = currentLive;
-      const price = live?.solPrice ?? 0;
-      const portfolioNow = live?.totalValueWithPosition ?? 0;
-      const snap4h = dbRef.prepare('SELECT total_value FROM portfolio_snapshots WHERE ts < ? ORDER BY ts DESC LIMIT 1').get(Date.now() - 4 * 3600_000) as { total_value: number } | undefined;
-      const portfolio4hAgo = snap4h?.total_value ?? portfolioNow;
-      const change = portfolioNow - portfolio4hAgo;
-      const changePct = portfolio4hAgo > 0 ? (change / portfolio4hAgo) * 100 : 0;
-      const feesAllTime = getFeesCollected(dbRef!);
-      const positionActive = live?.botState === 'ACTIVE';
-      const pendingFees = live ? live.pendingFeesTotal : 0;
-      const fees4hClose = dbRef.prepare('SELECT COALESCE(SUM(fee_usdc),0) + COALESCE(SUM(fee_sol),0) * ? as total FROM rebalance_events WHERE timestamp > ? AND (fee_usdc > 0 OR fee_sol > 0)').get(price, Date.now() - 4 * 3600_000) as { total: number };
-      const fees4h = (fees4hClose?.total ?? 0) + (positionActive ? pendingFees : 0);
-      const feesPrev4hRow = dbRef.prepare('SELECT COALESCE(SUM(fee_usdc),0) + COALESCE(SUM(fee_sol),0) * ? as total FROM rebalance_events WHERE timestamp BETWEEN ? AND ? AND (fee_usdc > 0 OR fee_sol > 0)').get(price, Date.now() - 8 * 3600_000, Date.now() - 4 * 3600_000) as { total: number };
-      const feesPrev4h = feesPrev4hRow?.total ?? 0;
-      const feesVariance = feesPrev4h > 0 ? ((fees4h - feesPrev4h) / feesPrev4h) * 100 : null;
-      const posCount = dbRef.prepare("SELECT COUNT(*) as c FROM rebalance_events WHERE event_type IN ('POSITION_OPENED','PULLBACK_REENTRY')").get() as { c: number };
-      const uptimeDays = parseFloat(((Date.now() - startTime) / 86400_000).toFixed(1));
-      const investorRows = dbRef.prepare(`
-        SELECT name, SUM(amount_usdc) as total_invested, COUNT(*) as investments, MIN(invest_date) as first_investment
-        FROM investors GROUP BY LOWER(name) ORDER BY total_invested DESC
-      `).all() as { name: string; total_invested: number; investments: number; first_investment: string }[];
-      const players = investorRows.map(r => ({
-        name: r.name, totalInvested: r.total_invested,
-        investments: r.investments, firstInvestment: r.first_investment,
-      }));
-      const totalInvested = players.reduce((s, p) => s + p.totalInvested, 0);
-      res.json({
-        portfolioNow, portfolio4hAgo, portfolioChange: change, portfolioChangePct: changePct,
-        feesAllTime, fees4h, feesPrev4h, feesVariance,
-        positionsAllTime: posCount?.c ?? 0,
-        status: live?.botState === 'ACTIVE' ? 'ACTIVE' : 'IDLE',
-        regime: live?.regime ?? 'RANGING',
-        uptimeDays,
-        lastUpdated: Date.now(),
-        players,
-        totalInvested,
-      });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    res.status(503).json({ error: 'arcade offline' });
   });
 
-  // --- Basic auth middleware ---
-  const dashUser = process.env.DASHBOARD_USER;
-  const dashPass = process.env.DASHBOARD_PASS;
-
-  if (dashUser && dashPass) {
-    app.use((req: Request, res: Response, next: NextFunction) => {
-      const auth = req.headers.authorization;
-      if (!auth || !auth.startsWith('Basic ')) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="SOL LP Bot Dashboard"');
-        res.status(401).send('Authentication required');
-        return;
-      }
-      const [user, pass] = Buffer.from(auth.slice(6), 'base64').toString().split(':');
-      const userBuf = Buffer.from(user ?? '');
-      const passBuf = Buffer.from(pass ?? '');
-      const expectUser = Buffer.from(dashUser);
-      const expectPass = Buffer.from(dashPass);
-      const userMatch = userBuf.length === expectUser.length && crypto.timingSafeEqual(userBuf, expectUser);
-      const passMatch = passBuf.length === expectPass.length && crypto.timingSafeEqual(passBuf, expectPass);
-      if (!userMatch || !passMatch) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="SOL LP Bot Dashboard"');
-        res.status(401).send('Invalid credentials');
-        return;
-      }
-      next();
-    });
+  // --- Global auth middleware (applies to all routes below) ---
+  if (dashUserEarly && dashPassEarly) {
+    app.use(requireAuth);
     console.log(JSON.stringify({ level: 'info', msg: 'dashboard auth enabled', timestamp: Date.now() }));
   }
 
