@@ -276,6 +276,37 @@ export function startDashboard(port: number): DashboardServer {
       const scLast = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 1").get() as any; } catch { return null; } })();
       const scRecent = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 10").all() as any[]; } catch { return []; } })();
 
+      // IL tracker data
+      const ilByDay = dbRef.prepare(`
+        SELECT date(timestamp/1000,'unixepoch') as date,
+          ROUND(SUM(il_at_close),6) as il,
+          COUNT(*) as positions,
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as fees
+        FROM rebalance_events
+        WHERE il_at_close IS NOT NULL AND il_at_close != 0
+          AND timestamp >= ? AND timestamp <= ?
+        GROUP BY date ORDER BY date
+      `).all(from || 0, to) as any[];
+      const ilByRegime = dbRef.prepare(`
+        SELECT regime,
+          COUNT(*) as positions,
+          ROUND(SUM(il_at_close),6) as totalIl,
+          ROUND(AVG(il_at_close),6) as avgIl,
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as totalFees,
+          ROUND(AVG(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as avgFees
+        FROM rebalance_events
+        WHERE il_at_close IS NOT NULL AND il_at_close != 0
+          AND timestamp >= ? AND timestamp <= ?
+        GROUP BY regime
+      `).all(from || 0, to) as any[];
+      const ilAllTime = dbRef.prepare(`
+        SELECT ROUND(SUM(il_at_close),6) as totalIl,
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as totalFees,
+          COUNT(*) as positions
+        FROM rebalance_events
+        WHERE il_at_close IS NOT NULL AND il_at_close != 0
+      `).get() as any;
+
       res.json({
         dailyFees: dailyFeesEnriched, positions, regimeHistory: regimeHistory.filter((_: any, i: number) => i % 5 === 0),
         priceHistory: priceHistory.filter((_: any, i: number) => i % 5 === 0).map((p: any) => ({ ...p, costBasis })),
@@ -291,6 +322,7 @@ export function startDashboard(port: number): DashboardServer {
           last: scLast ? { ts: scLast.timestamp, sol: scLast.sol_amount, usdc: scLast.usdc_amount, price: scLast.price, tx: scLast.tx_signature } : null,
           recent: scRecent.map((r: any) => ({ ts: r.timestamp, sol: r.sol_amount, usdc: r.usdc_amount, price: r.price, tx: r.tx_signature })),
         },
+        ilTracker: { byDay: ilByDay, byRegime: ilByRegime, allTime: ilAllTime },
       });
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });

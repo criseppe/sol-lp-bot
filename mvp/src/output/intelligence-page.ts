@@ -67,7 +67,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
   .fees-cards{grid-template-columns:1fr 1fr}
   .fees-card-val{font-size:15px}
   .fees-compare{grid-template-columns:1fr 1fr}
-  #hpCards{grid-template-columns:1fr 1fr!important}
+  #hpCards,#ilCards{grid-template-columns:1fr 1fr!important}
   #cHourlyFees{max-height:200px!important}
   #cHourlyVol{max-height:120px!important}
   .fees-bottom{flex-wrap:wrap;gap:8px;font-size:10px}
@@ -202,8 +202,13 @@ function render(){
   h+='<div class="section-content'+(costOpen?'':' collapsed')+'" id="sec-cost">';
   // W4: Fee vs Gas
   h+='<div class="w"><h3>Fee vs Gas (Daily)</h3><canvas id="c4"></canvas></div>';
-  // IL Tracker (from analytics)
-  h+='<div class="w"><h3>IL Tracker</h3><canvas id="cILTracker"></canvas></div>';
+  // IL Tracker (full)
+  h+='<div class="w full" id="wILTracker"><h3>Impermanent Loss <span style="font-size:9px;color:#484f58;font-weight:normal;text-transform:none;letter-spacing:0">realized IL at position close</span></h3>';
+  h+='<div id="ilCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>';
+  h+='<canvas id="cILTracker" style="width:100%;max-height:260px"></canvas>';
+  h+='<div id="ilRatio" style="text-align:center;padding:8px 0;font-size:12px"></div>';
+  h+='<div class="tbl-wrap" id="ilRegimeTable"></div>';
+  h+='</div>';
   // W10: Cost Basis vs Price
   h+='<div class="w full"><h3>Cost Basis vs SOL Price</h3><canvas id="c10"></canvas></div>';
   // W12: Gate Fire Rate
@@ -387,6 +392,82 @@ function render(){
 
   // Render analytics widgets if data already loaded
   if(ANALYTICS) renderAnalyticsWidgets();
+
+  // Render IL tracker from intelligence data
+  renderILTracker();
+}
+
+function renderILTracker(){
+  if(!DATA||!DATA.ilTracker)return;
+  var il=DATA.ilTracker;
+  var byDay=il.byDay||[];
+  var byRegime=il.byRegime||[];
+  var allTime=il.allTime||{totalIl:0,totalFees:0,positions:0};
+
+  // Metric cards: today, 7d, 30d, all-time
+  var cardsEl=document.getElementById('ilCards');
+  if(cardsEl){
+    var today=new Date().toLocaleDateString('en-CA',{timeZone:'UTC'});
+    var todayRow=byDay.find(function(d){return d.date===today;});
+    var now=Date.now();
+    var il7d=byDay.filter(function(d){return new Date(d.date+'T00:00:00Z').getTime()>now-7*86400000;}).reduce(function(s,d){return s+d.il;},0);
+    var il30d=byDay.filter(function(d){return new Date(d.date+'T00:00:00Z').getTime()>now-30*86400000;}).reduce(function(s,d){return s+d.il;},0);
+    var ilCol=function(v){return v>=0?'#22c55e':'#ef4444';};
+    var ilFmt=function(v){return (v>=0?'+':'')+('$'+Math.abs(v).toFixed(2));};
+    var cs='';
+    cs+='<div class="s"><div class="v" style="color:'+ilCol(todayRow?.il||0)+';font-size:14px">'+ilFmt(todayRow?.il||0)+'</div><div class="l">Today</div></div>';
+    cs+='<div class="s"><div class="v" style="color:'+ilCol(il7d)+';font-size:14px">'+ilFmt(il7d)+'</div><div class="l">7 Days</div></div>';
+    cs+='<div class="s"><div class="v" style="color:'+ilCol(il30d)+';font-size:14px">'+ilFmt(il30d)+'</div><div class="l">30 Days</div></div>';
+    cs+='<div class="s"><div class="v" style="color:'+ilCol(allTime.totalIl)+';font-size:14px">'+ilFmt(allTime.totalIl)+'</div><div class="l">All Time</div></div>';
+    cardsEl.innerHTML=cs;
+  }
+
+  // Dual bar chart: fees (green up) + IL (red down) + net line
+  var chartEl=document.getElementById('cILTracker');
+  if(chartEl&&byDay.length>0){
+    if(CHS.cILTracker)try{CHS.cILTracker.destroy();}catch{}
+    var last14=byDay.slice(-14);
+    var labels=last14.map(function(d){return d.date.slice(5);});
+    var fees=last14.map(function(d){return d.fees;});
+    var ilVals=last14.map(function(d){return d.il;});
+    var net=last14.map(function(d){return d.fees+d.il;});
+    CHS.cILTracker=new Chart(chartEl,{type:'bar',data:{labels:labels,datasets:[
+      {label:'Fees',data:fees,backgroundColor:'#22c55e80'},
+      {label:'IL',data:ilVals,backgroundColor:'#ef444480'},
+      {label:'Net P&L',data:net,type:'line',borderColor:'#eab308',backgroundColor:'transparent',tension:0.3,pointRadius:2,borderWidth:2}
+    ]},options:{interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{ticks:{callback:function(v){return '$'+Number(v).toFixed(2);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
+  }
+
+  // Ratio badge
+  var ratioEl=document.getElementById('ilRatio');
+  if(ratioEl&&allTime.totalIl!==0){
+    var absIl=Math.abs(allTime.totalIl);
+    var ratio=absIl>0?allTime.totalFees/absIl:999;
+    var rCol=ratio>=2?'#22c55e':ratio>=1?'#eab308':'#ef4444';
+    var rText=ratio>=1?'Fees '+ratio.toFixed(1)+'x IL — net positive':'IL exceeds fees';
+    ratioEl.innerHTML='<span class="badge" style="background:'+rCol+'20;color:'+rCol+';padding:4px 12px;font-size:12px">'+rText+'</span> <span style="color:#8b949e;font-size:11px;margin-left:8px">Fees $'+fmt(allTime.totalFees)+' vs IL $'+fmt(absIl)+'</span>';
+  }
+
+  // IL by regime table
+  var tblEl=document.getElementById('ilRegimeTable');
+  if(tblEl&&byRegime.length>0){
+    var RC2={RANGING:'#4a9eff',BULLISH_TREND:'#22c55e',BEARISH_TREND:'#ef4444',EXTREME:'#a855f7'};
+    var t='<table style="margin-top:8px"><thead><tr><th>Regime</th><th style="text-align:right">Positions</th><th style="text-align:right">Avg IL</th><th style="text-align:right">Avg Fees</th><th style="text-align:right">Net/Pos</th><th style="text-align:right">Total IL</th><th style="text-align:right">Total Fees</th></tr></thead><tbody>';
+    byRegime.forEach(function(r){
+      var netPer=r.avgFees+r.avgIl;
+      var netCol=netPer>=0?'#22c55e':'#ef4444';
+      t+='<tr><td style="color:'+(RC2[r.regime]||'#8b949e')+'">'+r.regime.replace('_TREND','')+'</td>';
+      t+='<td style="text-align:right">'+r.positions+'</td>';
+      t+='<td style="text-align:right;color:#ef4444">$'+fmt(Math.abs(r.avgIl),4)+'</td>';
+      t+='<td style="text-align:right;color:#22c55e">$'+fmt(r.avgFees)+'</td>';
+      t+='<td style="text-align:right;color:'+netCol+'">'+(netPer>=0?'+':'-')+'$'+fmt(Math.abs(netPer))+'</td>';
+      t+='<td style="text-align:right;color:#ef4444">$'+fmt(Math.abs(r.totalIl))+'</td>';
+      t+='<td style="text-align:right;color:#22c55e">$'+fmt(r.totalFees)+'</td>';
+      t+='</tr>';
+    });
+    t+='</tbody></table>';
+    tblEl.innerHTML=t;
+  }
 }
 
 // ── ANALYTICS WIDGET RENDERERS (from analytics-page data) ──
@@ -495,17 +576,8 @@ function renderAnalyticsWidgets(){
     }
   }catch(e){console.warn('in-range error',e);}
 
-  // 3. IL Tracker
-  try{
-    var el3=document.getElementById('cILTracker');
-    if(el3&&positions.length>0){
-      if(CHS.cILTracker)try{CHS.cILTracker.destroy();}catch{}
-      var ilLabels=positions.map(function(p,i){return '#'+(i+1);});
-      var ilData=positions.map(function(p){return p.il;});
-      var ilCum=[];var ilS=0;ilData.forEach(function(d){ilS+=d;ilCum.push(ilS);});
-      CHS.cILTracker=new Chart(el3,{type:'bar',data:{labels:ilLabels,datasets:[{label:'IL per position',data:ilData,backgroundColor:'#ef444460'},{label:'Cumulative IL',data:ilCum,type:'line',borderColor:'#ef4444',pointRadius:2,tension:0.3}]},options:{plugins:{legend:{labels:{color:'#8b949e',font:{size:10}}}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(3);},color:'#8b949e'},grid:{color:'#21262d'}},x:{ticks:{color:'#8b949e',maxRotation:0},grid:{display:false}}}}});
-    }
-  }catch(e){console.warn('il-tracker error',e);}
+  // 3. IL Tracker — uses DATA.ilTracker from /api/intelligence
+  // (rendered separately below after main render, since it uses DATA not ANALYTICS)
 
   // 4. Fee vs Duration scatter
   try{
