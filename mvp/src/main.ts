@@ -2496,6 +2496,14 @@ function checkAndWriteDailyPnl(currentPrice: number) {
     });
   }
 
+  // Fee calculation sources — each serves a different purpose:
+  // 1. bot_state.cum_fees_sol/usdc: mark-to-market portfolio value
+  //    (SOL fees revalued at current price each cycle)
+  // 2. daily_summary.fees_earned_usdc: actual daily earnings
+  //    (rebalance_events actual + pending at write time)
+  // 3. rebalance_events: transaction-level audit trail
+  //    (fees at event-time price, no pending)
+
   // Portfolio change = today's value vs yesterday's close, net of injections
   const allSummaries = getDailySummaries(db, 2);
   const yesterday = allSummaries.find(s => s.date !== today);
