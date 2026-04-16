@@ -61,9 +61,11 @@ export const runtime = {
   idleRebalanceDeviationPct: 0.15,           // only rebalance if >15% off target
   // Target idle SOL % per regime (rest is USDC)
   idleTargetSolPctRanging: 0.50,             // 50% SOL — balanced for deposits
-  idleTargetSolPctBullish: 0.60,             // 60% SOL — ride the upside
+  idleTargetSolPctBullish: 0.55,             // 55% SOL — slight upside bias
   idleTargetSolPctBearish: 0.35,             // 35% SOL — protect from downside
-  idleTargetSolPctExtreme: 0.15,             // 15% SOL — survival mode
+  idleTargetSolPctExtreme: 0.25,             // 25% SOL — keep some exposure
+  idleRebalanceMaxUsdc: 2000,                // max USDC per idle rebalance cycle
+  idleRebalanceSpreadCycles: 3,              // spread large rebalance over N cycles
 
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
@@ -210,6 +212,8 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vIRBull = nv('idleTargetSolPctBullish', 0, 1); if (vIRBull != null) runtime.idleTargetSolPctBullish = vIRBull;
   const vIRBear = nv('idleTargetSolPctBearish', 0, 1); if (vIRBear != null) runtime.idleTargetSolPctBearish = vIRBear;
   const vIRExtreme = nv('idleTargetSolPctExtreme', 0, 1); if (vIRExtreme != null) runtime.idleTargetSolPctExtreme = vIRExtreme;
+  const vIRMax = nv('idleRebalanceMaxUsdc', 50, 50000); if (vIRMax != null) runtime.idleRebalanceMaxUsdc = vIRMax;
+  const vIRSpread = nv('idleRebalanceSpreadCycles', 1, 10); if (vIRSpread != null) runtime.idleRebalanceSpreadCycles = vIRSpread;
 
   // Enhanced regime
   const vUseEnh = g('useEnhancedRegime'); if (vUseEnh === 'true' || vUseEnh === 'false') runtime.useEnhancedRegime = vUseEnh === 'true';
@@ -313,6 +317,8 @@ export function exportConfig(): Record<string, string> {
   out['idleTargetSolPctBullish'] = String(runtime.idleTargetSolPctBullish);
   out['idleTargetSolPctBearish'] = String(runtime.idleTargetSolPctBearish);
   out['idleTargetSolPctExtreme'] = String(runtime.idleTargetSolPctExtreme);
+  out['idleRebalanceMaxUsdc'] = String(runtime.idleRebalanceMaxUsdc);
+  out['idleRebalanceSpreadCycles'] = String(runtime.idleRebalanceSpreadCycles);
   out['rangeWidthOverride'] = runtime.rangeWidthOverride != null ? String(runtime.rangeWidthOverride) : 'null';
   out['varEnabled'] = String(runtime.varEnabled);
   out['varMultiplier'] = String(runtime.varMultiplier);

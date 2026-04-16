@@ -57,6 +57,110 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
   }
 }
 
+// ── Telegram Alerts ──
+// Rate-limited, event-driven alerts (separate from periodic reports)
+
+const alertLastSent: Record<string, number> = {};
+let solConvertFiredAfterRestart = false;
+
+function rateLimited(key: string, cooldownMs: number): boolean {
+  const last = alertLastSent[key] ?? 0;
+  if (Date.now() - last < cooldownMs) return true;
+  alertLastSent[key] = Date.now();
+  return false;
+}
+
+/** Send a one-off alert (not a periodic report). Requires TG env vars. */
+export async function sendTelegramAlert(text: string): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    await sendTelegram(token, chatId, text);
+    console.log(JSON.stringify({ level: 'info', msg: 'telegram alert sent', alertPreview: text.slice(0, 80), timestamp: Date.now() }));
+  } catch (err) {
+    console.log(JSON.stringify({ level: 'error', msg: 'telegram alert failed', error: String(err), timestamp: Date.now() }));
+  }
+}
+
+/** Alert 1: Pre-open SOL buy blocked by floor check. Max once per 10 min. */
+export function alertFloorCheckBlocked(p: {
+  usdcRemaining: number; floor: number; regime: string; price: number;
+}): void {
+  if (rateLimited('floor_blocked', 10 * 60_000)) return;
+  const text = [
+    `🚫 Pre-open SOL buy blocked`,
+    `Floor check failed: $${p.usdcRemaining.toFixed(0)} USDC remaining < floor $${p.floor.toFixed(0)}`,
+    `Regime: ${p.regime} | Price: $${p.price.toFixed(2)}`,
+    `Action needed: Check wallet USDC vs reserve floor`,
+    ``,
+    `⏰ ${formatTimeCET()}`,
+    `No action taken — monitoring only`,
+  ].join('\n');
+  sendTelegramAlert(text);
+}
+
+/** Alert 2: Shadow sell opportunity detected (profitable sell NOT executed). Max once per 15 min. */
+export function alertShadowSell(p: {
+  solAmount: number; usdcValue: number; price: number;
+  marginPct: number; basis: number; regime: string;
+}): void {
+  if (rateLimited('shadow_sell', 15 * 60_000)) return;
+  const text = [
+    `👁 Shadow: Pre-open sell opportunity detected`,
+    `Would sell: ${p.solAmount.toFixed(4)} SOL → $${p.usdcValue.toFixed(0)} USDC @ $${p.price.toFixed(2)}`,
+    `Margin: +${p.marginPct.toFixed(1)}% above basis $${p.basis.toFixed(2)}`,
+    `Regime: ${p.regime} | This is DATA only, no action taken`,
+    `Review at: gcamlp.duckdns.org/intelligence`,
+    ``,
+    `⏰ ${formatTimeCET()}`,
+    `No action taken — monitoring only`,
+  ].join('\n');
+  sendTelegramAlert(text);
+}
+
+/** Alert 3: Idle rebalance executed. Always fires (rare event). */
+export function alertIdleRebalance(p: {
+  direction: string; inputAmount: number; outputAmount: number;
+  inputToken: string; outputToken: string;
+  newSolPct: number; newUsdcPct: number;
+  targetSolPct: number; regime: string; price: number;
+}): void {
+  // No rate limit — rare event, always fire
+  const text = [
+    `⚖️ Idle rebalance executed`,
+    `Direction: ${p.direction}`,
+    `Swapped: ${p.inputAmount.toFixed(4)} ${p.inputToken} → ${p.outputAmount.toFixed(4)} ${p.outputToken}`,
+    `New wallet ratio: ${(p.newSolPct * 100).toFixed(0)}% SOL / ${(p.newUsdcPct * 100).toFixed(0)}% USDC`,
+    `Target was: ${(p.targetSolPct * 100).toFixed(0)}% SOL (${p.regime})`,
+    `Regime: ${p.regime} | Price: $${p.price.toFixed(2)}`,
+    ``,
+    `⏰ ${formatTimeCET()}`,
+    `No action taken — monitoring only`,
+  ].join('\n');
+  sendTelegramAlert(text);
+}
+
+/** Alert 4: SolConvert fired. First conversion after restart only. */
+export function alertSolConvert(p: {
+  regime: string; targetSolPct: number;
+  solConverted: number; usdcReceived: number; price: number;
+  dynamicCap: number;
+}): void {
+  if (solConvertFiredAfterRestart) return;
+  solConvertFiredAfterRestart = true;
+  const text = [
+    `💱 SolConvert fired`,
+    `Regime: ${p.regime} | Target SOL%: ${(p.targetSolPct * 100).toFixed(0)}%`,
+    `Converted: ${p.solConverted.toFixed(3)} SOL → $${p.usdcReceived.toFixed(2)} USDC @ $${p.price.toFixed(2)}`,
+    `Dynamic cap: $${p.dynamicCap.toFixed(0)}`,
+    ``,
+    `⏰ ${formatTimeCET()}`,
+    `No action taken — monitoring only`,
+  ].join('\n');
+  sendTelegramAlert(text);
+}
+
 function fmt(n: number, d = 2): string { return n.toFixed(d); }
 
 function formatTimeCET(): string {

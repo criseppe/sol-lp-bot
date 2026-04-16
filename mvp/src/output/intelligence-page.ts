@@ -151,7 +151,7 @@ function render(){
   var S=DATA.summary;
   // Summary cards
   var sh='';
-  sh+='<div class="s"><div class="v" style="color:#22c55e">$'+fmt(S.totalFees,0)+'</div><div class="l">Fees Collected</div></div>';
+  sh+='<div class="s"><div class="v" style="color:#22c55e">$'+fmt(S.totalFees,0)+'</div><div class="l">Fees Collected</div><div style="font-size:8px;color:#484f58;margin-top:2px">rebalance_events · SOL@now</div></div>';
   sh+='<div class="s"><div class="v" style="color:#ef4444">$'+fmt(S.totalGas,2)+'</div><div class="l">Total Gas</div></div>';
   sh+='<div class="s"><div class="v" style="color:#ffd700">$'+fmt(S.totalFees-S.totalGas,0)+'</div><div class="l">Net Income</div></div>';
   sh+='<div class="s"><div class="v" style="color:#58a6ff">'+S.totalPositions+'</div><div class="l">Positions</div></div>';
@@ -488,17 +488,18 @@ function renderILTracker(){
 
 // ── ANALYTICS WIDGET RENDERERS (from analytics-page data) ──
 
-function totalFeesCalc(s){
-  var p=(s.pending_fees_sol||0)*s.price+(s.pending_fees_usdc||0);
-  return (s.cum_fees_sol||0)*s.price+(s.cum_fees_usdc||0)+(p>1000?0:p);
+function totalFeesCalc(s,cp){
+  var price=cp||s.price;
+  var p=(s.pending_fees_sol||0)*price+(s.pending_fees_usdc||0);
+  return (s.cum_fees_sol||0)*price+(s.cum_fees_usdc||0)+(p>1000?0:p);
 }
 
-function buildHourlyFees(snaps){
+function buildHourlyFees(snaps,cp){
   var map={};
   for(var i=1;i<snaps.length;i++){
     var d=new Date(snaps[i].timestamp);
     var key=d.toLocaleDateString('en-CA',{timeZone:'Europe/Berlin'})+'T'+String(d.getUTCHours()).padStart(2,'0');
-    var delta=totalFeesCalc(snaps[i])-totalFeesCalc(snaps[i-1]);
+    var delta=totalFeesCalc(snaps[i],cp)-totalFeesCalc(snaps[i-1],cp);
     if(delta>0&&delta<100){
       if(!map[key])map[key]={fees:0,inRange:0,total:0,price:snaps[i].price,regime:snaps[i].regime};
       map[key].fees+=delta;
@@ -509,7 +510,7 @@ function buildHourlyFees(snaps){
   return Object.entries(map).map(function(e){return{hour:e[0],fees:e[1].fees,irPct:e[1].total>0?e[1].inRange/e[1].total*100:0,price:e[1].price,regime:e[1].regime};}).sort(function(a,b){return a.hour.localeCompare(b.hour);});
 }
 
-function buildPositions(events){
+function buildPositions(events,cp){
   var positions=[],lastOpen=null;
   events.forEach(function(e){
     if(e.event_type==='POSITION_OPENED'){
@@ -517,7 +518,8 @@ function buildPositions(events){
       var capA=(e.sol_after||0)*e.price+(e.usdc_after||0);
       lastOpen={ts:e.timestamp,price:e.price,capital:Math.max(0,capB-capA),regime:e.regime};
     }else if(['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type)&&lastOpen){
-      var fees=(e.fee_sol||0)*e.price+(e.fee_usdc||0);
+      var feePrice=cp||e.price;
+      var fees=(e.fee_sol||0)*feePrice+(e.fee_usdc||0);
       positions.push({openTime:lastOpen.ts,closeTime:e.timestamp,duration:(e.timestamp-lastOpen.ts)/60000,
         openPrice:lastOpen.price,closePrice:e.price,capital:lastOpen.capital,
         fees:fees,il:e.il_at_close||0,net:fees+(e.il_at_close||0),reason:e.event_type,regime:lastOpen.regime});
@@ -532,8 +534,9 @@ function renderAnalyticsWidgets(){
   var snaps=ANALYTICS.snaps||[];
   var events=ANALYTICS.events||[];
   if(snaps.length<2)return;
-  var positions=buildPositions(events);
-  var hourlyFees=buildHourlyFees(snaps);
+  var cp=ANALYTICS.currentPrice||snaps[snaps.length-1].price;
+  var positions=buildPositions(events,cp);
+  var hourlyFees=buildHourlyFees(snaps,cp);
   var summaries=ANALYTICS.dailySummaries||[];
 
   // 1. Portfolio Growth (stacked bar: wallet+position per day, organic P&L line)
@@ -647,7 +650,7 @@ function renderAnalyticsWidgets(){
       for(var wi=1;wi<snaps.length;wi++){
         var day=new Date(snaps[wi].timestamp).toLocaleDateString('en-US',{timeZone:'Europe/Berlin',weekday:'short'});
         var isWe=day==='Sat'||day==='Sun';var b=isWe?we:wd;
-        var delta=totalFeesCalc(snaps[wi])-totalFeesCalc(snaps[wi-1]);
+        var delta=totalFeesCalc(snaps[wi],cp)-totalFeesCalc(snaps[wi-1],cp);
         var elapsed=(snaps[wi].timestamp-snaps[wi-1].timestamp)/3600000;
         if(delta>0&&delta<100)b.fees+=delta;b.hours+=elapsed;
       }

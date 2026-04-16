@@ -491,18 +491,19 @@ export function getFeesCollected(db: Database.Database, opts: {
   return row?.total ?? 0;
 }
 
-export function getFeesCollectedByDay(db: Database.Database, days: number = 30): { date: string; fees: number; events: number }[] {
+export function getFeesCollectedByDay(db: Database.Database, days: number = 30, currentPrice?: number): { date: string; fees: number; events: number }[] {
+  const useCurrentPrice = currentPrice != null;
   return db.prepare(`
     SELECT
       DATE(timestamp / 1000, 'unixepoch') as date,
-      ROUND(SUM(fee_usdc + fee_sol * COALESCE(price, 0)), 4) as fees,
+      ROUND(SUM(fee_usdc + fee_sol * ${useCurrentPrice ? '?' : 'COALESCE(price, 0)'}), 4) as fees,
       COUNT(*) as events
     FROM rebalance_events
     WHERE (fee_usdc > 0 OR fee_sol > 0)
     AND timestamp >= ?
     GROUP BY date
     ORDER BY date ASC
-  `).all(Date.now() - days * 86400_000) as { date: string; fees: number; events: number }[];
+  `).all(...(useCurrentPrice ? [currentPrice, Date.now() - days * 86400_000] : [Date.now() - days * 86400_000])) as { date: string; fees: number; events: number }[];
 }
 
 export function pruneOldPriceTicks(db: Database.Database, keepDays: number): void {

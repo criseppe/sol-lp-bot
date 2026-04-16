@@ -6,7 +6,7 @@ import { PoolService } from './data/pool.js';
 import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled, insertRegimeSnapshot, pruneOldData } from './db/sqlite.js';
 import { startDashboard } from './output/dashboard.js';
 import { LiveExecutor, type LivePosition } from './live/executor.js';
-import { startTelegramReporter } from './output/telegram.js';
+import { startTelegramReporter, alertIdleRebalance, alertSolConvert } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, detectRegimeTA, getRegimeParams } from './engine/regime.js';
@@ -291,6 +291,8 @@ async function main() {
     // Reserve floor callback — executor reads this to protect USDC reserve
     liveExecutor.getReserveFloor = () => getReserveState(db).floor;
     liveExecutor.getProximityDeployThreshold = () => (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).proximityDeployThreshold ?? 0.40;
+    liveExecutor.getCurrentRegime = () => liveRegime;
+    liveExecutor.getCostBasis = () => costBasisState?.solCostBasis ?? 0;
 
     // P&L guard for auto-deploy ratio matching swaps
     liveExecutor.shouldAllowSwap = (direction, _amount, price) => {
@@ -1918,6 +1920,13 @@ async function runLiveCycle(price: number): Promise<void> {
                 solConversionLastTs = now;
                 try { db.prepare('UPDATE bot_state SET sol_conversion_last_ts = ? WHERE id = 1').run(now); } catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `sol_conversion_ts update: ${String(e)}`, timestamp: Date.now() })); }
                 console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converted ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
+                const scTargetSolPct = ({
+                  'RANGING': runtime.idleTargetSolPctRanging,
+                  'BULLISH_TREND': runtime.idleTargetSolPctBullish,
+                  'BEARISH_TREND': runtime.idleTargetSolPctBearish,
+                  'EXTREME': runtime.idleTargetSolPctExtreme,
+                } as Record<string, number>)[liveRegime] ?? 0.50;
+                alertSolConvert({ regime: liveRegime, targetSolPct: scTargetSolPct, solConverted: convertSol, usdcReceived: convertUsdc, price, dynamicCap: effectiveCap });
               } else {
                 console.log(JSON.stringify({ level: 'warn', msg: '[SolConvert] Swap failed — skipping cycle', timestamp: now }));
               }
@@ -1947,7 +1956,12 @@ async function runLiveCycle(price: number): Promise<void> {
         const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
         const idleUsdc = Math.max(0, balances.usdc - runtime.usdcReserve);
         const idleTotal = idleSol * price + idleUsdc;
-        const targetSolPct = liveRegime === 'BEARISH_TREND' ? runtime.idleTargetSolPctBearish : runtime.idleTargetSolPctRanging;
+        const targetSolPct = ({
+          'RANGING': runtime.idleTargetSolPctRanging,
+          'BULLISH_TREND': runtime.idleTargetSolPctBullish,
+          'BEARISH_TREND': runtime.idleTargetSolPctBearish,
+          'EXTREME': runtime.idleTargetSolPctExtreme,
+        } as Record<string, number>)[liveRegime] ?? 0.50;
         const currentSolPct = idleTotal > 0 ? (idleSol * price) / idleTotal : 0;
 
         if (currentSolPct > targetSolPct + 0.10 && idleSol > 0.01 && idleTotal > 50) {
@@ -2026,20 +2040,24 @@ async function runLiveCycle(price: number): Promise<void> {
           let swapDirection = '';
 
           if (deviation > 0) {
-            // Smart rebalance: sell only when price is near or above cost basis
+            // Smart rebalance: sell only when price is near or above cost basis (capped per cycle)
             const basis = sirCostBasis || price;
             const lossPerSol = Math.max(0, basis - price);
-            const idealSolToSwap = Math.min(diffUsdc / price, idleSol);
+            const sellCapUsdc = Math.min(
+              Math.max(diffUsdc / runtime.idleRebalanceSpreadCycles, 100),
+              runtime.idleRebalanceMaxUsdc,
+            );
+            const idealSolToSwap = Math.min(diffUsdc / price, idleSol, sellCapUsdc / price);
 
             if (price < basis) {
               // P&L guard: BLOCKED — price below basis
               console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: SOL sell BLOCKED — price $${price.toFixed(2)} below basis $${basis.toFixed(2)}. Waiting.`, timestamp: now }));
               lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
             } else {
-              // Price >= basis — sell full amount (profitable)
+              // Price >= basis — sell capped amount (profitable)
               if (idealSolToSwap >= 0.1) {
                 swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% → ${(targetSolPct * 100).toFixed(0)}%)`;
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: selling ${idealSolToSwap.toFixed(2)} SOL — price $${price.toFixed(2)} >= basis $${basis.toFixed(2)} (profitable).`, timestamp: now }));
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: selling ${idealSolToSwap.toFixed(2)} SOL (cap $${sellCapUsdc.toFixed(0)}, gap $${diffUsdc.toFixed(0)}) — price $${price.toFixed(2)} >= basis $${basis.toFixed(2)} (profitable).`, timestamp: now }));
                 swapResult = await liveExecutor.doSwapPublic(
                   MINTS.SOL, MINTS.USDC, Math.floor(idealSolToSwap * 1e9),
                   `Idle rebalance (${liveRegime}): ${swapDirection} — above basis`,
@@ -2049,8 +2067,12 @@ async function runLiveCycle(price: number): Promise<void> {
               }
             }
           } else {
-            // Too much USDC → swap USDC to SOL
-            const usdcToSwap = Math.min(diffUsdc, idleUsdc);
+            // Too much USDC → swap USDC to SOL (capped per cycle)
+            const idleRebalanceCap = Math.min(
+              Math.max(diffUsdc / runtime.idleRebalanceSpreadCycles, 100),
+              runtime.idleRebalanceMaxUsdc,
+            );
+            const usdcToSwap = Math.min(diffUsdc, idleUsdc, idleRebalanceCap);
             if (usdcToSwap > 1 && diffUsdc > 5) {
               // P&L awareness: prefer buying SOL below cost basis (dip buying)
               const basis = sirCostBasis || price;
@@ -2060,7 +2082,7 @@ async function runLiveCycle(price: number): Promise<void> {
                 console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: buying SOL at $${price.toFixed(2)} above cost basis $${basis.toFixed(2)} (premium $${(price - basis).toFixed(2)}/SOL). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < 25% threshold. Waiting for dip.`, timestamp: now }));
               } else {
                 swapDirection = `USDC→SOL (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC${buyingCheap ? ' ✅ buying dip (price < basis)' : ''}`, timestamp: now }));
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC (cap $${idleRebalanceCap.toFixed(0)}, gap $${diffUsdc.toFixed(0)})${buyingCheap ? ' ✅ buying dip (price < basis)' : ''}`, timestamp: now }));
                 swapResult = await liveExecutor.doSwapPublic(
                   MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6),
                   `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
@@ -2084,6 +2106,12 @@ async function runLiveCycle(price: number): Promise<void> {
               solBefore: balances.sol, usdcBefore: balances.usdc,
               solAfter: balAfter.sol, usdcAfter: balAfter.usdc,
               feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+            });
+            const newUsdcPct = 1 - newSolPct;
+            alertIdleRebalance({
+              direction: swapDirection, inputAmount: swapResult.inputAmount, outputAmount: swapResult.outputAmount,
+              inputToken: deviation > 0 ? 'SOL' : 'USDC', outputToken: deviation > 0 ? 'USDC' : 'SOL',
+              newSolPct, newUsdcPct, targetSolPct, regime: liveRegime, price,
             });
           } else if (swapDirection) {
             // Mark as done to prevent retrying every 60s during persistent API outage
@@ -2261,6 +2289,13 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
           liveCumFeesSol += fees.feeSol;
           liveCumFeesUsdc += fees.feeUsdc;
           liveLastHarvestTime = Date.now();
+          // Record pre-close harvest in rebalance_events so getFeesCollected() sees it
+          insertRebalanceEventWithRule2(db, {
+            timestamp: Date.now(), eventType: 'FEE_HARVEST', price, regime: liveRegime,
+            note: `Pre-close harvest: ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(4)} USDC ($${pendingFeesUsdc.toFixed(2)}). Cumulative: ${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(6)} USDC.`,
+            solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0,
+            feeSol: fees.feeSol, feeUsdc: fees.feeUsdc, ilAtClose: 0,
+          });
           // Convert SOL fee income to USDC per regime policy.
           // NOTE: This converts LP fee income (zero cost basis).
           // shouldAllowSwap is intentionally NOT called here —
@@ -2505,8 +2540,9 @@ function checkAndWriteDailyPnl(currentPrice: number) {
   const yesterday = allSummaries.find(s => s.date !== today);
   const yesterdayClose = yesterday?.total_usdc ?? totalValue;
   // Daily fees: actual fees collected today from closes/harvests (no pending)
+  // SOL valued at current price for consistency across all pages
   const startOfTodayMs = new Date(today + 'T00:00:00Z').getTime();
-  const dailyFeesEarned = getFeesCollected(db, { fromTs: startOfTodayMs });
+  const dailyFeesEarned = getFeesCollected(db, { fromTs: startOfTodayMs, currentPrice: currentPrice });
   const portfolioChange = totalValue - yesterdayClose - dailySummaryCumInjected;
 
   // Upsert today's summary (updates every cycle with latest values)

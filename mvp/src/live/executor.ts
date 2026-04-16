@@ -14,6 +14,7 @@ const Decimal = DecimalImport as unknown as typeof DecimalImport.default;
 import { MINTS } from '../constants.js';
 import type { RangeBounds, Regime } from '../types.js';
 import { executeSwap, type SwapResult } from './swapper.js';
+import { alertFloorCheckBlocked, alertShadowSell } from '../output/telegram.js';
 
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
@@ -62,6 +63,8 @@ export class LiveExecutor {
   public shouldAllowSwap: ((direction: 'sell_sol' | 'buy_sol', amount: number, price: number) => boolean) | null = null;
   public getReserveFloor: (() => number) | null = null;
   public getProximityDeployThreshold: (() => number) | null = null;
+  public getCurrentRegime: (() => string) | null = null;
+  public getCostBasis: (() => number) | null = null;
   public cumGasLamports = 0;
   public txCount = 0;
 
@@ -246,22 +249,35 @@ export class LiveExecutor {
       const deviationPct = deployTarget > 0 ? Math.abs(solDeficit * currentPrice) / deployTarget : 0;
 
       if (solDeficit > 0.5 && solDeficit * currentPrice > 50 && deviationPct > 0.20) {
-        // Need more SOL — buy with USDC
+        // Need more SOL — buy with USDC, but check reserve floor first
+        const reserveFloorBuy = this.getReserveFloor ? this.getReserveFloor() : 0;
         const usdcToSwap = Math.min(solDeficit * currentPrice * 0.95, usdcAvailable - 2);
-        if (usdcToSwap > 1) {
-          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: $${usdcToSwap.toFixed(2)} USDC -> SOL (need ${solDeficit.toFixed(4)} SOL, deviation ${(deviationPct*100).toFixed(0)}%)`, timestamp: Date.now() }));
+        const usdcAfterBuy = usdcBal - usdcToSwap - idealUsdc;
+        const floorSafe = usdcAfterBuy >= reserveFloorBuy;
+        if (usdcToSwap > 1 && floorSafe) {
+          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: $${usdcToSwap.toFixed(2)} USDC -> SOL (need ${solDeficit.toFixed(4)} SOL, deviation ${(deviationPct*100).toFixed(0)}%). USDC after: $${usdcAfterBuy.toFixed(0)} (floor: $${reserveFloorBuy.toFixed(0)})`, timestamp: Date.now() }));
           await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL for balanced deposit (need ${solDeficit.toFixed(2)} SOL)`);
           await new Promise(r => setTimeout(r, 4000));
           solBal = await this.getSolBalance();
           usdcBal = await this.getUsdcBalance();
           solAvailable = Math.max(0, solBal - getSolReserve());
           usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+        } else if (usdcToSwap > 1 && !floorSafe) {
+          console.log(JSON.stringify({ level: 'warn', msg: `[PreOpen] Floor check failed: swap $${usdcToSwap.toFixed(0)} USDC→SOL would leave $${usdcAfterBuy.toFixed(0)} USDC (floor: $${reserveFloorBuy.toFixed(0)}). Depositing with available ratio instead.`, timestamp: Date.now() }));
+          alertFloorCheckBlocked({ usdcRemaining: usdcAfterBuy, floor: reserveFloorBuy, regime: this.getCurrentRegime?.() ?? 'UNKNOWN', price: currentPrice });
         }
       } else if (solDeficit < 0) {
         // SOL-heavy wallet — never sell SOL. Deposit SOL-constrained, respect reserve floor.
         const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
         const availableUsdc = Math.max(0, usdcAvailable - reserveFloor);
         console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL-heavy wallet — depositing SOL-constrained. Wallet USDC: $${usdcAvailable.toFixed(2)}, Reserve floor: $${reserveFloor.toFixed(2)}, Available for deposit: $${availableUsdc.toFixed(2)}`, timestamp: Date.now() }));
+        // Shadow sell alert: would selling excess SOL be profitable?
+        const excessSol = Math.abs(solDeficit);
+        const basis = this.getCostBasis?.() ?? 0;
+        if (basis > 0 && currentPrice > basis) {
+          const marginPct = ((currentPrice / basis) - 1) * 100;
+          alertShadowSell({ solAmount: excessSol, usdcValue: excessSol * currentPrice, price: currentPrice, marginPct, basis, regime: this.getCurrentRegime?.() ?? 'UNKNOWN' });
+        }
         usdcAvailable = availableUsdc;
       } else {
         console.log(JSON.stringify({ level: 'info', msg: `Pre-open: no swap needed (deviation ${(deviationPct*100).toFixed(0)}%)`, timestamp: Date.now() }));

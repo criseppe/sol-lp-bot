@@ -206,6 +206,8 @@ export function startDashboard(port: number): DashboardServer {
       const dailyFees = dbRef.prepare("SELECT date, fees_earned_usdc as fees, total_usdc, regime, in_range_pct FROM daily_summary ORDER BY date ASC").all() as any[];
       // Positions from rebalance_events (open+close pairs)
       const events = dbRef.prepare("SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, regime, sol_before, sol_after, usdc_before, usdc_after FROM rebalance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC").all(from || 0, to) as any[];
+      // Current SOL price for unified fee valuation — defined early so positions loop can use it
+      const intCurrentPrice = currentLive?.solPrice ?? 0;
       const positions: any[] = [];
       let lastOpen: any = null;
       for (const e of events) {
@@ -215,7 +217,7 @@ export function startDashboard(port: number): DashboardServer {
           positions.push({
             entryTime: lastOpen.entryTime, exitTime: e.timestamp, entryPrice: lastOpen.entryPrice, exitPrice: e.price,
             durationMin: Math.round((e.timestamp - lastOpen.entryTime) / 60000),
-            feesUsdc: (e.fee_sol || 0) * e.price + (e.fee_usdc || 0), feesSol: e.fee_sol || 0,
+            feesUsdc: (e.fee_sol || 0) * intCurrentPrice + (e.fee_usdc || 0), feesSol: e.fee_sol || 0,
             exitReason: e.event_type, regime: lastOpen.regime, il: e.il_at_close || 0,
           });
           lastOpen = null;
@@ -243,7 +245,7 @@ export function startDashboard(port: number): DashboardServer {
       // Enrich daily fees with gas
       const dailyFeesEnriched = dailyFees.map((d: any) => ({ ...d, gas: gasMap[d.date] || 0, net: d.fees - (gasMap[d.date] || 0) }));
       // Summary — single source: rebalance_events (actual collected fees)
-      const feesCollectedAllTime = getFeesCollected(dbRef!);
+      const feesCollectedAllTime = getFeesCollected(dbRef!, { currentPrice: intCurrentPrice });
       const pendingFees = currentLive ? currentLive.pendingFeesTotal : 0;
       const totalFees = feesCollectedAllTime;
       const totalGas = Object.values(gasMap).reduce((s: number, g: any) => s + g, 0);
@@ -276,36 +278,36 @@ export function startDashboard(port: number): DashboardServer {
       const scLast = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 1").get() as any; } catch { return null; } })();
       const scRecent = (() => { try { return dbRef.prepare("SELECT timestamp, sol_amount, usdc_amount, price, tx_signature FROM swap_ledger WHERE direction='sell_sol' AND reason LIKE '%onvert%' ORDER BY timestamp DESC LIMIT 10").all() as any[]; } catch { return []; } })();
 
-      // IL tracker data
+      // IL tracker data — SOL fees valued at current price for consistency
       const ilByDay = dbRef.prepare(`
         SELECT date(timestamp/1000,'unixepoch') as date,
           ROUND(SUM(il_at_close),6) as il,
           COUNT(*) as positions,
-          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as fees
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * ?),4) as fees
         FROM rebalance_events
         WHERE il_at_close IS NOT NULL AND il_at_close != 0
           AND timestamp >= ? AND timestamp <= ?
         GROUP BY date ORDER BY date
-      `).all(from || 0, to) as any[];
+      `).all(intCurrentPrice, from || 0, to) as any[];
       const ilByRegime = dbRef.prepare(`
         SELECT regime,
           COUNT(*) as positions,
           ROUND(SUM(il_at_close),6) as totalIl,
           ROUND(AVG(il_at_close),6) as avgIl,
-          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as totalFees,
-          ROUND(AVG(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as avgFees
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * ?),4) as totalFees,
+          ROUND(AVG(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * ?),4) as avgFees
         FROM rebalance_events
         WHERE il_at_close IS NOT NULL AND il_at_close != 0
           AND timestamp >= ? AND timestamp <= ?
         GROUP BY regime
-      `).all(from || 0, to) as any[];
+      `).all(intCurrentPrice, intCurrentPrice, from || 0, to) as any[];
       const ilAllTime = dbRef.prepare(`
         SELECT ROUND(SUM(il_at_close),6) as totalIl,
-          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price),4) as totalFees,
+          ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * ?),4) as totalFees,
           COUNT(*) as positions
         FROM rebalance_events
         WHERE il_at_close IS NOT NULL AND il_at_close != 0
-      `).get() as any;
+      `).get(intCurrentPrice) as any;
 
       res.json({
         dailyFees: dailyFeesEnriched, positions, regimeHistory: regimeHistory.filter((_: any, i: number) => i % 5 === 0),
@@ -333,16 +335,17 @@ export function startDashboard(port: number): DashboardServer {
     try {
       const date = (req.query as any).date || new Date().toLocaleDateString('en-CA', { timeZone: 'UTC' });
 
-      // 1. Hourly fees from rebalance_events
+      // 1. Hourly fees from rebalance_events — SOL valued at current price
+      const hpCurrentPrice = currentLive?.solPrice ?? 0;
       const feeRows = dbRef.prepare(`
         SELECT strftime('%H', datetime(timestamp/1000, 'unixepoch')) as hour,
-               ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * price), 4) as fees,
+               ROUND(SUM(COALESCE(fee_usdc,0) + COALESCE(fee_sol,0) * ?), 4) as fees,
                COUNT(*) as events
         FROM rebalance_events
         WHERE date(timestamp/1000, 'unixepoch') = ?
           AND (COALESCE(fee_usdc,0) > 0 OR COALESCE(fee_sol,0) > 0)
         GROUP BY hour ORDER BY hour
-      `).all(date) as any[];
+      `).all(hpCurrentPrice, date) as any[];
 
       // 2. Uptime + active % from regime_snapshots
       const uptimeRows = dbRef.prepare(`
@@ -699,12 +702,13 @@ export function startDashboard(port: number): DashboardServer {
     // Track fee growth using total fees (cum + pending) but scale hourly proportionally
     // to match the authoritative daily_summary total. This avoids phantom spikes from
     // position close/reopen where the same fees get double-counted.
-    // Step 1: compute raw hourly deltas
+    // Step 1: compute raw hourly deltas — SOL valued at current price
+    const hfCurrentPrice = currentLive?.solPrice ?? (daySnaps.length > 0 ? daySnaps[daySnaps.length - 1].price : 0);
     const totalFn = (s: any) => {
       const pSol = (s.pending_fees_sol || 0);
       const pUsdc = (s.pending_fees_usdc || 0);
-      const skip = pSol * s.price > 1000; // skip bogus pending values
-      return (s.cum_fees_sol || 0) * s.price + (s.cum_fees_usdc || 0) + (skip ? 0 : pSol * s.price + pUsdc);
+      const skip = pSol * hfCurrentPrice > 1000; // skip bogus pending values
+      return (s.cum_fees_sol || 0) * hfCurrentPrice + (s.cum_fees_usdc || 0) + (skip ? 0 : pSol * hfCurrentPrice + pUsdc);
     };
     for (let i = 0; i < daySnaps.length; i++) {
       const s = daySnaps[i] as any;
@@ -833,7 +837,8 @@ export function startDashboard(port: number): DashboardServer {
     const totalInvested = investors.reduce((s: number, i: any) => s + i.amount_usdc, 0);
     const latestSnap = dbRef.prepare('SELECT * FROM live_snapshots ORDER BY timestamp DESC LIMIT 1').get() as any;
     const totalPortfolio = latestSnap?.total_with_position ?? 0;
-    const totalFees = getFeesCollected(dbRef!);
+    const invCurrentPrice = currentLive?.solPrice ?? (latestSnap?.price ?? 0);
+    const totalFees = getFeesCollected(dbRef!, { currentPrice: invCurrentPrice });
     res.json({ investors, totalInvested, totalPortfolio, totalFees });
   });
 
@@ -876,7 +881,8 @@ export function startDashboard(port: number): DashboardServer {
 
       const state = dbRef.prepare('SELECT * FROM bot_state WHERE id=1').get() as any;
 
-      res.json({ snaps, events, regimeHist, dailySummaries, state, days });
+      const analyticsCurrentPrice = currentLive?.solPrice ?? (snaps.length > 0 ? snaps[snaps.length - 1].price : 0);
+      res.json({ snaps, events, regimeHist, dailySummaries, state, days, currentPrice: analyticsCurrentPrice });
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
 
@@ -900,17 +906,18 @@ export function startDashboard(port: number): DashboardServer {
       // TZ already set by middleware from browser cookie
       const totalHours = (snaps[snaps.length-1].timestamp - snaps[0].timestamp) / 3600000;
 
-      // Fee rate by regime
+      // Fee rate by regime — SOL valued at current price for consistency
+      const projSnapPrice = snaps[snaps.length - 1].price;
       const regimeFees: Record<string, { fees: number; hours: number; inRange: number; total: number }> = {};
       for (let i = 1; i < snaps.length; i++) {
         const prev = snaps[i-1], curr = snaps[i];
         const r = curr.regime || 'RANGING';
         if (!regimeFees[r]) regimeFees[r] = { fees: 0, hours: 0, inRange: 0, total: 0 };
         const elapsed = (curr.timestamp - prev.timestamp) / 3600000;
-        const pPrev = (prev.pending_fees_sol||0)*prev.price + (prev.pending_fees_usdc||0);
-        const pCurr = (curr.pending_fees_sol||0)*curr.price + (curr.pending_fees_usdc||0);
-        const prevT = (prev.cum_fees_sol||0)*prev.price + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
-        const currT = (curr.cum_fees_sol||0)*curr.price + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
+        const pPrev = (prev.pending_fees_sol||0)*projSnapPrice + (prev.pending_fees_usdc||0);
+        const pCurr = (curr.pending_fees_sol||0)*projSnapPrice + (curr.pending_fees_usdc||0);
+        const prevT = (prev.cum_fees_sol||0)*projSnapPrice + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
+        const currT = (curr.cum_fees_sol||0)*projSnapPrice + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
         const delta = currT - prevT;
         if (delta > 0 && delta < 50) regimeFees[r].fees += delta;
         regimeFees[r].hours += elapsed;
@@ -918,17 +925,17 @@ export function startDashboard(port: number): DashboardServer {
         if (curr.in_range) regimeFees[r].inRange++;
       }
 
-      // Fee rate by day-of-week
+      // Fee rate by day-of-week — SOL valued at current price
       const dowFees: Record<string, { fees: number; hours: number }> = {};
       for (let i = 1; i < snaps.length; i++) {
         const curr = snaps[i], prev = snaps[i-1];
         const day = new Date(curr.timestamp).toLocaleDateString('en-US', { timeZone: TZ, weekday: 'short' });
         if (!dowFees[day]) dowFees[day] = { fees: 0, hours: 0 };
         const elapsed = (curr.timestamp - prev.timestamp) / 3600000;
-        const pPrev = (prev.pending_fees_sol||0)*prev.price + (prev.pending_fees_usdc||0);
-        const pCurr = (curr.pending_fees_sol||0)*curr.price + (curr.pending_fees_usdc||0);
-        const prevT = (prev.cum_fees_sol||0)*prev.price + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
-        const currT = (curr.cum_fees_sol||0)*curr.price + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
+        const pPrev = (prev.pending_fees_sol||0)*projSnapPrice + (prev.pending_fees_usdc||0);
+        const pCurr = (curr.pending_fees_sol||0)*projSnapPrice + (curr.pending_fees_usdc||0);
+        const prevT = (prev.cum_fees_sol||0)*projSnapPrice + (prev.cum_fees_usdc||0) + (pPrev > 1000 ? 0 : pPrev);
+        const currT = (curr.cum_fees_sol||0)*projSnapPrice + (curr.cum_fees_usdc||0) + (pCurr > 1000 ? 0 : pCurr);
         const delta = currT - prevT;
         if (delta > 0 && delta < 50) dowFees[day].fees += delta;
         dowFees[day].hours += elapsed;
@@ -946,7 +953,7 @@ export function startDashboard(port: number): DashboardServer {
           positions.push({
             duration: (e.timestamp - lastOpen.ts) / 60000,
             capital: lastOpen.capital,
-            fees: (e.fee_sol||0)*e.price + (e.fee_usdc||0),
+            fees: (e.fee_sol||0)*projSnapPrice + (e.fee_usdc||0),
             il: e.il_at_close || 0,
           });
           lastOpen = null;
@@ -983,11 +990,11 @@ export function startDashboard(port: number): DashboardServer {
       });
       const weekdayRate = wdHours > 0 ? wdFees / wdHours : 0;
       const weekendRate = weHours > 0 ? weFees / weHours : 0;
-      const feesAllTimeProj = getFeesCollected(dbRef!);
+      const feesAllTimeProj = getFeesCollected(dbRef!, { currentPrice: projSnapPrice });
       const blendedRate = totalHours > 0 ? feesAllTimeProj / (totalHours / 24) / 24 : 1;
 
       // Daily summaries for trend — use rebalance_events per day
-      const dailyFeesFromEvents = getFeesCollectedByDay(dbRef!, 90);
+      const dailyFeesFromEvents = getFeesCollectedByDay(dbRef!, 90, projSnapPrice);
       const dailyFeesMap = new Map(dailyFeesFromEvents.map(d => [d.date, d.fees]));
       const dailyFeesArr = summaries.map((s: any) => ({ date: s.date, fees: dailyFeesMap.get(s.date) ?? 0, total: s.total_usdc, regime: s.regime }));
 
@@ -995,8 +1002,8 @@ export function startDashboard(port: number): DashboardServer {
       const solHeld = latestSnap.sol_balance + (latestSnap.position_sol || 0);
       const usdcHeld = latestSnap.usdc_balance + (latestSnap.position_usdc || 0);
       const now = Date.now();
-      const fees7d = getFeesCollected(dbRef!, { fromTs: now - 7 * 86400_000 });
-      const fees30d = getFeesCollected(dbRef!, { fromTs: now - 30 * 86400_000 });
+      const fees7d = getFeesCollected(dbRef!, { fromTs: now - 7 * 86400_000, currentPrice: projSnapPrice });
+      const fees30d = getFeesCollected(dbRef!, { fromTs: now - 30 * 86400_000, currentPrice: projSnapPrice });
       const days7 = Math.min(7, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 7 * 86400_000).length || 1);
       const days30 = Math.min(30, summaries.filter((s: any) => new Date(s.date + 'T00:00:00').getTime() > now - 30 * 86400_000).length || 1);
 
