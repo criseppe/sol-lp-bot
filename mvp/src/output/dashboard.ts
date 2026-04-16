@@ -202,12 +202,15 @@ export function startDashboard(port: number): DashboardServer {
     try {
       const from = parseInt(req.query?.from as string) || 0;
       const to = parseInt(req.query?.to as string) || Date.now();
-      // Daily fees from daily_summary
-      const dailyFees = dbRef.prepare("SELECT date, fees_earned_usdc as fees, total_usdc, regime, in_range_pct FROM daily_summary ORDER BY date ASC").all() as any[];
+      // Current SOL price for unified fee valuation — used throughout this handler
+      const intCurrentPrice = currentLive?.solPrice ?? 0;
+      // Daily fees from rebalance_events (single source of truth)
+      const dailyFeesFromDb = getFeesCollectedByDay(dbRef!, 365, intCurrentPrice);
+      const dailyFeesMap = new Map(dailyFeesFromDb.map(d => [d.date, d.fees]));
+      const dailySummaryRows = dbRef.prepare("SELECT date, total_usdc, regime, in_range_pct FROM daily_summary ORDER BY date ASC").all() as any[];
+      const dailyFees = dailySummaryRows.map((d: any) => ({ ...d, fees: dailyFeesMap.get(d.date) ?? 0 }));
       // Positions from rebalance_events (open+close pairs)
       const events = dbRef.prepare("SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, regime, sol_before, sol_after, usdc_before, usdc_after FROM rebalance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC").all(from || 0, to) as any[];
-      // Current SOL price for unified fee valuation — defined early so positions loop can use it
-      const intCurrentPrice = currentLive?.solPrice ?? 0;
       // Subquery to sum ALL fees (close + pre-close harvests + mid-position harvests) per position
       const posFeesStmt = dbRef.prepare(`
         SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as total
@@ -885,11 +888,15 @@ export function startDashboard(port: number): DashboardServer {
 
       const regimeHist = dbRef.prepare('SELECT timestamp, old_regime, new_regime, price FROM regime_history WHERE timestamp > ? ORDER BY timestamp ASC').all(since) as any[];
 
-      const dailySummaries = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date ASC').all() as any[];
+      const dailySummariesRaw = dbRef.prepare('SELECT * FROM daily_summary ORDER BY date ASC').all() as any[];
 
       const state = dbRef.prepare('SELECT * FROM bot_state WHERE id=1').get() as any;
 
       const analyticsCurrentPrice = currentLive?.solPrice ?? (snaps.length > 0 ? snaps[snaps.length - 1].price : 0);
+      // Enrich daily summaries with fees from rebalance_events (single source of truth)
+      const analyticsDailyFees = getFeesCollectedByDay(dbRef!, 365, analyticsCurrentPrice);
+      const analyticsDailyFeesMap = new Map(analyticsDailyFees.map(d => [d.date, d.fees]));
+      const dailySummaries = dailySummariesRaw.map((d: any) => ({ ...d, fees_earned_usdc: analyticsDailyFeesMap.get(d.date) ?? d.fees_earned_usdc }));
       res.json({ snaps, events, regimeHist, dailySummaries, state, days, currentPrice: analyticsCurrentPrice });
     } catch (err) { res.status(500).json({ error: String(err) }); }
   });
