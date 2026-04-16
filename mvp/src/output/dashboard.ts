@@ -208,16 +208,24 @@ export function startDashboard(port: number): DashboardServer {
       const events = dbRef.prepare("SELECT timestamp, event_type, price, fee_sol, fee_usdc, il_at_close, regime, sol_before, sol_after, usdc_before, usdc_after FROM rebalance_events WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC").all(from || 0, to) as any[];
       // Current SOL price for unified fee valuation — defined early so positions loop can use it
       const intCurrentPrice = currentLive?.solPrice ?? 0;
+      // Subquery to sum ALL fees (close + pre-close harvests + mid-position harvests) per position
+      const posFeesStmt = dbRef.prepare(`
+        SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as total
+        FROM rebalance_events
+        WHERE timestamp BETWEEN ? AND ? + 5000
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `);
       const positions: any[] = [];
       let lastOpen: any = null;
       for (const e of events) {
         if (e.event_type === 'POSITION_OPENED' || e.event_type === 'PULLBACK_REENTRY') {
           lastOpen = { entryTime: e.timestamp, entryPrice: e.price, regime: e.regime };
         } else if (['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type) && lastOpen) {
+          const posFees = (posFeesStmt.get(intCurrentPrice, lastOpen.entryTime, e.timestamp) as any)?.total ?? 0;
           positions.push({
             entryTime: lastOpen.entryTime, exitTime: e.timestamp, entryPrice: lastOpen.entryPrice, exitPrice: e.price,
             durationMin: Math.round((e.timestamp - lastOpen.entryTime) / 60000),
-            feesUsdc: (e.fee_sol || 0) * intCurrentPrice + (e.fee_usdc || 0), feesSol: e.fee_sol || 0,
+            feesUsdc: posFees, feesSol: e.fee_sol || 0,
             exitReason: e.event_type, regime: lastOpen.regime, il: e.il_at_close || 0,
           });
           lastOpen = null;
@@ -941,7 +949,13 @@ export function startDashboard(port: number): DashboardServer {
         dowFees[day].hours += elapsed;
       }
 
-      // Positions
+      // Positions — sum all fees (close + harvests) during position lifetime
+      const projPosFeesStmt = dbRef.prepare(`
+        SELECT COALESCE(SUM(fee_usdc + fee_sol * ?), 0) as total
+        FROM rebalance_events
+        WHERE timestamp BETWEEN ? AND ? + 5000
+        AND (fee_usdc > 0 OR fee_sol > 0)
+      `);
       const positions: any[] = [];
       let lastOpen: any = null;
       events.forEach((e: any) => {
@@ -950,10 +964,11 @@ export function startDashboard(port: number): DashboardServer {
           const capA = (e.sol_after||0)*e.price + (e.usdc_after||0);
           lastOpen = { ts: e.timestamp, capital: Math.max(0, capB - capA) };
         } else if (['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type) && lastOpen) {
+          const posFees = (projPosFeesStmt.get(projSnapPrice, lastOpen.ts, e.timestamp) as any)?.total ?? 0;
           positions.push({
             duration: (e.timestamp - lastOpen.ts) / 60000,
             capital: lastOpen.capital,
-            fees: (e.fee_sol||0)*projSnapPrice + (e.fee_usdc||0),
+            fees: posFees,
             il: e.il_at_close || 0,
           });
           lastOpen = null;

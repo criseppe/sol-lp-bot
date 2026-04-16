@@ -519,7 +519,13 @@ function buildPositions(events,cp){
       lastOpen={ts:e.timestamp,price:e.price,capital:Math.max(0,capB-capA),regime:e.regime};
     }else if(['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type)&&lastOpen){
       var feePrice=cp||e.price;
-      var fees=(e.fee_sol||0)*feePrice+(e.fee_usdc||0);
+      // Sum ALL fee events (close + pre-close harvests) during position lifetime
+      var fees=0;
+      events.forEach(function(r){
+        if(r.timestamp>=lastOpen.ts&&r.timestamp<=e.timestamp+5000&&((r.fee_sol||0)>0||(r.fee_usdc||0)>0)){
+          fees+=(r.fee_sol||0)*feePrice+(r.fee_usdc||0);
+        }
+      });
       positions.push({openTime:lastOpen.ts,closeTime:e.timestamp,duration:(e.timestamp-lastOpen.ts)/60000,
         openPrice:lastOpen.price,closePrice:e.price,capital:lastOpen.capital,
         fees:fees,il:e.il_at_close||0,net:fees+(e.il_at_close||0),reason:e.event_type,regime:lastOpen.regime});
