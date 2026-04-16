@@ -78,6 +78,28 @@ export const REGIME_PARAMS = {
   },
 } as const;
 
+// Regime transition rules for smart reopen logic
+export interface RegimeTransitionRule {
+  urgency: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  stableMinutes: number;
+  widthThreshold: number;
+}
+
+export const REGIME_TRANSITION_RULES: Record<string, RegimeTransitionRule> = {
+  'RANGING→BULLISH_TREND':        { urgency: 'LOW',      stableMinutes: 30, widthThreshold: 1.4 },
+  'RANGING→BEARISH_TREND':        { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
+  'RANGING→EXTREME':              { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
+  'BULLISH_TREND→RANGING':        { urgency: 'MEDIUM',   stableMinutes: 20, widthThreshold: 1.3 },
+  'BULLISH_TREND→BEARISH_TREND':  { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
+  'BULLISH_TREND→EXTREME':        { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
+  'BEARISH_TREND→RANGING':        { urgency: 'LOW',      stableMinutes: 30, widthThreshold: 1.4 },
+  'BEARISH_TREND→BULLISH_TREND':  { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
+  'BEARISH_TREND→EXTREME':        { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
+  'EXTREME→RANGING':              { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
+  'EXTREME→BULLISH_TREND':        { urgency: 'MEDIUM',   stableMinutes: 20, widthThreshold: 1.3 },
+  'EXTREME→BEARISH_TREND':        { urgency: 'MEDIUM',   stableMinutes: 20, widthThreshold: 1.3 },
+};
+
 // Jupiter aggregator
 export const JUPITER = {
   QUOTE_API:      'https://api.jup.ag/swap/v1/quote',

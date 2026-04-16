@@ -12,7 +12,7 @@ import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wal
 import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, detectRegimeTA, getRegimeParams } from './engine/regime.js';
 import { MarketDataService } from './data/market.js';
 import { calcRange, calcProximity, shouldFireDownside, shouldFireUpside, shouldReenterAfterUpside, isFlashCrash, getDownsideReentrySplit, isHarvestDue, checkAutoDeploy } from './engine/rules.js';
-import { MINTS } from './constants.js';
+import { MINTS, REGIME_TRANSITION_RULES } from './constants.js';
 import type { BotState, Regime, EventType } from './types.js';
 import { runtime, applyConfigFromDb } from './config.js';
 import { getConfig, setConfig, upsertDailySummary, getDailySummaries, getAllDailySummaries, getFeesCollected } from './db/sqlite.js';
@@ -83,6 +83,7 @@ let liveRealizedIl = savedState?.realized_il ?? 0;
 if (liveCumFeesSol || liveCumFeesUsdc || liveRealizedIl) {
   console.log(JSON.stringify({ level: 'info', msg: `restored from DB: cumFees=${liveCumFeesSol.toFixed(6)} SOL + ${liveCumFeesUsdc.toFixed(4)} USDC, realizedIL=$${liveRealizedIl.toFixed(6)}`, timestamp: Date.now() }));
 }
+let lastRegimeChangeTs = 0;
 let lastHoldLogTime = 0;
 let currentLiveData: LiveData | null = null;
 let lastPendingFeesCheck = 0;
@@ -1148,6 +1149,77 @@ async function main() {
   });
 }
 
+// ── REGIME REOPEN LOGIC ──────────────────────────────────────────────────
+
+function shouldReopenForRegime(params: {
+  positionOpenRegime: string;
+  currentRegime: string;
+  regimeStableMs: number;
+  proxToLower: number;
+  pendingFeesUsd: number;
+  currentRangeWidthPct: number;
+  currentPrice: number;
+  confidence: string;
+}): { shouldReopen: boolean; reason: string; urgency?: string; harvestFirst?: boolean } {
+  const { positionOpenRegime, currentRegime } = params;
+
+  if (currentRegime === positionOpenRegime) {
+    return { shouldReopen: false, reason: 'same regime' };
+  }
+  if (!runtime.regimeReopenEnabled) {
+    return { shouldReopen: false, reason: 'reopen disabled' };
+  }
+
+  const key = `${positionOpenRegime}→${currentRegime}`;
+  const rule = REGIME_TRANSITION_RULES[key];
+  if (!rule) {
+    return { shouldReopen: false, reason: `no rule for ${key}` };
+  }
+
+  // Confidence gate
+  const confOrder = { LOW: 0, MEDIUM: 1, HIGH: 2 };
+  const minConf = confOrder[runtime.regimeReopenMinConfidence as keyof typeof confOrder] ?? 1;
+  const curConf = confOrder[params.confidence as keyof typeof confOrder] ?? 0;
+  if (curConf < minConf && rule.urgency !== 'CRITICAL') {
+    return { shouldReopen: false, reason: `confidence ${params.confidence} < required ${runtime.regimeReopenMinConfidence}, urgency ${rule.urgency}` };
+  }
+
+  // Stability gate
+  const stableMinutes = params.regimeStableMs / 60000;
+  if (stableMinutes < rule.stableMinutes) {
+    return { shouldReopen: false, reason: `regime stable ${stableMinutes.toFixed(1)}min < required ${rule.stableMinutes}min` };
+  }
+
+  // Width threshold gate
+  const targetParams = runtime.regimeParams[currentRegime] ?? getRegimeParams(currentRegime as Regime);
+  const targetWidth = targetParams.rangeWidthPct;
+  const widthRatio = targetWidth > 0 ? params.currentRangeWidthPct / targetWidth : 1;
+  if (widthRatio < rule.widthThreshold && rule.urgency !== 'CRITICAL') {
+    return { shouldReopen: false, reason: `width ratio ${widthRatio.toFixed(2)} < threshold ${rule.widthThreshold}` };
+  }
+
+  // Proximity gate
+  if (params.proxToLower > runtime.regimeReopenMaxProximity) {
+    return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} > max ${runtime.regimeReopenMaxProximity}` };
+  }
+  if (params.proxToLower < runtime.regimeReopenMinProximity) {
+    return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} < min ${runtime.regimeReopenMinProximity}` };
+  }
+
+  // Pending fees gate
+  const harvestFirst = params.pendingFeesUsd > runtime.regimeReopenMaxPendingFees;
+  if (harvestFirst && rule.urgency === 'LOW') {
+    return { shouldReopen: false, reason: `pending fees $${params.pendingFeesUsd.toFixed(2)} > max, LOW urgency` };
+  }
+
+  return {
+    shouldReopen: true,
+    urgency: rule.urgency,
+    harvestFirst,
+    reason: `${key} | urgency=${rule.urgency} | stable=${stableMinutes.toFixed(1)}min | width=${widthRatio.toFixed(2)}x | prox=${params.proxToLower.toFixed(2)}`,
+  };
+}
+
 // ── LIVE CYCLE ────────────────────────────────────────────────────────────
 
 async function runLiveCycle(price: number): Promise<void> {
@@ -1282,78 +1354,67 @@ async function runLiveCycle(price: number): Promise<void> {
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
 
-      // ── Regime-change reopen ──
-      if (runtime.regimeChangeReopenEnabled && liveExecutor) {
+      // ── Smart regime-change reopen ──
+      lastRegimeChangeTs = now;
+      if (liveExecutor) {
         const pos = liveExecutor.getCurrentPosition();
         if (pos) {
-          const posAgeMin = pos.entryTime ? (now - pos.entryTime) / 60_000 : 0;
-          const confLevel = deployMultiplier >= 1.0 ? 'HIGH' : deployMultiplier >= 0.75 ? 'MEDIUM' : 'LOW';
-          const confOk = confLevel === 'HIGH' || confLevel === 'MEDIUM';
-          const ageOk = posAgeMin > 15;
-
-          // Classify change
-          let isImmediate =
-            newRegime === 'EXTREME' || oldRegime === 'EXTREME' ||
-            (oldRegime === 'BULLISH_TREND' && newRegime === 'BEARISH_TREND') ||
-            (oldRegime === 'BEARISH_TREND' && newRegime === 'BULLISH_TREND');
-
-          // Immediate reopens require HIGH confidence — downgrade MEDIUM/LOW to conditional
-          if (isImmediate && confLevel !== 'HIGH') {
-            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Immediate change downgraded to conditional — confidence ${confLevel} not HIGH`, timestamp: now }));
-            isImmediate = false;
-          }
-
-          // Check proximity for conditional reopen
           const prox = calcProximity(price, pos as any);
-          const nearExit = Math.max(prox.proxToLower, prox.proxToUpper) > 0.80; // within 20% of exit
+          const posWidthPct = pos.priceUpper > 0 && pos.priceLower > 0
+            ? ((pos.priceUpper - pos.priceLower) / ((pos.priceUpper + pos.priceLower) / 2)) * 100
+            : 0;
+          const confLevel = deployMultiplier >= 1.0 ? 'HIGH' : deployMultiplier >= 0.75 ? 'MEDIUM' : 'LOW';
 
-          const shouldReopen = ageOk && confOk && (isImmediate || nearExit);
-          const reason = isImmediate ? 'immediate' : (nearExit ? 'conditional (near exit)' : 'conditional (mid-range)');
+          const reopenCheck = shouldReopenForRegime({
+            positionOpenRegime: pos.regime,
+            currentRegime: newRegime,
+            regimeStableMs: 0, // just changed — stability check uses stableMinutes from rule
+            proxToLower: prox.proxToLower,
+            pendingFeesUsd: cachedPendingFeesTotal,
+            currentRangeWidthPct: posWidthPct,
+            currentPrice: price,
+            confidence: confLevel,
+          });
 
-          if (shouldReopen) {
-            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Closing position: ${oldRegime} → ${newRegime}, reason: ${reason}, age: ${posAgeMin.toFixed(0)}min, confidence: ${confLevel}`, timestamp: now }));
+          if (reopenCheck.shouldReopen) {
+            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] REOPENING: ${reopenCheck.reason}`, timestamp: now }));
             insertDecisionLog(db, { timestamp: now, price, regime: newRegime, bot_state: liveBotState,
               prox_lower: prox.proxToLower, prox_upper: prox.proxToUpper, in_range: 1,
-              decision: 'REGIME_CHANGE', reasoning: `[RegimeReopen] Closing: ${oldRegime} → ${newRegime}, reason: ${reason}. Opening new position with ${newRegime} params immediately.`,
+              decision: 'REGIME_CHANGE', reasoning: `[RegimeReopen] ${reopenCheck.reason}`,
               params_json: null });
             try {
-              const closed = await liveClosePosition(price, 'POSITION_CLOSED', `Regime change reopen: ${oldRegime} → ${newRegime} (${reason})`);
+              if (reopenCheck.harvestFirst) {
+                console.log(JSON.stringify({ level: 'info', msg: '[RegimeReopen] Harvesting pending fees before reopen...', timestamp: now }));
+              }
+              const closed = await liveClosePosition(price, 'POSITION_CLOSED', `Regime reopen (${reopenCheck.urgency}): ${oldRegime} → ${newRegime}`);
               if (!closed) {
-                console.log(JSON.stringify({ level: 'warn', msg: '[RegimeReopen] Close failed or returned false — aborting reopen. Position unchanged.', timestamp: now }));
+                console.log(JSON.stringify({ level: 'warn', msg: '[RegimeReopen] Close failed — position unchanged', timestamp: now }));
                 return;
               }
-              // Gate 1: ReserveGate
-              {
-                const regimeParamsRR = runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime);
-                const balancesRR = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
-                const positionSizeRR = (balancesRR.sol * price + balancesRR.usdc) * regimeParamsRR.deployPct * (taDeployMultiplier ?? 1.0);
-                const usdcNeededRR = positionSizeRR * (regimeParamsRR.usdcDepositPct ?? 0.35);
-                const gateRR = checkDeployGate(db, usdcNeededRR, balancesRR.usdc, balancesRR.sol * price + balancesRR.usdc);
-                if (!gateRR.allowed) {
-                  console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateRR.reason}. Shortfall: $${gateRR.shortfall.toFixed(2)}`, timestamp: Date.now() }));
-                  return;
-                }
-                console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateRR.reason}`, timestamp: Date.now() }));
-                // Gate 2: BasisGate
-                const basisStateRR = readCostBasis(db);
-                const basisThresholdRR = regimeParamsRR.basisGateThreshold ?? 0.999;
-                const basisThresholdPriceRR = basisStateRR.solCostBasis * basisThresholdRR;
-                if (basisStateRR.solCostBasis > 0 && price < basisThresholdPriceRR) {
-                  console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceRR.toFixed(2)} (basis $${basisStateRR.solCostBasis.toFixed(2)} × ${basisThresholdRR})`, timestamp: Date.now() }));
-                  return;
-                }
-                console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceRR.toFixed(2)} (basis $${basisStateRR.solCostBasis.toFixed(2)} × ${basisThresholdRR})`, timestamp: Date.now() }));
-                // Gate 3: ChurnGuard — skipped for regime change reopen
-                console.log(JSON.stringify({ level: 'info', msg: '[ChurnGuard] Skipped — regime change reopen', timestamp: Date.now() }));
+              // Gates: Reserve + Basis (ChurnGuard skipped for regime reopen)
+              const regimeParamsRR = runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime);
+              const balancesRR = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+              const positionSizeRR = (balancesRR.sol * price + balancesRR.usdc) * regimeParamsRR.deployPct * (taDeployMultiplier ?? 1.0);
+              const usdcNeededRR = positionSizeRR * (regimeParamsRR.usdcDepositPct ?? 0.35);
+              const gateRR = checkDeployGate(db, usdcNeededRR, balancesRR.usdc, balancesRR.sol * price + balancesRR.usdc);
+              if (!gateRR.allowed) {
+                console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateRR.reason}`, timestamp: Date.now() }));
+                return;
               }
-              await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after regime change: ${oldRegime} → ${newRegime}. New params: width=${(runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime)).rangeWidthPct}%.`);
+              const basisStateRR = readCostBasis(db);
+              const basisThresholdRR = regimeParamsRR.basisGateThreshold ?? 0.999;
+              if (basisStateRR.solCostBasis > 0 && price < basisStateRR.solCostBasis * basisThresholdRR) {
+                console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} < basis threshold $${(basisStateRR.solCostBasis * basisThresholdRR).toFixed(2)}`, timestamp: Date.now() }));
+                return;
+              }
+              console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Gates passed. Opening with ${newRegime} params (width=${regimeParamsRR.rangeWidthPct}%)`, timestamp: Date.now() }));
+              await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after regime change: ${oldRegime} → ${newRegime} (${reopenCheck.urgency}). Width=${regimeParamsRR.rangeWidthPct}%.`);
               await reconcileReserveAfterOpen('RR');
             } catch (e) {
               console.log(JSON.stringify({ level: 'error', msg: '[RegimeReopen] failed', error: String(e), timestamp: now }));
             }
           } else {
-            const skipReason = !ageOk ? 'position too young' : !confOk ? 'low confidence' : 'position mid-range';
-            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Skipped: ${skipReason}, will reopen naturally at next exit. ${oldRegime} → ${newRegime}, prox: ${(Math.max(prox.proxToLower, prox.proxToUpper)*100).toFixed(0)}%`, timestamp: now }));
+            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Skipped: ${reopenCheck.reason}`, timestamp: now }));
           }
         }
       }

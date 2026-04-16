@@ -70,7 +70,13 @@ export const runtime = {
   // Range width override (null = use regime default)
   rangeWidthOverride: null as number | null,
 
-  // Regime-change reopen
+  // Regime-change reopen (smart transition rules)
+  regimeReopenEnabled: true,
+  regimeReopenMaxProximity: 0.75,
+  regimeReopenMinProximity: 0.25,
+  regimeReopenMaxPendingFees: 10.0,
+  regimeReopenMinConfidence: 'MEDIUM' as string,
+  // Legacy toggle (mapped to regimeReopenEnabled)
   regimeChangeReopenEnabled: true,
 
   // VAR — Volatility-Adaptive Range
@@ -204,7 +210,12 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Idle wallet rebalance
   const vIREnabled = g('idleRebalanceEnabled'); if (vIREnabled === 'true' || vIREnabled === 'false') runtime.idleRebalanceEnabled = vIREnabled === 'true';
-  const vRCR = g('regimeChangeReopenEnabled'); if (vRCR === 'true' || vRCR === 'false') runtime.regimeChangeReopenEnabled = vRCR === 'true';
+  const vRCR = g('regimeChangeReopenEnabled'); if (vRCR === 'true' || vRCR === 'false') { runtime.regimeChangeReopenEnabled = vRCR === 'true'; runtime.regimeReopenEnabled = vRCR === 'true'; }
+  const vRRE = g('regimeReopenEnabled'); if (vRRE === 'true' || vRRE === 'false') { runtime.regimeReopenEnabled = vRRE === 'true'; runtime.regimeChangeReopenEnabled = vRRE === 'true'; }
+  const vRRMaxP = nv('regimeReopenMaxProximity', 0.3, 1.0); if (vRRMaxP != null) runtime.regimeReopenMaxProximity = vRRMaxP;
+  const vRRMinP = nv('regimeReopenMinProximity', 0.0, 0.5); if (vRRMinP != null) runtime.regimeReopenMinProximity = vRRMinP;
+  const vRRMaxF = nv('regimeReopenMaxPendingFees', 0, 100); if (vRRMaxF != null) runtime.regimeReopenMaxPendingFees = vRRMaxF;
+  const vRRConf = g('regimeReopenMinConfidence'); if (vRRConf === 'LOW' || vRRConf === 'MEDIUM' || vRRConf === 'HIGH') runtime.regimeReopenMinConfidence = vRRConf;
   const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
   const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
@@ -274,6 +285,11 @@ export function exportConfig(): Record<string, string> {
   out['regimeCheckIntervalMs'] = String(runtime.regimeCheckIntervalMs);
   out['autoDeployCheckIntervalSec'] = String(runtime.autoDeployCheckIntervalSec);
   out['regimeChangeReopenEnabled'] = String(runtime.regimeChangeReopenEnabled);
+  out['regimeReopenEnabled'] = String(runtime.regimeReopenEnabled);
+  out['regimeReopenMaxProximity'] = String(runtime.regimeReopenMaxProximity);
+  out['regimeReopenMinProximity'] = String(runtime.regimeReopenMinProximity);
+  out['regimeReopenMaxPendingFees'] = String(runtime.regimeReopenMaxPendingFees);
+  out['regimeReopenMinConfidence'] = runtime.regimeReopenMinConfidence;
   out['regimeWindowDays'] = String(runtime.regimeWindowDays);
   out['trendThreshold'] = String(runtime.trendThreshold);
   out['pythMaxConfidencePct'] = String(runtime.pythMaxConfidencePct);
