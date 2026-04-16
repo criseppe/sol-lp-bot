@@ -2369,15 +2369,12 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
     return;
   }
   const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
-  const effectiveParams = runtime.rangeWidthOverride !== null
-    ? { ...params, rangeWidthPct: runtime.rangeWidthOverride }
-    : params;
-  const range = calcRange(price, effectiveParams, (p) => pool.priceToTick(p), (p) => pool.priceToTickLower(p), (p) => pool.priceToTickUpper(p));
+  const range = calcRange(price, params, (p) => pool.priceToTick(p), (p) => pool.priceToTickLower(p), (p) => pool.priceToTickUpper(p));
 
   const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
   const totalWalletUsdc = balances.sol * price + balances.usdc;
   const reserveUsdc = runtime.solReserve * price + runtime.usdcReserve;
-  const deployUsdc = Math.min(totalWalletUsdc * effectiveParams.deployPct, totalWalletUsdc - reserveUsdc);
+  const deployUsdc = Math.min(totalWalletUsdc * params.deployPct, totalWalletUsdc - reserveUsdc);
   if (deployUsdc < 5) {
     console.log(JSON.stringify({ level: 'warn', msg: 'insufficient funds to open position', sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));
     return;
@@ -2385,8 +2382,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   // Build reasoning
   const why = triggerReason ?? `No open position detected.`;
-  const widthNote = runtime.rangeWidthOverride !== null ? ` (override: ${runtime.rangeWidthOverride}%, regime default: ${params.rangeWidthPct}%)` : `%`;
-  const logic = `${why} Regime: ${liveRegime} → rangeWidth=${effectiveParams.rangeWidthPct}${widthNote}, skew=${(effectiveParams.skewDown*100).toFixed(0)}% down/${(effectiveParams.skewUp*100).toFixed(0)}% up, deploy=${(effectiveParams.deployPct*100).toFixed(0)}% of capital. Range calculated: $${range.priceLower.toFixed(2)}-$${range.priceUpper.toFixed(2)} around current price $${price.toFixed(2)}.`;
+  const logic = `${why} Regime: ${liveRegime} → rangeWidth=${params.rangeWidthPct}%, skew=${(params.skewDown*100).toFixed(0)}% down/${(params.skewUp*100).toFixed(0)}% up, deploy=${(params.deployPct*100).toFixed(0)}% of capital. Range calculated: $${range.priceLower.toFixed(2)}-$${range.priceUpper.toFixed(2)} around current price $${price.toFixed(2)}.`;
 
   try {
     const pos = await liveExecutor.openPosition(range, price, liveRegime, deployUsdc);
