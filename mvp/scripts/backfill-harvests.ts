@@ -17,9 +17,10 @@ const harvests = [
   { ts: '2026-04-16T02:41:05.110Z', feeSol: 0.095127, feeUsdc: 10.3122, price: 85.49 },
   { ts: '2026-04-16T04:50:06.049Z', feeSol: 0.077674, feeUsdc:  6.0727, price: 85.09 },
   { ts: '2026-04-16T05:10:04.931Z', feeSol: 0.015732, feeUsdc:  1.2587, price: 85.09 },
-  { ts: '2026-04-16T10:13:35.953Z', feeSol: 0.140305, feeUsdc: 11.5292, price: 84.97 },
-  { ts: '2026-04-16T10:17:36.695Z', feeSol: 0.009999, feeUsdc:  0.2925, price: 84.85 },
-  { ts: '2026-04-16T10:20:37.880Z', feeSol: 0.005934, feeUsdc:  0.2283, price: 84.74 },
+  // Last 3 already have real FEE_HARVEST rows from post-deploy code (timestamps ~6s earlier)
+  // { ts: '2026-04-16T10:13:35.953Z', feeSol: 0.140305, feeUsdc: 11.5292, price: 84.97 }, // real row at 10:13:29
+  // { ts: '2026-04-16T10:17:36.695Z', feeSol: 0.009999, feeUsdc:  0.2925, price: 84.85 }, // real row at 10:17:30
+  // { ts: '2026-04-16T10:20:37.880Z', feeSol: 0.005934, feeUsdc:  0.2283, price: 84.74 }, // real row at 10:20:30
 ];
 
 const insert = db.prepare(`
