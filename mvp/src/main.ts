@@ -367,6 +367,11 @@ async function main() {
           liveBotState = 'ACTIVE';
           liveRegime = (savedState.regime ?? 'RANGING') as Regime;
           console.log(JSON.stringify({ level: 'info', msg: 'live position restored', positionMint: pos.positionMint, timestamp: Date.now() }));
+          // Restore last regime change time so stability gate works after restart
+          try {
+            const lastChange = db.prepare('SELECT ts FROM regime_snapshots WHERE regime_changed = 1 ORDER BY ts DESC LIMIT 1').get() as { ts: number } | undefined;
+            if (lastChange) lastRegimeChangeTs = lastChange.ts;
+          } catch { /* ignore if column missing */ }
           insertDecisionLog(db, { timestamp: Date.now(), price: pos.entryPrice ?? 0, regime: liveRegime, bot_state: 'ACTIVE',
             prox_lower: null, prox_upper: null, in_range: null,
             decision: 'RESTORED', reasoning: `Position restored from DB after restart. Mint: ${pos.positionMint}. Range: $${pos.priceLower?.toFixed(2) ?? '?'}-$${pos.priceUpper?.toFixed(2) ?? '?'}. Entry price: $${pos.entryPrice?.toFixed(2) ?? '?'}. Regime: ${liveRegime}.`,
@@ -1418,39 +1423,8 @@ async function runLiveCycle(price: number): Promise<void> {
         solBefore: 0, usdcBefore: 0, solAfter: 0, usdcAfter: 0, feeSol: 0, feeUsdc: 0, ilAtClose: 0,
       });
 
-      // ── Smart regime-change reopen: evaluate and set pending flag ──
+      // Record regime change timestamp — per-cycle reopen check uses this for stability gate
       lastRegimeChangeTs = now;
-      if (liveExecutor) {
-        const pos = liveExecutor.getCurrentPosition();
-        if (pos) {
-          const prox = calcProximity(price, pos as any);
-          const posWidthPct = pos.priceUpper > 0 && pos.priceLower > 0
-            ? ((pos.priceUpper - pos.priceLower) / ((pos.priceUpper + pos.priceLower) / 2)) * 100
-            : 0;
-          const confLevel = deployMultiplier >= 1.0 ? 'HIGH' : deployMultiplier >= 0.75 ? 'MEDIUM' : 'LOW';
-
-          const reopenCheck = shouldReopenForRegime({
-            positionOpenRegime: pos.regime,
-            currentRegime: newRegime,
-            regimeStableMs: 0,
-            proxToLower: prox.proxToLower,
-            pendingFeesUsd: cachedPendingFeesTotal,
-            currentRangeWidthPct: posWidthPct,
-            currentPrice: price,
-            confidence: confLevel,
-          });
-
-          if (reopenCheck.shouldReopen) {
-            reopenPendingTs = now;
-            reopenPendingRegime = newRegime;
-            reopenPendingUrgency = reopenCheck.urgency ?? 'MEDIUM';
-            reopenPendingOldRegime = oldRegime;
-            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Approved: ${reopenCheck.reason} — waiting for good moment`, timestamp: now }));
-          } else {
-            console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Skipped: ${reopenCheck.reason}`, timestamp: now }));
-          }
-        }
-      }
     }
     liveLastRegimeCheck = now;
   }
@@ -1544,6 +1518,40 @@ async function runLiveCycle(price: number): Promise<void> {
       console.log(JSON.stringify({ level: 'error', msg: 'Force reopen close failed', error: String(e), timestamp: now }));
     }
     return; // next cycle will open fresh
+  }
+
+  // ── Per-cycle: detect regime mismatch and evaluate reopen ──
+  if (currentPos && liveExecutor && currentPos.regime !== liveRegime && !reopenPendingTs) {
+    const regimeStableMs = lastRegimeChangeTs > 0 ? now - lastRegimeChangeTs : 99 * 60_000;
+    const mismatchProx = calcProximity(price, currentPos as any);
+    const mismatchWidthPct = currentPos.priceUpper > 0 && currentPos.priceLower > 0
+      ? ((currentPos.priceUpper - currentPos.priceLower) / ((currentPos.priceUpper + currentPos.priceLower) / 2)) * 100
+      : 2.0;
+    const confLevel = (taDeployMultiplier ?? 1.0) >= 1.0 ? 'HIGH' : (taDeployMultiplier ?? 1.0) >= 0.75 ? 'MEDIUM' : 'LOW';
+
+    const reopenCheck = shouldReopenForRegime({
+      positionOpenRegime: currentPos.regime,
+      currentRegime: liveRegime,
+      regimeStableMs,
+      proxToLower: mismatchProx.proxToLower,
+      pendingFeesUsd: cachedPendingFeesTotal,
+      currentRangeWidthPct: mismatchWidthPct,
+      currentPrice: price,
+      confidence: confLevel,
+    });
+
+    if (reopenCheck.shouldReopen) {
+      reopenPendingTs = now;
+      reopenPendingRegime = liveRegime;
+      reopenPendingUrgency = reopenCheck.urgency ?? 'MEDIUM';
+      reopenPendingOldRegime = currentPos.regime;
+      console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Mismatch: ${currentPos.regime} → ${liveRegime} — ${reopenCheck.reason}`, timestamp: now }));
+    } else {
+      // Log once per 10 minutes to avoid spam
+      if (now % 600_000 < 60_000) {
+        console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Mismatch ${currentPos.regime}→${liveRegime} — no reopen: ${reopenCheck.reason}`, timestamp: now }));
+      }
+    }
   }
 
   // ── Per-cycle regime reopen timing check ──
