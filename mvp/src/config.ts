@@ -113,7 +113,7 @@ export const runtime = {
   sirMinSolPct: 0.15,
 
   // SOL Conversion — sell SOL to USDC when profitable and USDC needed for deploys
-  solConversionEnabled: false,
+  solConversionEnabled: true,
   solConversionCooldownMin: 15,
   solConversionBasisMultiplier: 1.000, // global scaling on regime thresholds (RANGING=1.000, BULLISH=1.010, BEARISH=1.005, EXTREME=disabled). 1.0=defaults, 1.01=1% stricter
   solConvertMomentumThreshold: 0.02, // 30-min price change required to trigger momentum override in BEARISH/EXTREME

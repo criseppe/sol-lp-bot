@@ -157,6 +157,15 @@ if (savedState?.last_upside_exit_ts) {
   console.log(JSON.stringify({ level: 'info', msg: `Upside exit state restored: price=$${lastUpsideExitPrice.toFixed(2)}, at ${new Date(lastUpsideExitTs).toISOString()}`, timestamp: Date.now() }));
 }
 
+// Pre-populate price history for flash crash detection
+try {
+  const recentSnaps = db.prepare(`SELECT price FROM regime_snapshots ORDER BY ts DESC LIMIT 10`).all() as { price: number }[];
+  liveRecentPrices = recentSnaps.map(r => r.price).reverse();
+  console.log(JSON.stringify({ level: 'info', msg: `[Startup] Pre-populated ${liveRecentPrices.length} prices for flash crash detection`, timestamp: Date.now() }));
+} catch (e) {
+  console.log(JSON.stringify({ level: 'warn', msg: `[Startup] Flash-crash prepopulate failed: ${String(e)}`, timestamp: Date.now() }));
+}
+
 // Helper: upside exit fields for every state save
 function upsideExitFields() {
   return { last_upside_exit_price: lastUpsideExitPrice, last_upside_exit_ts: lastUpsideExitTs, last_harvest_time: liveLastHarvestTime };
@@ -295,7 +304,17 @@ async function main() {
 
     // Reserve floor callback — executor reads this to protect USDC reserve
     liveExecutor.getReserveFloor = () => getReserveState(db).floor;
-    liveExecutor.getProximityDeployThreshold = () => (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).proximityDeployThreshold ?? 0.40;
+    // Use max of current-regime and position-regime thresholds so auto-deploy
+    // uses the stricter gate when regime changes mid-position, preventing
+    // deploys at the wrong proximity.
+    liveExecutor.getProximityDeployThreshold = () => {
+      const currentThreshold = (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).proximityDeployThreshold ?? 0.40;
+      const posRegime = liveExecutor?.getCurrentPosition()?.regime;
+      const posThreshold = posRegime
+        ? ((runtime.regimeParams[posRegime] ?? getRegimeParams(posRegime as Regime)).proximityDeployThreshold ?? 0.40)
+        : 0;
+      return Math.max(currentThreshold, posThreshold);
+    };
     liveExecutor.getCurrentRegime = () => liveRegime;
     liveExecutor.getCostBasis = () => costBasisState?.solCostBasis ?? 0;
 
@@ -1546,6 +1565,15 @@ async function runLiveCycle(price: number): Promise<void> {
     return; // next cycle will open fresh
   }
 
+  // Clear stale reopen if regime reverted to position regime
+  if (reopenPendingTs && currentPos && currentPos.regime === liveRegime) {
+    console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Cleared — regime reverted to position regime (${currentPos.regime})`, timestamp: now }));
+    reopenPendingTs = null;
+    reopenPendingRegime = null;
+    reopenPendingUrgency = null;
+    reopenPendingOldRegime = null;
+  }
+
   // ── Per-cycle: detect regime mismatch and evaluate reopen ──
   if (currentPos && liveExecutor && currentPos.regime !== liveRegime && !reopenPendingTs) {
     const regimeStableMs = lastRegimeChangeTs > 0 ? now - lastRegimeChangeTs : 99 * 60_000;
@@ -2221,15 +2249,17 @@ async function runLiveCycle(price: number): Promise<void> {
             );
             const usdcToSwap = Math.min(diffUsdc, idleUsdc, idleRebalanceCap);
             if (usdcToSwap > 1 && diffUsdc > 5) {
-              // P&L awareness: prefer buying SOL below cost basis (dip buying)
+              // P&L awareness: only buy SOL when price is at or near basis (≤ basis × 1.01).
+              // Never buy significantly above basis — even large deviations — because it
+              // inflates cost basis and makes future BasisGate blocks more likely.
               const basis = sirCostBasis || price;
-              const buyingCheap = price <= basis;
-              const extremeDeviation = Math.abs(deviation) > 0.25;
-              if (!buyingCheap && !extremeDeviation) {
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: buying SOL at $${price.toFixed(2)} above cost basis $${basis.toFixed(2)} (premium $${(price - basis).toFixed(2)}/SOL). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}% < 25% threshold. Waiting for dip.`, timestamp: now }));
+              const basisCap = basis * 1.01;
+              const buyingCheap = price <= basisCap;
+              if (!buyingCheap) {
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance SKIPPED: buying SOL at $${price.toFixed(2)} > basis cap $${basisCap.toFixed(2)} (basis $${basis.toFixed(2)} × 1.01). Deviation ${(Math.abs(deviation) * 100).toFixed(0)}%. Waiting for dip — basis protection.`, timestamp: now }));
               } else {
                 swapDirection = `USDC→SOL (${(currentSolPct * 100).toFixed(0)}% SOL → target ${(targetSolPct * 100).toFixed(0)}%)`;
-                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC (cap $${idleRebalanceCap.toFixed(0)}, gap $${diffUsdc.toFixed(0)})${buyingCheap ? ' ✅ buying dip (price < basis)' : ''}`, timestamp: now }));
+                console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: ${swapDirection}, swapping $${usdcToSwap.toFixed(2)} USDC (cap $${idleRebalanceCap.toFixed(0)}, gap $${diffUsdc.toFixed(0)}) ✅ buying at/near basis (price $${price.toFixed(2)} ≤ $${basisCap.toFixed(2)})`, timestamp: now }));
                 swapResult = await liveExecutor.doSwapPublic(
                   MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6),
                   `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
@@ -2373,10 +2403,14 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
     }
   }
 
-  // Post-upside: override deployPct to 100% for max USDC-constrained deployment
-  const effectiveDeployPct = isPostUpside ? 1.0 : params.deployPct;
-  if (isPostUpside && params.deployPct < 1.0) {
-    console.log(JSON.stringify({ level: 'info', msg: `[PostUpside] deployPct ${(params.deployPct * 100).toFixed(0)}% → 100% for max capital deployment`, timestamp: Date.now() }));
+  // Post-upside: override deployPct to 100% for max USDC-constrained deployment,
+  // but ONLY in RANGING/BULLISH. BEARISH/EXTREME keep regime default to preserve reserves.
+  const postUpsideDeployBoost = isPostUpside && liveRegime !== 'BEARISH_TREND' && liveRegime !== 'EXTREME';
+  const effectiveDeployPct = postUpsideDeployBoost ? 1.0 : params.deployPct;
+  if (postUpsideDeployBoost && params.deployPct < 1.0) {
+    console.log(JSON.stringify({ level: 'info', msg: `[PostUpside] deployPct ${(params.deployPct * 100).toFixed(0)}% → 100% (RANGING/BULLISH only)`, timestamp: Date.now() }));
+  } else if (isPostUpside && !postUpsideDeployBoost) {
+    console.log(JSON.stringify({ level: 'info', msg: `[PostUpside] deployPct kept at regime default ${(params.deployPct * 100).toFixed(0)}% — BEARISH/EXTREME`, timestamp: Date.now() }));
   }
 
   const range = calcRange(centrePrice, params, (p) => pool.priceToTick(p), (p) => pool.priceToTickLower(p), (p) => pool.priceToTickUpper(p));
@@ -2507,7 +2541,11 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
 
     positionChangedThisCycle = true;
     lastPositionCloseTs = Date.now();
-    reopenPendingTs = null; // natural exit resets any pending reopen
+    // Clear pending reopen on close — fresh start
+    reopenPendingTs = null;
+    reopenPendingRegime = null;
+    reopenPendingUrgency = null;
+    reopenPendingOldRegime = null;
     // IMMEDIATELY clear position in DB after successful on-chain close
     // This prevents ghost positions if any subsequent logging/state update fails
     upsertBotState(db, {
@@ -2572,20 +2610,21 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
   await new Promise(r => setTimeout(r, 2000));
 
   // Re-check regime before reopening — conditions may have changed during the close.
-  // Use detectRegimeTA (same as main cycle) so conviction override is honoured and
-  // hysteresis state (taRegimeCandidate/Count) is preserved across close-and-reopen.
+  // Reset hysteresis after close/reopen: prevents immediate re-commit from triggering
+  // another regime reopen (churn cascade). Pass null/0 so the fresh call starts clean,
+  // and do NOT write candidate state back — let next main cycle pick it up fresh.
+  taRegimeCandidate = null;
+  taRegimeCandidateCount = 0;
   const freshMkt = marketData.getSignals();
   const freshTa = freshMkt?.ta ?? null;
   const freshCloses = getDailyCloses(db, runtime.regimeWindowDays);
   const freshDailyRegime = freshCloses.length >= 3 ? detectRegime(freshCloses, runtime.trendThreshold) : null;
   const freshTaResult = freshTa
-    ? detectRegimeTA(freshTa, freshMkt, freshDailyRegime, taRegimeCandidate, taRegimeCandidateCount, price)
+    ? detectRegimeTA(freshTa, freshMkt, freshDailyRegime, null, 0, price)
     : null;
   const freshRegimeValue: Regime = freshTaResult?.regime ?? liveRegime;
   if (freshTaResult) {
-    // Preserve hysteresis state so next main-cycle eval doesn't reset the counter
-    taRegimeCandidate = freshTaResult.candidateRegime;
-    taRegimeCandidateCount = freshTaResult.newCandidateCount;
+    // Deploy multiplier is safe to carry forward (reflects current score, not hysteresis)
     taDeployMultiplier = freshTaResult.deployMultiplier;
   }
   console.log(JSON.stringify({
@@ -2666,6 +2705,12 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
       tx_count: liveExecutor?.txCount ?? 0, cum_gas_lamports: liveExecutor?.cumGasLamports ?? 0, ...upsideExitFields(), ...costBasisFields(),
     });
   }
+
+  // Clear any pending regime reopen — position is now fresh
+  reopenPendingTs = null;
+  reopenPendingRegime = null;
+  reopenPendingUrgency = null;
+  reopenPendingOldRegime = null;
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────
