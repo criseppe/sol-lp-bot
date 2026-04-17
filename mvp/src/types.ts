@@ -4,8 +4,7 @@ export type BotState =
   | 'IDLE'
   | 'ACTIVE'
   | 'REBALANCING'
-  | 'HALTED'
-  | 'WAITING_PULLBACK';
+  | 'HALTED';
 
 export type EventType =
   | 'STARTUP'

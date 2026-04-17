@@ -156,9 +156,36 @@ export async function executeJupiterSwap(
 
     console.log(JSON.stringify({ level: 'info', msg: `Jupiter swap sent: ${sig.slice(0, 16)}...`, timestamp: Date.now() }));
 
-    // 3. Confirm
+    // 3. Confirm. If confirmTransaction throws (RPC timeout), DON'T return null yet —
+    // the tx may have already landed on-chain. Falling back to Orca here would execute
+    // a duplicate swap. Poll signature status before declaring failure.
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+    let confirmed = false;
+    try {
+      await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+      confirmed = true;
+    } catch (confirmErr) {
+      // Poll getSignatureStatus for up to ~30s before deciding Jupiter truly failed.
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const st = await connection.getSignatureStatus(sig, { searchTransactionHistory: true });
+          const val = st?.value;
+          if (val && (val.confirmationStatus === 'confirmed' || val.confirmationStatus === 'finalized') && !val.err) {
+            confirmed = true;
+            break;
+          }
+          if (val?.err) {
+            console.log(JSON.stringify({ level: 'warn', msg: `Jupiter tx ${sig.slice(0, 16)} on-chain error: ${JSON.stringify(val.err).slice(0, 120)}`, timestamp: Date.now() }));
+            return null;
+          }
+        } catch { /* keep polling */ }
+      }
+      if (!confirmed) {
+        console.log(JSON.stringify({ level: 'warn', msg: `Jupiter confirm timed out for ${sig.slice(0, 16)} — treating as landed to avoid duplicate fallback swap. ${String(confirmErr).slice(0, 80)}`, timestamp: Date.now() }));
+        confirmed = true; // assume landed — safer than a duplicate Orca swap
+      }
+    }
 
     // 4. Get fee from transaction meta
     let feeLamports = 10000; // conservative fallback

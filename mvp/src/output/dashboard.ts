@@ -1556,16 +1556,7 @@ export function startDashboard(port: number): DashboardServer {
         triggers.push({ id: 'churnGuard', label: 'ChurnGuard', triggerPrice: live.churnGuardLastExitPrice, direction: 'above', color: '#8b949e' });
       }
       // Pullback target — show when bot is waiting for pullback
-      if (live.botState === 'WAITING_PULLBACK') {
-        try {
-          const pbState = dbRef.prepare('SELECT pullback_peak, pullback_start FROM bot_state WHERE id = 1').get() as any;
-          if (pbState?.pullback_peak > 0) {
-            const pullbackPct = runtime.pullbackThresholdPct / 100;
-            const pullbackTarget = parseFloat((pbState.pullback_peak * (1 - pullbackPct)).toFixed(2));
-            triggers.push({ id: 'pullback', label: 'Pullback target', triggerPrice: pullbackTarget, direction: 'below', color: '#f97316', note: `peak $${pbState.pullback_peak.toFixed(2)}` });
-          }
-        } catch {}
-      }
+      // (Pullback target trigger removed — upside exits go to IDLE with centre offset)
       // Compute fill percentages and distances
       const currentProxToLower = hw > 0 ? Math.max(0, (centre - price) / hw) : 0;
       const currentProxToUpper = hw > 0 ? Math.max(0, (price - centre) / hw) : 0;
@@ -1797,7 +1788,7 @@ function renderPaperHtml(data: {
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
   const stateColours: Record<string, string> = {
-    IDLE: '#888', ACTIVE: '#22c55e', REBALANCING: '#eab308', HALTED: '#ef4444', WAITING_PULLBACK: '#f97316',
+    IDLE: '#888', ACTIVE: '#22c55e', REBALANCING: '#eab308', HALTED: '#ef4444',
   };
 
   const price = c ? `$${fmt(c.price)}` : '--';
@@ -1922,7 +1913,7 @@ function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], upt
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
   const stateColours: Record<string, string> = {
-    IDLE: '#888', ACTIVE: '#22c55e', REBALANCING: '#eab308', HALTED: '#ef4444', WAITING_PULLBACK: '#f97316',
+    IDLE: '#888', ACTIVE: '#22c55e', REBALANCING: '#eab308', HALTED: '#ef4444',
   };
 
   const uptimeMin = Math.floor(uptime / 60);
@@ -2015,13 +2006,16 @@ ${pool ? `<div class="card" style="margin-top:12px">
     // Upside threshold: triggers when price rises to centre + threshold * halfWidth
     const upsidePrice = centre + params.proxThresholdUpper * halfWidth;
     const upsidePos = Math.max(0, Math.min(100, ((upsidePrice - r.lower) / rangeWidth) * 100));
-    // Current proximity values
+    // Current proximity values — EXIT metric (Formula B: centre-based, matches rules.ts)
     const proxToLower = Math.max(0, (centre - live.solPrice) / halfWidth);
     const proxToUpper = Math.max(0, (live.solPrice - centre) / halfWidth);
     const proxDownPct = Math.round(proxToLower * 100);
     const proxUpPct = Math.round(proxToUpper * 100);
     const downThreshPct = Math.round(params.proxThresholdLower * 100);
     const upThreshPct = Math.round(params.proxThresholdUpper * 100);
+    // Range position — DISPLAY metric (Formula A: linear within range, 0% at upper → 100% at lower)
+    const rangePosFromLowerPct = Math.max(0, Math.min(100, ((r.upper - live.solPrice) / rangeWidth) * 100));
+    const rangePosFromUpperPct = Math.max(0, Math.min(100, ((live.solPrice - r.lower) / rangeWidth) * 100));
 
     rangeBarHtml = `
       <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:4px">
@@ -2045,14 +2039,20 @@ ${pool ? `<div class="card" style="margin-top:12px">
           <tr style="border-bottom:1px solid #21262d">
             <td style="padding:6px 8px;color:#8b949e">Price</td>
             <td style="padding:6px 8px;color:#f0883e;font-weight:bold">$${fmt(live.solPrice)}</td>
-            <td style="padding:6px 8px;color:#8b949e">Prox &#x25BC;</td>
-            <td style="padding:6px 8px"><b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b><span style="color:#8b949e">/${downThreshPct}%</span></td>
+            <td style="padding:6px 8px;color:#8b949e" title="Exit proximity (Formula B: (centre-price)/halfWidth) — used by rule2 downside exit">Exit &#x25BC;</td>
+            <td style="padding:6px 8px" title="Fires rule2 T1_DOWNSIDE when Exit ▼ ≥ threshold"><b style="color:${proxDownPct >= downThreshPct ? '#f97316' : '#c9d1d9'}">${proxDownPct}%</b><span style="color:#8b949e">/${downThreshPct}%</span></td>
           </tr>
           <tr style="border-bottom:1px solid #21262d">
             <td style="padding:6px 8px;color:#8b949e">Entry</td>
             <td style="padding:6px 8px;color:#a855f7;font-weight:bold">${live.entryPrice ? `$${fmt(live.entryPrice)}` : '--'}</td>
-            <td style="padding:6px 8px;color:#8b949e">Prox &#x25B2;</td>
-            <td style="padding:6px 8px"><b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b><span style="color:#8b949e">/${upThreshPct}%</span></td>
+            <td style="padding:6px 8px;color:#8b949e" title="Exit proximity (Formula B: (price-centre)/halfWidth) — used by rule2 upside exit">Exit &#x25B2;</td>
+            <td style="padding:6px 8px" title="Fires rule2 T1_UPSIDE when Exit ▲ ≥ threshold"><b style="color:${proxUpPct >= upThreshPct ? '#58a6ff' : '#c9d1d9'}">${proxUpPct}%</b><span style="color:#8b949e">/${upThreshPct}%</span></td>
+          </tr>
+          <tr style="border-bottom:1px solid #21262d">
+            <td style="padding:6px 8px;color:#8b949e" title="Range position (Formula A: (upper-price)/rangeWidth) — linear within range, display only, NOT used for exit">Range pos &#x25BC;</td>
+            <td style="padding:6px 8px;color:#c9d1d9">${rangePosFromLowerPct.toFixed(1)}%<span style="color:#8b949e;font-size:10px"> (0=upper, 100=lower)</span></td>
+            <td style="padding:6px 8px;color:#8b949e" title="Range position from lower bound — display only">Range pos &#x25B2;</td>
+            <td style="padding:6px 8px;color:#c9d1d9">${rangePosFromUpperPct.toFixed(1)}%<span style="color:#8b949e;font-size:10px"> (0=lower, 100=upper)</span></td>
           </tr>
           <tr style="border-bottom:1px solid #21262d">
             <td style="padding:6px 8px;color:#8b949e">Range</td>
@@ -4193,13 +4193,17 @@ ${NAV_HTML}
 
 <!-- SECTION 5: Re-entry -->
 <div class="cfg-section">
-  <h3>5. Re-entry (Rule 3)</h3>
+  <h3>5. Post-Upside Re-entry</h3>
   <table>
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('pullbackThresholdPct', c.pullbackThresholdPct, 2.5, 'Pullback threshold (%)', 'Price must drop this % from peak to re-enter.', 'At 5%: bigger pullback, better entry but longer wait. At 1%: quick re-entry.')}
-    ${field('timeoutHours', c.timeoutHours, 4, 'Timeout (hours)', 'Re-enter after this long even without pullback.', 'At 8h: more patience. At 1h: re-enters quickly, prioritizes fee earning.')}
+    ${field('upsideChurnCooldownMin', c.upsideChurnCooldownMin, 5, 'Upside churn cooldown (min)', 'Block re-entry for this long after T1_UPSIDE/OOR_ABOVE exit.', 'At 10: longer wait. At 2: quick re-entry.')}
+    ${field('postUpsideOffsetRanging', c.postUpsideOffsetRanging, -0.005, 'Centre offset RANGING', 'Shift range centre by this fraction after upside exit. Negative = lower.', '-0.005 = -0.5%. Centres range slightly below market price.')}
+    ${field('postUpsideOffsetBullish', c.postUpsideOffsetBullish, 0.000, 'Centre offset BULLISH', 'Centre offset for bullish regime. 0 = no shift.', '0 = trust the trend. -0.003 = small downward bias.')}
+    ${field('postUpsideOffsetBearish', c.postUpsideOffsetBearish, -0.010, 'Centre offset BEARISH', 'Centre offset for bearish regime. More negative = larger shift.', '-0.01 = -1%. Larger shift anticipates reversal.')}
+    ${field('postUpsideOffsetExtreme', c.postUpsideOffsetExtreme, -0.005, 'Centre offset EXTREME', 'Centre offset for extreme regime.', '-0.005 = -0.5%.')}
+    ${field('postUpsideFloorMultiplier', c.postUpsideFloorMultiplier, 0.5, 'Floor multiplier (post-upside)', 'Fraction of USDC reserve floor to enforce during post-upside pre-open SOL buy. Lower = more aggressive SOL purchase for fuller deployment.', '0.5 = 50% of normal floor. 1.0 = normal floor. 0.25 = very aggressive.')}
     ${field('flashCrashPct', c.flashCrashPct, 5, 'Flash crash threshold (%)', 'Drop this % in ~5 min = flash crash. Triggers cooldown.', 'At 10%: only extreme crashes trigger. At 3%: even moderate drops pause.')}
-    ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 15, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash. Also resets peak + timeout.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
+    ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 15, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
   </table>
 </div>
 
@@ -4677,7 +4681,7 @@ pullbacks and downside free-falls.</div>
     <div class="example-text">Bot watches from $80: needs 2.5% pullback to $78 or waits until 7:50.</div>
     <div class="example-note">Without this fix, the old 4h timeout would have already expired and the bot would jump in at $80 right after the 15-min pause &#x2014; right into a still-falling market.</div>
   </div>
-  <div class="trigger">Runs: every 30s cycle while WAITING_PULLBACK</div>
+  <div class="trigger">Runs: flash crash detection still active during IDLE re-entry</div>
 </div>
 
 <div class="rule-card">
@@ -4860,8 +4864,8 @@ exists and is earning fees.</div>
     <rect x="235" y="20" width="130" height="50" rx="10" fill="#21262d" stroke="#22c55e" stroke-width="2"/>
     <text x="300" y="50" text-anchor="middle" fill="#22c55e" font-size="14" font-weight="bold">ACTIVE</text>
     <rect x="440" y="110" width="130" height="50" rx="10" fill="#21262d" stroke="#eab308" stroke-width="2"/>
-    <text x="505" y="130" text-anchor="middle" fill="#eab308" font-size="13" font-weight="bold">WAITING</text>
-    <text x="505" y="148" text-anchor="middle" fill="#eab308" font-size="13" font-weight="bold">PULLBACK</text>
+    <text x="505" y="130" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="bold">(REMOVED)</text>
+    <text x="505" y="148" text-anchor="middle" fill="#8b949e" font-size="10">Upside → IDLE</text>
     <!-- IDLE → ACTIVE -->
     <path d="M 130 110 Q 180 50 235 45" fill="none" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowG)"/>
     <text x="155" y="65" fill="#22c55e" font-size="9">Open position</text>
@@ -4912,14 +4916,13 @@ exists and is earning fees.</div>
   <div style="font-size:12px;color:#c9d1d9;line-height:1.8">
     <div style="margin-bottom:8px"><b style="color:#8b949e">IDLE &#x2192; ACTIVE:</b> Bot opens a position (startup, resume from pause, or first run). Rules 1, 4, 5 calculate range and deploy capital.</div>
     <div style="margin-bottom:8px"><b style="color:#22c55e">ACTIVE &#x2192; ACTIVE (self-loop):</b> OOR below or Rule 2 downside exit. Bot closes position, re-checks regime (may update parameters), and reopens at current price. If flash crash detected during OOR below, enters cooldown instead of reopening (free-fall protection).</div>
-    <div style="margin-bottom:8px"><b style="color:#eab308">ACTIVE &#x2192; WAITING_PULLBACK:</b> Rule 2 upside exit or OOR above. Price rose past the range. Bot closes position and waits for a pullback before re-entering (Rule 3). Avoids buying at a local top.</div>
-    <div style="margin-bottom:8px"><b style="color:#22c55e">WAITING_PULLBACK &#x2192; ACTIVE:</b> Either price pulls back enough (configurable %, default 1%) or timeout expires (configurable, default 15 min). Bot opens new position. If flash crash detected during wait, cooldown enforced (configurable, default 15 min) and peak/timeout reset.</div>
+    <div style="margin-bottom:8px"><b style="color:#eab308">ACTIVE &#x2192; IDLE (upside exit):</b> Rule 2 upside exit or OOR above. Price rose past the range. Bot closes position → IDLE. A 5-min upside churn cooldown blocks immediate re-entry. When re-opening, the range centre is offset downward (configurable per regime) to avoid buying at the local top.</div>
     <div style="margin-bottom:8px"><b style="color:#a855f7">TX Backoff:</b> If position open/close fails repeatedly (RPC errors), the bot backs off exponentially: 60s &#x2192; 120s &#x2192; 240s &#x2192; 300s cap. Resets on first successful TX.</div>
     <div style="margin-bottom:8px"><b style="color:#8b949e">ACTIVE &#x2192; IDLE:</b> User pauses bot or closes position from dashboard. Position may stay open (paused) or be closed (manual close).</div>
     <div><b style="color:#ef4444">Emergency Stop:</b> From any state &#x2192; IDLE. Closes position if open, saves state, exits process.</div>
   </div>
   <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;font-size:11px;color:#8b949e;line-height:1.6">
-    <b style="color:#a855f7">Crash recovery:</b> All state (including pullback watch status, peak price, and timeout start) is persisted to DB every cycle and on shutdown. On restart, the bot resumes in the correct state &#x2014; if it was waiting for a pullback, it continues waiting rather than opening a new position immediately.
+    <b style="color:#a855f7">Crash recovery:</b> All state (including last upside exit price/time) is persisted to DB every cycle and on shutdown. On restart, the bot resumes in the correct state with upside churn cooldown still active if applicable.
   </div>
 </div>
 

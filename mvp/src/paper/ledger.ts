@@ -294,12 +294,11 @@ export class PaperTradingEngine {
         const proxPct = (prox.proxToUpper * 100).toFixed(0);
         const threshPct = (params.proxThresholdUpper * 100).toFixed(0);
         this.closePosition(price, 'T1_UPSIDE', db,
-          `Rule 2 early upside exit: price $${price.toFixed(2)} nearing upper bound. Proximity to upper edge: ${proxPct}% (threshold: ${threshPct}%). Closed position, entering pullback watch mode (Rule 3).`);
-        // Start pullback watch
+          `Rule 2 early upside exit: price $${price.toFixed(2)} nearing upper bound. Proximity to upper edge: ${proxPct}% (threshold: ${threshPct}%). Closed position → IDLE with upside churn cooldown.`);
         this.pullbackWatchActive = true;
         this.pullbackPeakPrice = price;
         this.pullbackWatchStart = now;
-        this.botState = 'WAITING_PULLBACK';
+        this.botState = 'IDLE';
         return 'T1_UPSIDE';
       }
     } else {
@@ -314,11 +313,11 @@ export class PaperTradingEngine {
       }
       if (price > this.bot.openPosition.priceUpper) {
         this.closePosition(price, 'OOR_ABOVE', db,
-          `Price $${price.toFixed(2)} rose above range upper bound $${this.bot.openPosition.priceUpper.toFixed(2)}. Position is 100% USDC. Closed position, entering pullback watch (Rule 3) — waiting for ${REENTRY.PULLBACK_THRESHOLD_PCT}% pullback or ${REENTRY.TIMEOUT_HOURS}h timeout before re-entry.`);
+          `Price $${price.toFixed(2)} rose above range upper bound $${this.bot.openPosition.priceUpper.toFixed(2)}. Position is 100% USDC. Closed position → IDLE with upside churn cooldown.`);
         this.pullbackWatchActive = true;
         this.pullbackPeakPrice = price;
         this.pullbackWatchStart = now;
-        this.botState = 'WAITING_PULLBACK';
+        this.botState = 'IDLE';
         return 'OOR_ABOVE';
       }
     }

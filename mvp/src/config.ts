@@ -34,11 +34,20 @@ export const runtime = {
   minDeployUsdc: 10,
   deployRatioTolerance: 0.02,
 
-  // Re-entry (Rule 3)
+  // Re-entry (Rule 3) — DEPRECATED pullback fields kept for compat
   pullbackThresholdPct: REENTRY.PULLBACK_THRESHOLD_PCT as number,
   timeoutHours: REENTRY.TIMEOUT_HOURS as number,
   flashCrashPct: REENTRY.FLASH_CRASH_PCT as number,
   flashCrashWaitMinutes: REENTRY.FLASH_CRASH_WAIT_MINUTES as number,
+
+  // Post-upside re-entry
+  upsideChurnCooldownMin: 5,
+  postUpsideOffsetRanging:  -0.005,
+  postUpsideOffsetBullish:   0.000,
+  postUpsideOffsetBearish:  -0.010,
+  postUpsideOffsetExtreme:  -0.005,
+  postUpsideFloorMultiplier: 0.5,  // pre-open SOL buy: relax USDC reserve floor to this fraction when post-upside (0.5 = 50%)
+  postUpsideMaxBuyAboveBasis: 0.02, // skip post-upside pre-open SOL buy when currentPrice > basis × (1 + this) — avoids ratcheting cost basis
 
   // Circuit Breakers
   dailyLossLimitPct: RISK.DAILY_LOSS_LIMIT_PCT as number,
@@ -199,6 +208,15 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const v18 = nv('flashCrashPct', 1, 30); if (v18 != null) runtime.flashCrashPct = v18;
   const v19 = nv('flashCrashWaitMinutes', 1, 120); if (v19 != null) runtime.flashCrashWaitMinutes = v19;
 
+  // Post-upside re-entry
+  const vUCC = nv('upsideChurnCooldownMin', 0, 60); if (vUCC != null) runtime.upsideChurnCooldownMin = vUCC;
+  const vPOR = nv('postUpsideOffsetRanging', -0.05, 0.05); if (vPOR != null) runtime.postUpsideOffsetRanging = vPOR;
+  const vPOB = nv('postUpsideOffsetBullish', -0.05, 0.05); if (vPOB != null) runtime.postUpsideOffsetBullish = vPOB;
+  const vPOBe = nv('postUpsideOffsetBearish', -0.05, 0.05); if (vPOBe != null) runtime.postUpsideOffsetBearish = vPOBe;
+  const vPOE = nv('postUpsideOffsetExtreme', -0.05, 0.05); if (vPOE != null) runtime.postUpsideOffsetExtreme = vPOE;
+  const vPUFM = nv('postUpsideFloorMultiplier', 0, 1); if (vPUFM != null) runtime.postUpsideFloorMultiplier = vPUFM;
+  const vPUMBAB = nv('postUpsideMaxBuyAboveBasis', 0, 0.10); if (vPUMBAB != null) runtime.postUpsideMaxBuyAboveBasis = vPUMBAB;
+
   // Circuit breakers
   const v20 = nv('dailyLossLimitPct', 1, 50); if (v20 != null) runtime.dailyLossLimitPct = v20;
   const v21 = nv('weeklyDrawdownLimitPct', 1, 80); if (v21 != null) runtime.weeklyDrawdownLimitPct = v21;
@@ -332,6 +350,13 @@ export function exportConfig(): Record<string, string> {
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);
   out['flashCrashWaitMinutes'] = String(runtime.flashCrashWaitMinutes);
+  out['upsideChurnCooldownMin'] = String(runtime.upsideChurnCooldownMin);
+  out['postUpsideOffsetRanging'] = String(runtime.postUpsideOffsetRanging);
+  out['postUpsideOffsetBullish'] = String(runtime.postUpsideOffsetBullish);
+  out['postUpsideOffsetBearish'] = String(runtime.postUpsideOffsetBearish);
+  out['postUpsideOffsetExtreme'] = String(runtime.postUpsideOffsetExtreme);
+  out['postUpsideFloorMultiplier'] = String(runtime.postUpsideFloorMultiplier);
+  out['postUpsideMaxBuyAboveBasis'] = String(runtime.postUpsideMaxBuyAboveBasis);
   out['dailyLossLimitPct'] = String(runtime.dailyLossLimitPct);
   out['weeklyDrawdownLimitPct'] = String(runtime.weeklyDrawdownLimitPct);
   out['maxIlPct'] = String(runtime.maxIlPct);

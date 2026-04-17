@@ -65,6 +65,7 @@ export class LiveExecutor {
   public getProximityDeployThreshold: (() => number) | null = null;
   public getCurrentRegime: (() => string) | null = null;
   public getCostBasis: (() => number) | null = null;
+  public isPostUpsideOpen = false;
   public cumGasLamports = 0;
   public txCount = 0;
 
@@ -249,23 +250,45 @@ export class LiveExecutor {
       const deviationPct = deployTarget > 0 ? Math.abs(solDeficit * currentPrice) / deployTarget : 0;
 
       if (solDeficit > 0.5 && solDeficit * currentPrice > 50 && deviationPct > 0.20) {
-        // Need more SOL — buy with USDC, but check reserve floor first
+        // Post-upside basis-cap guard: skip the pre-open SOL buy when price is too far above
+        // weighted-avg cost basis. Buying large SOL deltas at a premium ratchets basis up,
+        // which then causes BasisGate to block subsequent re-opens on minor pullbacks.
+        // Position opens SOL-constrained instead; auto-deploy + idle rebalance fill it gradually.
+        const basisForCap = this.getCostBasis ? this.getCostBasis() : 0;
+        const maxBuyAboveBasis = runtime.postUpsideMaxBuyAboveBasis ?? 0.02;
+        if (this.isPostUpsideOpen && basisForCap > 0 && currentPrice > basisForCap * (1 + maxBuyAboveBasis)) {
+          const basisCap = basisForCap * (1 + maxBuyAboveBasis);
+          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] Post-upside SOL buy skipped — price $${currentPrice.toFixed(2)} > basis cap $${basisCap.toFixed(2)} (basis $${basisForCap.toFixed(2)} × ${(1 + maxBuyAboveBasis).toFixed(3)}). Opening SOL-constrained to protect cost basis.`, timestamp: Date.now() }));
+          // Fall through to deposit with available SOL/USDC — do NOT enter the buy/skip-by-floor branch.
+        } else {
+        // Need more SOL — buy with USDC. Partial-buy: swap as much as the floor allows
+        // instead of all-or-nothing. Post-upside relaxes floor (default 50%) for fuller deployment.
         const reserveFloorBuy = this.getReserveFloor ? this.getReserveFloor() : 0;
-        const usdcToSwap = Math.min(solDeficit * currentPrice * 0.95, usdcAvailable - 2);
-        const usdcAfterBuy = usdcBal - usdcToSwap - idealUsdc;
-        const floorSafe = usdcAfterBuy >= reserveFloorBuy;
-        if (usdcToSwap > 1 && floorSafe) {
-          console.log(JSON.stringify({ level: 'info', msg: `Pre-open swap: $${usdcToSwap.toFixed(2)} USDC -> SOL (need ${solDeficit.toFixed(4)} SOL, deviation ${(deviationPct*100).toFixed(0)}%). USDC after: $${usdcAfterBuy.toFixed(0)} (floor: $${reserveFloorBuy.toFixed(0)})`, timestamp: Date.now() }));
-          await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: USDC -> SOL for balanced deposit (need ${solDeficit.toFixed(2)} SOL)`);
+        const floorMultiplier = this.isPostUpsideOpen ? runtime.postUpsideFloorMultiplier : 1.0;
+        const effectiveFloor = reserveFloorBuy * floorMultiplier;
+        const fullSwapUsdc = solDeficit * currentPrice * 0.95;
+        const usdcAvailableForSwap = Math.max(0, usdcBal - idealUsdc - effectiveFloor);
+        const hardCap = Math.max(0, usdcAvailable - 2);
+        const usdcToSwap = Math.min(fullSwapUsdc, usdcAvailableForSwap, hardCap);
+
+        if (usdcToSwap < 50) {
+          console.log(JSON.stringify({ level: 'warn', msg: `[PreOpen] Insufficient USDC above floor for SOL buy: wallet $${usdcBal.toFixed(0)} − idealUsdc $${idealUsdc.toFixed(0)} − floor $${effectiveFloor.toFixed(0)} = $${usdcAvailableForSwap.toFixed(0)} (need ≥$50). Depositing with available ratio instead.`, timestamp: Date.now() }));
+          alertFloorCheckBlocked({ usdcRemaining: usdcAvailableForSwap, floor: effectiveFloor, regime: this.getCurrentRegime?.() ?? 'UNKNOWN', price: currentPrice });
+        } else {
+          const solToBuy = usdcToSwap / currentPrice;
+          const isPartial = usdcToSwap < fullSwapUsdc - 0.01;
+          const usdcAfterBuy = usdcBal - usdcToSwap - idealUsdc;
+          const floorLabel = this.isPostUpsideOpen ? `relaxed floor $${effectiveFloor.toFixed(0)}` : `floor $${reserveFloorBuy.toFixed(0)}`;
+          const modeLabel = this.isPostUpsideOpen ? ' (post-upside relaxed floor)' : '';
+          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL buy: ${isPartial ? 'PARTIAL' : 'FULL'} — ${solToBuy.toFixed(3)} SOL ($${usdcToSwap.toFixed(2)})${modeLabel}. Ideal deficit: ${solDeficit.toFixed(2)} SOL ($${fullSwapUsdc.toFixed(0)}). USDC after: $${usdcAfterBuy.toFixed(0)} (${floorLabel}).`, timestamp: Date.now() }));
+          await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: ${isPartial ? 'partial' : 'full'} USDC -> SOL (${solToBuy.toFixed(2)} SOL of ${solDeficit.toFixed(2)} needed)`);
           await new Promise(r => setTimeout(r, 4000));
           solBal = await this.getSolBalance();
           usdcBal = await this.getUsdcBalance();
           solAvailable = Math.max(0, solBal - getSolReserve());
           usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
-        } else if (usdcToSwap > 1 && !floorSafe) {
-          console.log(JSON.stringify({ level: 'warn', msg: `[PreOpen] Floor check failed: swap $${usdcToSwap.toFixed(0)} USDC→SOL would leave $${usdcAfterBuy.toFixed(0)} USDC (floor: $${reserveFloorBuy.toFixed(0)}). Depositing with available ratio instead.`, timestamp: Date.now() }));
-          alertFloorCheckBlocked({ usdcRemaining: usdcAfterBuy, floor: reserveFloorBuy, regime: this.getCurrentRegime?.() ?? 'UNKNOWN', price: currentPrice });
         }
+        } // end else (basis cap not exceeded)
       } else if (solDeficit < 0) {
         // SOL-heavy wallet — never sell SOL. Deposit SOL-constrained, respect reserve floor.
         const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
@@ -577,7 +600,7 @@ export class LiveExecutor {
       const solSwapped = solBefore - solAfter;
       const usdcReceived = usdcAfter - usdcBefore;
       console.log(JSON.stringify({ level: 'info', msg: `Harvest SOL conversion (${swapResult.provider}): ${solSwapped.toFixed(6)} SOL → ${usdcReceived.toFixed(2)} USDC (${(convertPct * 100).toFixed(0)}% of harvested)`, timestamp: Date.now() }));
-      if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'SOL', toToken: 'USDC', fromAmount: solSwapped, toAmount: usdcReceived, reason: `Harvest SOL→USDC conversion (${swapResult.provider}): ${(convertPct * 100).toFixed(0)}% of ${solAmount.toFixed(6)} SOL harvested fees.` });
+      // onSwap already fired by doSwap (executor.ts:139) — no second call here, prevents duplicate swap_ledger row + double basis update.
       return { solSwapped, usdcReceived };
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `Harvest SOL conversion failed: ${String(err)}`, timestamp: Date.now() }));
@@ -873,9 +896,7 @@ export class LiveExecutor {
         usdcBal = await this.getUsdcBalance();
         solAvailable = Math.max(0, solBal - solReserve);
         usdcAvailable = Math.max(0, usdcBal - usdcReserve);
-        const solReceived = solBal - solBeforeSwap;
-        const usdcSpent = usdcBeforeSwap - usdcBal;
-        if (this.onSwap) this.onSwap({ timestamp: Date.now(), fromToken: 'USDC', toToken: 'SOL', fromAmount: usdcSpent, toAmount: solReceived, reason: `Add liquidity: swapped ${usdcSpent.toFixed(2)} USDC -> ${solReceived.toFixed(4)} SOL to match position ratio` });
+        // onSwap already fired by doSwap (executor.ts:139) — no second call here, prevents duplicate swap_ledger row + double basis update.
       }
     } else if (usdcDeficit > 1) {
       // SOL-heavy — never sell SOL in auto-deploy. Deposit SOL-constrained.

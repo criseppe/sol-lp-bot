@@ -27,9 +27,11 @@ export interface BotStateRow {
   realized_il?: number;
   tx_count?: number;
   cum_gas_lamports?: number;
-  pullback_active?: number;
-  pullback_peak?: number;
-  pullback_start?: number;
+  pullback_active?: number;  // DEPRECATED — kept for DB compat
+  pullback_peak?: number;    // DEPRECATED
+  pullback_start?: number;   // DEPRECATED
+  last_upside_exit_price?: number;
+  last_upside_exit_ts?: number;
   last_harvest_time?: number;
   // Cost basis tracking
   sol_cost_basis?: number;
@@ -236,6 +238,11 @@ export function initDb(dbPath: string): Database.Database {
   migrate(`ALTER TABLE swap_ledger ADD COLUMN fee_lamports INTEGER DEFAULT NULL`);
   migrate(`ALTER TABLE swap_ledger ADD COLUMN price_impact_pct REAL DEFAULT NULL`);
   migrate(`ALTER TABLE swap_ledger ADD COLUMN source TEXT DEFAULT 'bot'`);
+  migrate(`ALTER TABLE swap_ledger ADD COLUMN swap_hash TEXT DEFAULT NULL`);
+  // Partial unique index on swap_hash: rejects duplicate swaps (e.g. Jupiter+Orca
+  // double-execution when confirmation timed out). NULL values are allowed for
+  // legacy rows that pre-date the hash.
+  migrate(`CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_ledger_hash ON swap_ledger(swap_hash) WHERE swap_hash IS NOT NULL`);
   // Backfill: tag manual swaps detected via balance diff
   try {
     db.exec(`UPDATE swap_ledger SET source = 'manual' WHERE (reason LIKE '%Manual swap%' OR reason LIKE '%manual%' OR reason LIKE '%balance diff%') AND (source IS NULL OR source = 'bot')`);
@@ -244,11 +251,15 @@ export function initDb(dbPath: string): Database.Database {
     console.log(JSON.stringify({ level: 'warn', msg: `[Migration] backfill swap source: ${e?.message ?? 'unknown'}`, timestamp: Date.now() }));
   }
 
-  // Migration: add pullback state columns to bot_state
+  // Migration: add pullback state columns to bot_state (DEPRECATED — kept for compat)
   migrate(`ALTER TABLE bot_state ADD COLUMN pullback_active INTEGER DEFAULT 0`);
   migrate(`ALTER TABLE bot_state ADD COLUMN pullback_peak REAL DEFAULT 0`);
   migrate(`ALTER TABLE bot_state ADD COLUMN pullback_start INTEGER DEFAULT 0`);
   migrate(`ALTER TABLE bot_state ADD COLUMN last_harvest_time INTEGER DEFAULT 0`);
+
+  // Migration: add upside exit tracking columns to bot_state
+  migrate(`ALTER TABLE bot_state ADD COLUMN last_upside_exit_price REAL DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN last_upside_exit_ts INTEGER DEFAULT 0`);
 
   // Migration: add rule2_active column to existing rebalance_events tables
   migrate(`ALTER TABLE rebalance_events ADD COLUMN rule2_active INTEGER DEFAULT 1`);
@@ -402,8 +413,8 @@ export function getRebalanceEvents(db: Database.Database, limit: number): Rebala
 
 export function upsertBotState(db: Database.Database, state: BotStateRow): void {
   db.prepare(`
-    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated)
-    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated)
+    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts)
+    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated, @last_upside_exit_price, @last_upside_exit_ts)
   `).run({
     ...state,
     ledger_json: state.ledger_json ?? null,
@@ -417,6 +428,8 @@ export function upsertBotState(db: Database.Database, state: BotStateRow): void 
     pullback_peak: state.pullback_peak ?? 0,
     pullback_start: state.pullback_start ?? 0,
     last_harvest_time: state.last_harvest_time ?? 0,
+    last_upside_exit_price: state.last_upside_exit_price ?? 0,
+    last_upside_exit_ts: state.last_upside_exit_ts ?? 0,
     sol_cost_basis: state.sol_cost_basis ?? 0,
     sol_total_acquired: state.sol_total_acquired ?? 0,
     sol_total_cost: state.sol_total_cost ?? 0,
@@ -429,7 +442,7 @@ export function upsertBotState(db: Database.Database, state: BotStateRow): void 
 }
 
 export function getBotState(db: Database.Database): BotStateRow | null {
-  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
+  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
   return row ?? null;
 }
 
@@ -783,13 +796,22 @@ export function insertSwapLedger(db: Database.Database, entry: {
   tx_signature?: string | null; fee_lamports?: number | null; price_impact_pct?: number | null;
   source?: string;
 }): void {
-  db.prepare(`INSERT INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after, tx_signature, fee_lamports, price_impact_pct, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  // Dedup key: tx_signature if present (unique per on-chain tx). Otherwise a content
+  // hash of direction + sol_amount + 10s time bucket so a double-insert from retry logic
+  // is rejected by the partial unique index.
+  const swapHash = entry.tx_signature
+    ? `tx:${entry.tx_signature}`
+    : `${entry.direction}|${entry.sol_amount.toFixed(6)}|${Math.floor(entry.timestamp / 10000)}`;
+  const info = db.prepare(`INSERT OR IGNORE INTO swap_ledger (timestamp, direction, sol_amount, usdc_amount, price, reason, pnl_usdc, cost_basis_before, cost_basis_after, tx_signature, fee_lamports, price_impact_pct, source, swap_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     entry.timestamp, entry.direction, entry.sol_amount, entry.usdc_amount,
     entry.price, entry.reason, entry.pnl_usdc, entry.cost_basis_before, entry.cost_basis_after,
     entry.tx_signature ?? null, entry.fee_lamports ?? null, entry.price_impact_pct ?? null,
-    entry.source ?? 'bot',
+    entry.source ?? 'bot', swapHash,
   );
+  if (info.changes === 0) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[swap_ledger] duplicate rejected: hash=${swapHash.slice(0, 40)} direction=${entry.direction} sol=${entry.sol_amount.toFixed(4)} reason=${entry.reason.slice(0, 60)}`, timestamp: Date.now() }));
+  }
 }
 
 export function getSwapLedger(db: Database.Database, limit = 50): any[] {

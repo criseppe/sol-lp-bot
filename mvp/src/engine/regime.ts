@@ -296,6 +296,7 @@ export function detectRegimeTA(
   dailyRegime: Regime | null,
   previousCandidate: Regime | null,
   candidateCount: number,
+  currentPrice: number = 0,
 ): TaRegimeResult {
   // ── Tallies ────────────────────────────────────────────────────────────
   const votes: Record<string, number> = { BULLISH_TREND: 0, BEARISH_TREND: 0, RANGING: 0, EXTREME: 0 };
@@ -459,11 +460,29 @@ export function detectRegimeTA(
   let vetoLog = 'none';
   if (dailyRegime != null && candidate !== 'EXTREME') {
     if (dailyRegime === 'BEARISH_TREND' && candidate === 'BULLISH_TREND') {
-      candidate = 'RANGING';
-      vetoLog = `daily=${dailyRegime} vetoes BULLISH→RANGING`;
+      const strongBullish = bullPts >= 4 || (
+        ta?.rsi14 != null && ta.rsi14 > 64 &&
+        ta?.trendDirection === 'UP' &&
+        ta?.sma20 != null && currentPrice > ta.sma20
+      );
+      if (strongBullish) {
+        vetoLog = `daily=${dailyRegime} would veto BULLISH but conviction override (bullPts=${bullPts}, rsi=${ta?.rsi14?.toFixed(1)}, cross=${ta?.trendDirection}, price=${currentPrice.toFixed(2)} vs sma20=${ta?.sma20?.toFixed(2)})`;
+      } else {
+        candidate = 'RANGING';
+        vetoLog = `daily=${dailyRegime} vetoes BULLISH→RANGING (bullPts=${bullPts}, insufficient conviction)`;
+      }
     } else if (dailyRegime === 'BULLISH_TREND' && candidate === 'BEARISH_TREND') {
-      candidate = 'RANGING';
-      vetoLog = `daily=${dailyRegime} vetoes BEARISH→RANGING`;
+      const strongBearish = bearPts >= 4 || (
+        ta?.rsi14 != null && ta.rsi14 < 36 &&
+        ta?.trendDirection === 'DOWN' &&
+        ta?.sma20 != null && currentPrice < ta.sma20
+      );
+      if (strongBearish) {
+        vetoLog = `daily=${dailyRegime} would veto BEARISH but conviction override (bearPts=${bearPts}, rsi=${ta?.rsi14?.toFixed(1)}, cross=${ta?.trendDirection}, price=${currentPrice.toFixed(2)} vs sma20=${ta?.sma20?.toFixed(2)})`;
+      } else {
+        candidate = 'RANGING';
+        vetoLog = `daily=${dailyRegime} vetoes BEARISH→RANGING (bearPts=${bearPts}, insufficient conviction)`;
+      }
     } else {
       vetoLog = `daily=${dailyRegime}, no conflict`;
     }
@@ -510,16 +529,16 @@ export function detectRegimeTA(
   if (vetoFired) {
     // L1 and TA disagree — inherently ambiguous, reduce deploy
     confidence = 'LOW';
-    deployMultiplier = 0.50;
+    deployMultiplier = 0.75;
   } else if (adjustedScore >= 4) {
     confidence = 'HIGH';
     deployMultiplier = 1.0;
   } else if (adjustedScore >= 2) {
     confidence = 'MEDIUM';
-    deployMultiplier = 0.75;
+    deployMultiplier = 0.85;
   } else {
     confidence = 'LOW';
-    deployMultiplier = 0.50;
+    deployMultiplier = 0.75;
   }
 
   // ── Build log string ──────────────────────────────────────────────────

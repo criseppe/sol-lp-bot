@@ -32,7 +32,7 @@ export const REGIME_PARAMS = {
     rangeWidthPct:        3,
     skewDown:             0.25,
     skewUp:               0.75,
-    proxThresholdLower:   0.72,
+    proxThresholdLower:   0.65,
     proxThresholdUpper:   0.92,
     deployPct:            0.85,
     solReentrySplit:      0.50,
