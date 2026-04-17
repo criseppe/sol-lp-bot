@@ -493,6 +493,26 @@ export function detectRegimeTA(
     vetoLog = 'no daily regime';
   }
 
+  // ── Minimum score margin gate ────────────────────────────────────────
+  // Require a ≥N-point gap between top and runner-up before committing
+  // a *new* candidate. Prevents flipping on razor-thin margins.
+  // EXTREME bypasses (safety).
+  const allScores = [
+    { regime: 'RANGING' as Regime, score: rangPts },
+    { regime: 'BULLISH_TREND' as Regime, score: bullPts },
+    { regime: 'BEARISH_TREND' as Regime, score: bearPts },
+    { regime: 'EXTREME' as Regime, score: extrPts },
+  ].sort((a, b) => b.score - a.score);
+  const topScore = allScores[0].score;
+  const secondScore = allScores[1].score;
+  const scoreMargin = topScore - secondScore;
+  const minMargin = runtime.regimeMinScoreMargin ?? 2;
+  if (candidate !== 'EXTREME' && scoreMargin < minMargin && candidate !== previousCandidate) {
+    vetoLog = (vetoLog ? vetoLog + '; ' : '') +
+      `margin ${scoreMargin} < ${minMargin} — holding ${previousCandidate ?? 'RANGING'}`;
+    candidate = previousCandidate ?? 'RANGING';
+  }
+
   // ── Hysteresis ────────────────────────────────────────────────────────
   let newCandidateCount: number;
   let committedRegime: Regime;

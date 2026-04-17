@@ -11,7 +11,7 @@ import type { RegimeParams } from './types.js';
 export const runtime = {
   // Decision loop
   decisionIntervalSeconds: 60,
-  regimeCheckIntervalMs: 120_000, // 2 minutes between regime checks
+  regimeCheckIntervalMs: 180_000, // 3 minutes between regime checks
   regimeWindowDays: 7,
   trendThreshold: 0.35,
 
@@ -90,6 +90,7 @@ export const runtime = {
   regimeReopenMaxWaitCritical: 15,
   regimeReopenMaxWaitHigh: 45,
   regimeReopenMaxWaitMedium: 120,
+  regimeMinScoreMargin: 2, // min (top−runner-up) TA score gap to commit a new regime candidate
   // Legacy toggle (mapped to regimeReopenEnabled)
   regimeChangeReopenEnabled: true,
 
@@ -250,6 +251,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vRRWC = nv('regimeReopenMaxWaitCritical', 1, 60); if (vRRWC != null) runtime.regimeReopenMaxWaitCritical = vRRWC;
   const vRRWH = nv('regimeReopenMaxWaitHigh', 5, 180); if (vRRWH != null) runtime.regimeReopenMaxWaitHigh = vRRWH;
   const vRRWM = nv('regimeReopenMaxWaitMedium', 10, 360); if (vRRWM != null) runtime.regimeReopenMaxWaitMedium = vRRWM;
+  const vRMin = nv('regimeMinScoreMargin', 0, 7); if (vRMin != null) runtime.regimeMinScoreMargin = vRMin;
   const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
   const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
@@ -332,6 +334,7 @@ export function exportConfig(): Record<string, string> {
   out['regimeReopenMinConfidence'] = runtime.regimeReopenMinConfidence;
   out['regimeReopenMaxPriceVelocity'] = String(runtime.regimeReopenMaxPriceVelocity);
   out['regimeReopenMaxBbWidth'] = String(runtime.regimeReopenMaxBbWidth);
+  out['regimeMinScoreMargin'] = String(runtime.regimeMinScoreMargin);
   out['regimeReopenMaxWaitCritical'] = String(runtime.regimeReopenMaxWaitCritical);
   out['regimeReopenMaxWaitHigh'] = String(runtime.regimeReopenMaxWaitHigh);
   out['regimeReopenMaxWaitMedium'] = String(runtime.regimeReopenMaxWaitMedium);

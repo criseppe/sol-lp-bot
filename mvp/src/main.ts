@@ -89,6 +89,7 @@ let reopenPendingUrgency: string | null = null;
 let reopenPendingOldRegime: string | null = null;
 let lastPositionCloseTs = 0;
 let lastBbWidth: number | null = null;
+let lastRsi: number | null = null;
 let lastHoldLogTime = 0;
 let currentLiveData: LiveData | null = null;
 let lastPendingFeesCheck = 0;
@@ -877,6 +878,7 @@ async function main() {
           ta_data_age_min: Math.round((Date.now() - liveLastRegimeCheck) / 60000),
         });
         if (ta?.bbWidth != null) lastBbWidth = ta.bbWidth;
+        if (ta?.rsi14 != null) lastRsi = ta.rsi14;
       }
 
       // Prune old price ticks once per day
@@ -1245,9 +1247,17 @@ function shouldReopenForRegime(params: {
   // Width threshold gate
   const targetParams = runtime.regimeParams[currentRegime] ?? getRegimeParams(currentRegime as Regime);
   const targetWidth = targetParams.rangeWidthPct;
-  const widthRatio = targetWidth > 0 ? params.currentRangeWidthPct / targetWidth : 1;
-  if (widthRatio < rule.widthThreshold && rule.urgency !== 'CRITICAL') {
-    return { shouldReopen: false, reason: `width ratio ${widthRatio.toFixed(2)} < threshold ${rule.widthThreshold}` };
+  const currentWidthPct = params.currentRangeWidthPct;
+  const widthRatio = targetWidth > 0 ? currentWidthPct / targetWidth : 1;
+
+  const isTooWide = widthRatio >= rule.widthThreshold;
+  const isTooNarrow = rule.widthThreshold > 0 ? widthRatio <= (1 / rule.widthThreshold) : false;
+  const skewMismatch = true; // always true since regimes differ in shouldReopenForRegime
+
+  const widthGatePasses = isTooWide || isTooNarrow || skewMismatch;
+
+  if (!widthGatePasses && rule.urgency !== 'CRITICAL') {
+    return { shouldReopen: false, reason: `width ratio ${widthRatio.toFixed(2)} within acceptable range` };
   }
 
   // Proximity gate — bypassed for CRITICAL and HIGH urgency (urgency overrides timing)
@@ -2416,6 +2426,15 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
       postUpsideNote = ` [PostUpside] Centre offset ${(offset * 100).toFixed(1)}%: $${price.toFixed(2)} → $${centrePrice.toFixed(2)} (upside exit ${minsSinceUpside.toFixed(1)}min ago @ $${lastUpsideExitPrice.toFixed(2)}).`;
       console.log(JSON.stringify({ level: 'info', msg: `[PostUpside] Centre offset ${(offset * 100).toFixed(1)}%: $${price.toFixed(2)} → $${centrePrice.toFixed(2)} (last upside exit ${minsSinceUpside.toFixed(1)}min ago @ $${lastUpsideExitPrice.toFixed(2)})`, timestamp: Date.now() }));
     }
+  }
+
+  // Defensive centre offset in BULLISH when RSI is oversold — prevents opening
+  // a range centred too high when the market is actually weak.
+  if (liveRegime === 'BULLISH_TREND' && lastRsi != null && lastRsi < 45) {
+    const rsiOffset = -0.003; // -0.3%
+    const before = centrePrice;
+    centrePrice = centrePrice * (1 + rsiOffset);
+    console.log(JSON.stringify({ level: 'info', msg: `[OpenPosition] BULLISH RSI-weak offset ${(rsiOffset * 100).toFixed(1)}%: centre $${before.toFixed(2)} → $${centrePrice.toFixed(2)} (rsi=${lastRsi.toFixed(1)})`, timestamp: Date.now() }));
   }
 
   // Post-upside: override deployPct to 100% for max USDC-constrained deployment,
