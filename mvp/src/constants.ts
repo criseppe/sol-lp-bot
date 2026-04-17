@@ -96,8 +96,8 @@ export const REGIME_TRANSITION_RULES: Record<string, RegimeTransitionRule> = {
   'BEARISH_TREND→BULLISH_TREND':  { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
   'BEARISH_TREND→EXTREME':        { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
   'EXTREME→RANGING':              { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
-  'EXTREME→BULLISH_TREND':        { urgency: 'MEDIUM',   stableMinutes: 20, widthThreshold: 1.3 },
-  'EXTREME→BEARISH_TREND':        { urgency: 'MEDIUM',   stableMinutes: 20, widthThreshold: 1.3 },
+  'EXTREME→BULLISH_TREND':        { urgency: 'HIGH',     stableMinutes: 10, widthThreshold: 1.2 },
+  'EXTREME→BEARISH_TREND':        { urgency: 'CRITICAL', stableMinutes: 5,  widthThreshold: 1.0 },
 };
 
 // Jupiter aggregator

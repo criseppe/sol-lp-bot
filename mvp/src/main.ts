@@ -1231,12 +1231,14 @@ function shouldReopenForRegime(params: {
     return { shouldReopen: false, reason: `width ratio ${widthRatio.toFixed(2)} < threshold ${rule.widthThreshold}` };
   }
 
-  // Proximity gate
-  if (params.proxToLower > runtime.regimeReopenMaxProximity) {
-    return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} > max ${runtime.regimeReopenMaxProximity}` };
-  }
-  if (params.proxToLower < runtime.regimeReopenMinProximity) {
-    return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} < min ${runtime.regimeReopenMinProximity}` };
+  // Proximity gate — bypassed for CRITICAL and HIGH urgency (urgency overrides timing)
+  if (rule.urgency !== 'CRITICAL' && rule.urgency !== 'HIGH') {
+    if (params.proxToLower > runtime.regimeReopenMaxProximity) {
+      return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} > max ${runtime.regimeReopenMaxProximity}` };
+    }
+    if (params.proxToLower < runtime.regimeReopenMinProximity) {
+      return { shouldReopen: false, reason: `proxToLower ${params.proxToLower.toFixed(2)} < min ${runtime.regimeReopenMinProximity}` };
+    }
   }
 
   // Pending fees gate
@@ -1278,11 +1280,14 @@ function isGoodReopenMoment(params: {
     return { good: false, reason: 'LOW urgency — waiting for natural exit' };
   }
 
-  if (params.proxToLower > 0.68) {
-    return { good: false, reason: `near lower exit (prox ${(params.proxToLower * 100).toFixed(0)}%) — let natural exit happen` };
-  }
-  if (params.proxToLower < 0.32) {
-    return { good: false, reason: `near upper exit (prox ${(params.proxToLower * 100).toFixed(0)}%) — let natural exit happen` };
+  // Proximity gate — bypassed for CRITICAL and HIGH urgency (urgency overrides timing)
+  if (params.urgency !== 'CRITICAL' && params.urgency !== 'HIGH') {
+    if (params.proxToLower > 0.68) {
+      return { good: false, reason: `near lower exit (prox ${(params.proxToLower * 100).toFixed(0)}%) — let natural exit happen` };
+    }
+    if (params.proxToLower < 0.32) {
+      return { good: false, reason: `near upper exit (prox ${(params.proxToLower * 100).toFixed(0)}%) — let natural exit happen` };
+    }
   }
 
   const maxVelocity = runtime.regimeReopenMaxPriceVelocity ?? 0.30;
