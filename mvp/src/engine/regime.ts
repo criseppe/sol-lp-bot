@@ -1,6 +1,7 @@
 import type { Regime, RegimeParams } from '../types.js';
 import { REGIME_PARAMS } from '../constants.js';
 import type { TechnicalAnalysis, MarketSignals } from '../data/market.js';
+import { runtime } from '../config.js';
 
 export function stdDev(values: number[]): number {
   if (values.length === 0) return 0;
@@ -321,7 +322,7 @@ export function detectRegimeTA(
       if (ta.bbWidth < 1.5) {
         votes['RANGING'] += 2;
         voteLog.push(`bbW=${ta.bbWidth.toFixed(1)}<1.5→R+2`);
-      } else if (ta.bbWidth <= 3.0) {
+      } else if (ta.bbWidth <= runtime.extremeBbWidthThreshold) {
         // 1pt to trend direction, 1pt to RANGING
         if (ta.trendDirection === 'UP') {
           votes['BULLISH_TREND'] += 1;
@@ -336,25 +337,25 @@ export function detectRegimeTA(
         votes['RANGING'] += 1;
         voteLog.push('bbW_mid→R+1');
       } else {
-        // bbWidth > 3.0
+        // bbWidth > extremeBbWidthThreshold
         votes['EXTREME'] += 2;
-        voteLog.push(`bbW=${ta.bbWidth.toFixed(1)}>3→E+2`);
+        voteLog.push(`bbW=${ta.bbWidth.toFixed(1)}>${runtime.extremeBbWidthThreshold}→E+2`);
       }
     }
 
     // RSI (1 point) — 2-point dead zone at boundaries to reduce flipping
     if (ta.rsi14 != null) {
-      if (ta.rsi14 >= 62 && ta.rsi14 <= 75) {
+      if (ta.rsi14 >= 62 && ta.rsi14 <= runtime.extremeRsiHigh) {
         votes['BULLISH_TREND'] += 1;
         voteLog.push(`rsi=${ta.rsi14.toFixed(0)}→B+1`);
-      } else if (ta.rsi14 >= 25 && ta.rsi14 <= 38) {
+      } else if (ta.rsi14 >= runtime.extremeRsiLow && ta.rsi14 <= 38) {
         votes['BEARISH_TREND'] += 1;
         voteLog.push(`rsi=${ta.rsi14.toFixed(0)}→Be+1`);
       } else if (ta.rsi14 > 38 && ta.rsi14 < 62) {
         votes['RANGING'] += 1;
         voteLog.push(`rsi=${ta.rsi14.toFixed(0)}→R+1`);
       } else {
-        // rsi14 > 75 or < 25
+        // rsi14 > extremeRsiHigh or < extremeRsiLow
         votes['EXTREME'] += 1;
         voteLog.push(`rsi=${ta.rsi14.toFixed(0)}→E+1`);
       }
@@ -362,9 +363,9 @@ export function detectRegimeTA(
 
     // ATR (1 point)
     if (ta.atr14 != null) {
-      if (ta.atr14 > 0.60) {
+      if (ta.atr14 > runtime.extremeAtrThreshold) {
         votes['EXTREME'] += 1;
-        voteLog.push(`atr=$${ta.atr14.toFixed(2)}>0.60→E+1`);
+        voteLog.push(`atr=$${ta.atr14.toFixed(2)}>${runtime.extremeAtrThreshold.toFixed(2)}→E+1`);
       } else if (ta.atr14 >= 0.30) {
         // 1pt to current trend direction
         if (ta.trendDirection === 'UP') {

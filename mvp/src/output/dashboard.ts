@@ -7,6 +7,7 @@ import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSn
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
+import { renderWallet2Html } from './wallet2Html.js';
 
 const TZ = 'Europe/Berlin';
 
@@ -1356,6 +1357,14 @@ export function startDashboard(port: number): DashboardServer {
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
     res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled, solConversionEnabled));
+  });
+
+  // Wallet v2 — new dashboard design (design validation)
+  app.get('/wallet2', async (_req, res) => {
+    await fetchPoolStats();
+    const uptime = Math.floor((Date.now() - startTime) / 60000);
+    const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
+    res.type('html').send(renderWallet2Html(currentLive, uptime, allEvents));
   });
 
   // Bot control APIs

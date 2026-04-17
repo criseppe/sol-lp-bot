@@ -133,6 +133,12 @@ export const runtime = {
   fearGreedExtremeLow: 25,
   fearGreedExtremeHigh: 75,
 
+  // EXTREME regime TA thresholds (reduce false positives)
+  extremeBbWidthThreshold: 3.5,
+  extremeRsiLow: 22,
+  extremeRsiHigh: 78,
+  extremeAtrThreshold: 0.60,
+
   // Regime params (mutable copies)
   regimeParams: {
     RANGING: { ...REGIME_PARAMS.RANGING },
@@ -263,6 +269,12 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vBtcCorr = nv('btcCorrelationThreshold', 1, 20); if (vBtcCorr != null) runtime.btcCorrelationThreshold = vBtcCorr;
   const vFGLow = nv('fearGreedExtremeLow', 0, 50); if (vFGLow != null) runtime.fearGreedExtremeLow = vFGLow;
   const vFGHigh = nv('fearGreedExtremeHigh', 50, 100); if (vFGHigh != null) runtime.fearGreedExtremeHigh = vFGHigh;
+
+  // EXTREME regime TA thresholds
+  const vEbbW = nv('extremeBbWidthThreshold', 1.5, 10); if (vEbbW != null) runtime.extremeBbWidthThreshold = vEbbW;
+  const vErsiL = nv('extremeRsiLow', 5, 40); if (vErsiL != null) runtime.extremeRsiLow = vErsiL;
+  const vErsiH = nv('extremeRsiHigh', 60, 95); if (vErsiH != null) runtime.extremeRsiHigh = vErsiH;
+  const vEatr = nv('extremeAtrThreshold', 0.10, 5); if (vEatr != null) runtime.extremeAtrThreshold = vEatr;
 
   // VAR config
   const vVarEn = g('varEnabled'); if (vVarEn === 'true' || vVarEn === 'false') runtime.varEnabled = vVarEn === 'true';
@@ -399,6 +411,10 @@ export function exportConfig(): Record<string, string> {
   out['btcCorrelationThreshold'] = String(runtime.btcCorrelationThreshold);
   out['fearGreedExtremeLow'] = String(runtime.fearGreedExtremeLow);
   out['fearGreedExtremeHigh'] = String(runtime.fearGreedExtremeHigh);
+  out['extremeBbWidthThreshold'] = String(runtime.extremeBbWidthThreshold);
+  out['extremeRsiLow'] = String(runtime.extremeRsiLow);
+  out['extremeRsiHigh'] = String(runtime.extremeRsiHigh);
+  out['extremeAtrThreshold'] = String(runtime.extremeAtrThreshold);
 
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {
