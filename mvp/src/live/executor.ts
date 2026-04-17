@@ -256,9 +256,15 @@ export class LiveExecutor {
         // Position opens SOL-constrained instead; auto-deploy + idle rebalance fill it gradually.
         const basisForCap = this.getCostBasis ? this.getCostBasis() : 0;
         const maxBuyAboveBasis = runtime.postUpsideMaxBuyAboveBasis ?? 0.02;
-        if (this.isPostUpsideOpen && basisForCap > 0 && currentPrice > basisForCap * (1 + maxBuyAboveBasis)) {
-          const basisCap = basisForCap * (1 + maxBuyAboveBasis);
-          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] Post-upside SOL buy skipped — price $${currentPrice.toFixed(2)} > basis cap $${basisCap.toFixed(2)} (basis $${basisForCap.toFixed(2)} × ${(1 + maxBuyAboveBasis).toFixed(3)}). Opening SOL-constrained to protect cost basis.`, timestamp: Date.now() }));
+        const strictMaxBuyAboveBasis = runtime.preOpenMaxBuyAboveBasis ?? 0.005;
+        const strictBasisCap = basisForCap * (1 + strictMaxBuyAboveBasis);
+        const postUpsideCap = basisForCap * (1 + maxBuyAboveBasis);
+        // Strict cap: applies to ALL opens (not just post-upside). Prevents basis ratchet on high-price reopens.
+        if (basisForCap > 0 && currentPrice > strictBasisCap) {
+          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL buy blocked — price $${currentPrice.toFixed(2)} > strict basis cap $${strictBasisCap.toFixed(2)} (basis $${basisForCap.toFixed(2)} + ${(strictMaxBuyAboveBasis * 100).toFixed(1)}%). Opening SOL-constrained to protect cost basis.`, timestamp: Date.now() }));
+          // Fall through to deposit with available SOL/USDC — do NOT enter the buy/skip-by-floor branch.
+        } else if (this.isPostUpsideOpen && basisForCap > 0 && currentPrice > postUpsideCap) {
+          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] Post-upside SOL buy skipped — price $${currentPrice.toFixed(2)} > basis cap $${postUpsideCap.toFixed(2)} (basis $${basisForCap.toFixed(2)} × ${(1 + maxBuyAboveBasis).toFixed(3)}). Opening SOL-constrained to protect cost basis.`, timestamp: Date.now() }));
           // Fall through to deposit with available SOL/USDC — do NOT enter the buy/skip-by-floor branch.
         } else {
         // Need more SOL — buy with USDC. Partial-buy: swap as much as the floor allows

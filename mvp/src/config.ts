@@ -48,6 +48,8 @@ export const runtime = {
   postUpsideOffsetExtreme:  -0.005,
   postUpsideFloorMultiplier: 0.5,  // pre-open SOL buy: relax USDC reserve floor to this fraction when post-upside (0.5 = 50%)
   postUpsideMaxBuyAboveBasis: 0.02, // skip post-upside pre-open SOL buy when currentPrice > basis × (1 + this) — avoids ratcheting cost basis
+  preOpenMaxBuyAboveBasis: 0.005,  // strict cap on ALL pre-open SOL buys: skip when currentPrice > basis × (1 + this) (0.5% default)
+  t1DownsideMinAgeMin: 30,         // minimum position age (min) before Rule 2 T1_DOWNSIDE may fire (not applied in BEARISH/EXTREME)
 
   // Circuit Breakers
   dailyLossLimitPct: RISK.DAILY_LOSS_LIMIT_PCT as number,
@@ -223,6 +225,8 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vPOE = nv('postUpsideOffsetExtreme', -0.05, 0.05); if (vPOE != null) runtime.postUpsideOffsetExtreme = vPOE;
   const vPUFM = nv('postUpsideFloorMultiplier', 0, 1); if (vPUFM != null) runtime.postUpsideFloorMultiplier = vPUFM;
   const vPUMBAB = nv('postUpsideMaxBuyAboveBasis', 0, 0.10); if (vPUMBAB != null) runtime.postUpsideMaxBuyAboveBasis = vPUMBAB;
+  const vPreMBAB = nv('preOpenMaxBuyAboveBasis', 0, 0.10); if (vPreMBAB != null) runtime.preOpenMaxBuyAboveBasis = vPreMBAB;
+  const vT1DMA = nv('t1DownsideMinAgeMin', 0, 240); if (vT1DMA != null) runtime.t1DownsideMinAgeMin = vT1DMA;
 
   // Circuit breakers
   const v20 = nv('dailyLossLimitPct', 1, 50); if (v20 != null) runtime.dailyLossLimitPct = v20;
@@ -372,6 +376,8 @@ export function exportConfig(): Record<string, string> {
   out['postUpsideOffsetExtreme'] = String(runtime.postUpsideOffsetExtreme);
   out['postUpsideFloorMultiplier'] = String(runtime.postUpsideFloorMultiplier);
   out['postUpsideMaxBuyAboveBasis'] = String(runtime.postUpsideMaxBuyAboveBasis);
+  out['preOpenMaxBuyAboveBasis'] = String(runtime.preOpenMaxBuyAboveBasis);
+  out['t1DownsideMinAgeMin'] = String(runtime.t1DownsideMinAgeMin);
   out['dailyLossLimitPct'] = String(runtime.dailyLossLimitPct);
   out['weeklyDrawdownLimitPct'] = String(runtime.weeklyDrawdownLimitPct);
   out['maxIlPct'] = String(runtime.maxIlPct);

@@ -462,7 +462,8 @@ export function detectRegimeTA(
   if (dailyRegime != null && candidate !== 'EXTREME') {
     if (dailyRegime === 'BEARISH_TREND' && candidate === 'BULLISH_TREND') {
       const strongBullish = bullPts >= 4 || (
-        ta?.rsi14 != null && ta.rsi14 > 64 &&
+        bullPts >= 3 &&
+        ta?.rsi14 != null && ta.rsi14 > 68 &&
         ta?.trendDirection === 'UP' &&
         ta?.sma20 != null && currentPrice > ta.sma20
       );
@@ -474,7 +475,8 @@ export function detectRegimeTA(
       }
     } else if (dailyRegime === 'BULLISH_TREND' && candidate === 'BEARISH_TREND') {
       const strongBearish = bearPts >= 4 || (
-        ta?.rsi14 != null && ta.rsi14 < 36 &&
+        bearPts >= 3 &&
+        ta?.rsi14 != null && ta.rsi14 < 32 &&
         ta?.trendDirection === 'DOWN' &&
         ta?.sma20 != null && currentPrice < ta.sma20
       );

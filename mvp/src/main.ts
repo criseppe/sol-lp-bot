@@ -1767,9 +1767,16 @@ async function runLiveCycle(price: number): Promise<void> {
     if (rule2Enabled) {
       if (shouldFireDownside(prox, params.proxThresholdLower, 0, 0)) {
         const proxPct = (prox.proxToLower * 100).toFixed(0);
-        const reason = `Rule 2 early downside exit: proxToLower=${proxPct}% >= threshold ${(params.proxThresholdLower*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} drifting toward lower bound $${currentPos.priceLower.toFixed(2)}. Closing to avoid full OOR impermanent loss.`;
-        await liveCloseAndReopen(price, 'T1_DOWNSIDE', reason);
-        return;
+        const posAgeMin = currentPos.entryTime > 0 ? (now - currentPos.entryTime) / 60000 : Infinity;
+        const minAgeMin = runtime.t1DownsideMinAgeMin ?? 30;
+        const isFastExitRegime = liveRegime === 'BEARISH_TREND' || liveRegime === 'EXTREME';
+        if (posAgeMin < minAgeMin && !isFastExitRegime) {
+          console.log(JSON.stringify({ level: 'info', msg: `[Rule2] T1_DOWNSIDE suppressed — age ${posAgeMin.toFixed(1)}min < ${minAgeMin}min minimum (regime ${liveRegime}). proxToLower=${proxPct}%.`, timestamp: now }));
+        } else {
+          const reason = `Rule 2 early downside exit: proxToLower=${proxPct}% >= threshold ${(params.proxThresholdLower*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} drifting toward lower bound $${currentPos.priceLower.toFixed(2)}. Closing to avoid full OOR impermanent loss.`;
+          await liveCloseAndReopen(price, 'T1_DOWNSIDE', reason);
+          return;
+        }
       }
       if (shouldFireUpside(prox, params.proxThresholdUpper)) {
         const proxPct = (prox.proxToUpper * 100).toFixed(0);
