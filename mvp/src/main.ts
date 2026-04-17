@@ -1644,7 +1644,7 @@ async function runLiveCycle(price: number): Promise<void> {
           console.log(JSON.stringify({ level: 'warn', msg: '[RegimeReopen] Close failed — position unchanged', timestamp: now }));
           return;
         }
-        // Gates: Reserve + Basis (ChurnGuard skipped for regime reopen)
+        // Gates: Reserve + Basis + Upside ChurnGuard (downside ChurnGuard skipped for regime reopen)
         const regimeParamsRR = runtime.regimeParams[targetRegime] ?? getRegimeParams(targetRegime as Regime);
         const balancesRR = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
         const positionSizeRR = (balancesRR.sol * price + balancesRR.usdc) * regimeParamsRR.deployPct * (taDeployMultiplier ?? 1.0);
@@ -1659,6 +1659,21 @@ async function runLiveCycle(price: number): Promise<void> {
         if (basisStateRR.solCostBasis > 0 && price < basisStateRR.solCostBasis * basisThresholdRR) {
           console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} < basis threshold`, timestamp: Date.now() }));
           return;
+        }
+        // Keep upside ChurnGuard even for regime reopen — prevents opening near upper
+        // bound right after an upside exit, which would immediately trigger T1_UPSIDE
+        // and waste the reopen. Re-arm the pending timestamp so the check retries next cycle.
+        const upsideChurnMinsRR = runtime.upsideChurnCooldownMin ?? 5;
+        if (lastUpsideExitTs > 0) {
+          const minsSinceUpsideRR = (Date.now() - lastUpsideExitTs) / 60000;
+          if (minsSinceUpsideRR < upsideChurnMinsRR) {
+            console.log(JSON.stringify({ level: 'warn', msg: `[RegimeReopen] Upside cooldown active — ${minsSinceUpsideRR.toFixed(1)}min < ${upsideChurnMinsRR}min since upside exit at $${lastUpsideExitPrice.toFixed(2)}. Retrying next cycle.`, timestamp: Date.now() }));
+            reopenPendingTs = Date.now();
+            reopenPendingRegime = targetRegime;
+            reopenPendingUrgency = urgency;
+            reopenPendingOldRegime = fromRegime;
+            return;
+          }
         }
         console.log(JSON.stringify({ level: 'info', msg: `[RegimeReopen] Gates passed. Opening with ${targetRegime} params (width=${regimeParamsRR.rangeWidthPct}%)`, timestamp: Date.now() }));
         await liveOpenPosition(price, 'POSITION_OPENED', `Re-opening after regime change: ${fromRegime} → ${targetRegime} (${urgency}, waited ${minutesWaiting.toFixed(0)}min). Width=${regimeParamsRR.rangeWidthPct}%.`);
