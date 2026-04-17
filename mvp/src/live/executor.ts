@@ -830,6 +830,28 @@ export class LiveExecutor {
     const usdcReserve = getUsdcReserve();
     const { tickLower, tickUpper } = this.currentPosition;
 
+    // Validate tick arrays exist before add-liquidity — avoids 0x1781 simulation failures
+    try {
+      const poolData = whirlpool.getData();
+      const tickSpacing = poolData.tickSpacing;
+      const fetcher = this.client.getFetcher();
+      const currentTick = poolData.tickCurrentIndex;
+      const ticksToCheck = [tickLower, tickUpper, currentTick];
+      const allPDAs = ticksToCheck.map(t => TickArrayUtil.getTickArrayPDAs(t, tickSpacing, 1, ORCA_WHIRLPOOL_PROGRAM_ID, this.whirlpoolAddress, false));
+      const allArrays = await Promise.all(allPDAs.map(p => fetcher.getTickArray(p[0].publicKey, IGNORE_CACHE)));
+      const missing = allArrays.map((a, i) => !a ? ticksToCheck[i] : null).filter(Boolean);
+      if (missing.length > 0) {
+        console.log(JSON.stringify({ level: 'warn', msg: `[AutoDeploy] Tick arrays missing for ticks: [${missing.join(',')}]. Initializing + waiting 5s...`, timestamp: Date.now() }));
+        const retryInit = await whirlpool.initTickArrayForTicks(ticksToCheck);
+        if (retryInit) {
+          try { await this.execTx(retryInit); } catch {}
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: `[AutoDeploy] Tick array validation failed: ${err instanceof Error ? err.message : String(err)}. Proceeding anyway.`, timestamp: Date.now() }));
+    }
+
     let solBal = await this.getSolBalance();
     let usdcBal = await this.getUsdcBalance();
     let solAvailable = Math.max(0, solBal - solReserve);
