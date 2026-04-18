@@ -22,6 +22,31 @@ import { insertSwapLedger, backfillSwapLedgerCostBasis } from './db/sqlite.js';
 import { bootstrapCostBasis, updateCostBasis, readCostBasis, recalculateFromCurrentHoldings, reduceCostBasisHoldings } from './tracking/costBasis.js';
 import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeployGate, checkReserveFloor } from './reserve/reserveManager.js';
 
+// ── Process-level safety nets ─────────────────────────────────────────────
+// Prevent stray promise rejections or exceptions (e.g. Solana web3.js retry
+// layers, fire-and-forget RPC calls) from crashing the bot process.
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error(JSON.stringify({
+    level: 'error',
+    msg: '[Process] Unhandled promise rejection',
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack?.split('\n').slice(0, 3).join(' | ') : undefined,
+    timestamp: Date.now(),
+  }));
+  // do NOT exit — log and continue
+});
+
+process.on('uncaughtException', (err: Error) => {
+  console.error(JSON.stringify({
+    level: 'error',
+    msg: '[Process] Uncaught exception',
+    error: err.message,
+    stack: err.stack?.split('\n').slice(0, 3).join(' | '),
+    timestamp: Date.now(),
+  }));
+  // do NOT exit — log and continue
+});
+
 // ── 1. VALIDATE ENV VARS ─────────────────────────────────────────────────
 
 const REQUIRED_VARS = ['RPC_URL', 'PYTH_SOL_USD_FEED', 'WHIRLPOOL_ADDRESS', 'DB_PATH', 'WALLET_PRIVATE_KEY'];
