@@ -6,7 +6,7 @@ import { PoolService } from './data/pool.js';
 import { initDb, getBotState, upsertBotState, getRebalanceEvents, getHistoryDayCount, backfillPriceHistory, getDailyPnl, upsertDailyPnl, insertPriceTick, insertRebalanceEvent, getDailyCloses, insertLiveSnapshot, getLiveSnapshots, getLiveInRangePct, insertDecisionLog, getDecisionLogs, insertRegimeChange, getRegimeHistory, exportAllData, getRuleEnabled, setRuleEnabled, insertRegimeSnapshot, pruneOldData } from './db/sqlite.js';
 import { startDashboard } from './output/dashboard.js';
 import { LiveExecutor, type LivePosition } from './live/executor.js';
-import { startTelegramReporter, alertIdleRebalance, alertSolConvert } from './output/telegram.js';
+import { startTelegramReporter, alertIdleRebalance, alertSolConvert, alertStrategicRebalance } from './output/telegram.js';
 import type { LiveData } from './output/dashboard.js';
 import { loadWallet, getWalletBalances, validateWalletForLive } from './live/wallet.js';
 import { detectRegime, detectRegimeWithMetrics, detectRegimeEnhanced, detectRegimeTA, getRegimeParams } from './engine/regime.js';
@@ -144,6 +144,12 @@ backfillSwapLedgerCostBasis(db); // backfill cost_basis_after for historical swa
 pruneOldData(db); // startup cleanup: live_snapshots 7d, decision_log 7d, portfolio_snapshots 30d
 let sirCostBasis = costBasisState.solCostBasis; // kept in sync for legacy references
 let idleRebalancePending = false; // set true after position reopen to trigger check
+
+// Strategic SOL Rebalance — unstick from SOL-heavy idle
+let strategicIdleStartTs = 0;           // when this idle period began (0 = not idle yet)
+let lastStrategicRebalanceTs = 0;       // cooldown tracker
+let strategicRebalanceFailures = 0;     // consecutive tx failure count
+let strategicRebalanceBackoffUntil = 0; // backoff window after 3 consecutive failures
 let smartSellPending = false; // DISABLED — any SOL sell loses money in downtrends
 let taRegimeCandidate: Regime | null = null;   // TA-first regime hysteresis candidate
 let taRegimeCandidateCount = 0;                // consecutive cycles candidate has held
@@ -226,6 +232,100 @@ async function reconcileReserveAfterOpen(label: string): Promise<void> {
 function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1], overridePositionId?: string) {
   const posId = overridePositionId ?? liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
   insertRebalanceEvent(db_, { ...event, rule2Active: rule2Enabled ? 1 : 0, positionId: posId ?? undefined });
+}
+
+// ── Strategic SOL Rebalance ──────────────────────────────────────────────
+// When bot is stuck idle (no position, SOL-heavy, price below basis),
+// automatically sell a small slice of SOL → USDC to unstick deployment.
+// Unlike SolConvert (which requires profit margin), this accepts a small
+// realized loss to escape the idle trap; the alternative is indefinite
+// idle opportunity cost.
+async function checkStrategicRebalance(price: number, currentPos: any): Promise<boolean> {
+  if (!runtime.strategicRebalanceEnabled) return false;
+  if (currentPos) { strategicIdleStartTs = 0; return false; }
+
+  const now = Date.now();
+  if (now < strategicRebalanceBackoffUntil) return false;
+
+  if (strategicIdleStartTs === 0) { strategicIdleStartTs = now; return false; }
+
+  const cooldownMs = runtime.strategicRebalanceCooldownHours * 3600_000;
+  if (now - lastStrategicRebalanceTs < cooldownMs) return false;
+
+  const idleMs = runtime.strategicRebalanceIdleMinutes * 60_000;
+  if (now - strategicIdleStartTs < idleMs) return false;
+
+  if (!liveExecutor) return false;
+  const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+  const basis = readCostBasis(db).solCostBasis;
+  if (basis <= 0) return false;
+
+  const basisFloor = basis * runtime.strategicRebalanceBasisMultiplier;
+  if (price >= basisFloor) return false; // SolConvert would fire instead
+
+  const portfolio = balances.sol * price + balances.usdc;
+  if (portfolio < 100) return false;
+  const solShare = (balances.sol * price) / portfolio;
+  if (solShare < runtime.strategicRebalanceMinSolSharePct) return false;
+
+  const reserveFloor = getReserveState(db).floor;
+  const availableAboveFloor = Math.max(0, balances.usdc - reserveFloor);
+  if (availableAboveFloor >= runtime.minDeployUsdc) return false; // enough USDC to deploy normally
+
+  const targetUsdc = portfolio * (1 - runtime.strategicRebalanceTargetSolSharePct);
+  const usdcGap = targetUsdc - balances.usdc;
+  if (usdcGap < runtime.strategicRebalanceMinUsdcGain) return false;
+
+  const solToSell = Math.min(
+    (usdcGap / price) * 1.01,                                       // +1% slippage buffer
+    (portfolio * runtime.strategicRebalanceMaxPortfolioPct) / price, // cap by max portfolio %
+    Math.max(0, balances.sol - runtime.solReserve),                  // never drop below SOL reserve
+  );
+
+  if (solToSell <= 0 || solToSell * price < runtime.strategicRebalanceMinUsdcGain) return false;
+
+  const reason = `Strategic rebalance: unstick SOL-heavy idle (share ${(solShare * 100).toFixed(0)}%, price $${price.toFixed(2)} < basis×${runtime.strategicRebalanceBasisMultiplier.toFixed(3)} $${basisFloor.toFixed(2)}, idle ${((now - strategicIdleStartTs) / 60000).toFixed(0)}min)`;
+  console.log(JSON.stringify({ level: 'info', msg: `[StrategicRebalance] Triggering: sell ${solToSell.toFixed(3)} SOL → ~$${(solToSell * price).toFixed(0)} USDC. ${reason}`, timestamp: now }));
+
+  try {
+    const swapResult = await liveExecutor.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(solToSell * 1e9), reason);
+    if (!swapResult) {
+      strategicRebalanceFailures++;
+      if (strategicRebalanceFailures >= 3) {
+        strategicRebalanceBackoffUntil = now + 30 * 60_000;
+        strategicRebalanceFailures = 0;
+        console.log(JSON.stringify({ level: 'warn', msg: '[StrategicRebalance] 3 consecutive swap failures — 30min backoff', timestamp: Date.now() }));
+      }
+      return false;
+    }
+    strategicRebalanceFailures = 0;
+
+    // onSwap callback handles cost basis, swap_ledger, and lastBotSwapTime automatically.
+    // We emit a STRATEGIC_REBALANCE-typed rebalance_event for timeline clarity.
+    const balancesAfter = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
+    const usdcReceived = Math.max(0, balancesAfter.usdc - balances.usdc);
+    const effectivePrice = usdcReceived > 0 ? usdcReceived / solToSell : price;
+    const pnl = (effectivePrice - basis) * solToSell;
+
+    insertRebalanceEventWithRule2(db, {
+      timestamp: now, eventType: 'STRATEGIC_REBALANCE', price, regime: liveRegime,
+      note: `${reason} → received $${usdcReceived.toFixed(2)} @ $${effectivePrice.toFixed(2)} (P&L $${pnl.toFixed(2)})`,
+      solBefore: balances.sol, usdcBefore: balances.usdc,
+      solAfter: balancesAfter.sol, usdcAfter: balancesAfter.usdc,
+      feeSol: 0, feeUsdc: 0, ilAtClose: 0,
+    });
+
+    lastStrategicRebalanceTs = now;
+    strategicIdleStartTs = 0;
+    console.log(JSON.stringify({ level: 'info', msg: `[StrategicRebalance] Done: sold ${solToSell.toFixed(3)} SOL → $${usdcReceived.toFixed(2)} @ $${effectivePrice.toFixed(2)} (basis $${basis.toFixed(2)}, P&L $${pnl.toFixed(2)}). Deploy next cycle.`, timestamp: Date.now() }));
+
+    try { alertStrategicRebalance({ solSold: solToSell, usdcReceived, pnl, price, basis }); } catch {}
+    return true;
+  } catch (err) {
+    console.log(JSON.stringify({ level: 'error', msg: `[StrategicRebalance] Swap error: ${err instanceof Error ? err.message : String(err)}`, timestamp: Date.now() }));
+    strategicRebalanceFailures++;
+    return false;
+  }
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────
@@ -1729,6 +1829,10 @@ async function runLiveCycle(price: number): Promise<void> {
 
   // No position → open one
   if (!currentPos) {
+    // Strategic SOL Rebalance: if idle + SOL-heavy + below basis, unstick by
+    // selling a small SOL slice. Accepts small realized loss to escape idle trap.
+    if (await checkStrategicRebalance(price, currentPos)) return;
+
     // Gate 1: ReserveGate
     const regimeParamsID = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
     const balancesID = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);

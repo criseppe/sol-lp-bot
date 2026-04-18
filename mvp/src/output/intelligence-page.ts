@@ -517,7 +517,7 @@ function buildPositions(events,cp){
       var capB=(e.sol_before||0)*e.price+(e.usdc_before||0);
       var capA=(e.sol_after||0)*e.price+(e.usdc_after||0);
       lastOpen={ts:e.timestamp,price:e.price,capital:Math.max(0,capB-capA),regime:e.regime};
-    }else if(['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED'].includes(e.event_type)&&lastOpen){
+    }else if(['T1_DOWNSIDE','T1_UPSIDE','OOR_BELOW','OOR_ABOVE','POSITION_CLOSED','STRATEGIC_REBALANCE'].includes(e.event_type)&&lastOpen){
       var feePrice=cp||e.price;
       // Sum ALL fee events (close + pre-close harvests) during position lifetime
       var fees=0;

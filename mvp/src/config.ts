@@ -149,6 +149,16 @@ export const runtime = {
   extremeRsiHigh: 78,
   extremeAtrThreshold: 0.60,
 
+  // Strategic SOL Rebalance — unstick bot when idle + SOL-heavy + below basis
+  strategicRebalanceEnabled: true,
+  strategicRebalanceIdleMinutes: 30,
+  strategicRebalanceBasisMultiplier: 0.995,
+  strategicRebalanceMinSolSharePct: 0.80,
+  strategicRebalanceMaxPortfolioPct: 0.15,
+  strategicRebalanceCooldownHours: 2,
+  strategicRebalanceTargetSolSharePct: 0.70,
+  strategicRebalanceMinUsdcGain: 500,
+
   // Regime params (mutable copies)
   regimeParams: {
     RANGING: { ...REGIME_PARAMS.RANGING },
@@ -330,6 +340,16 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
       if (val != null) (runtime.regimeParams[regime] as any)[field] = val;
     }
   }
+
+  // Strategic SOL Rebalance
+  { const v = n('strategicRebalanceEnabled'); if (v != null) runtime.strategicRebalanceEnabled = v !== 0; }
+  const srIdle = nv('strategicRebalanceIdleMinutes', 5, 1440);        if (srIdle != null) runtime.strategicRebalanceIdleMinutes = srIdle;
+  const srMult = nv('strategicRebalanceBasisMultiplier', 0.90, 1.00);  if (srMult != null) runtime.strategicRebalanceBasisMultiplier = srMult;
+  const srMin  = nv('strategicRebalanceMinSolSharePct', 0.50, 1.00);   if (srMin  != null) runtime.strategicRebalanceMinSolSharePct = srMin;
+  const srMax  = nv('strategicRebalanceMaxPortfolioPct', 0.01, 0.50);  if (srMax  != null) runtime.strategicRebalanceMaxPortfolioPct = srMax;
+  const srCd   = nv('strategicRebalanceCooldownHours', 0.5, 24);       if (srCd   != null) runtime.strategicRebalanceCooldownHours = srCd;
+  const srTgt  = nv('strategicRebalanceTargetSolSharePct', 0.30, 0.95); if (srTgt  != null) runtime.strategicRebalanceTargetSolSharePct = srTgt;
+  const srMU   = nv('strategicRebalanceMinUsdcGain', 50, 10000);       if (srMU   != null) runtime.strategicRebalanceMinUsdcGain = srMU;
 }
 
 /**

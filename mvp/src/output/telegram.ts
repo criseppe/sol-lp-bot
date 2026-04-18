@@ -161,6 +161,21 @@ export function alertSolConvert(p: {
   sendTelegramAlert(text);
 }
 
+/** Alert 5: Strategic rebalance fired — bot unstuck from SOL-heavy idle. */
+export function alertStrategicRebalance(p: {
+  solSold: number; usdcReceived: number; pnl: number; price: number; basis: number;
+}): void {
+  const text = [
+    `🔧 Strategic rebalance: unstuck bot`,
+    `Sold ${p.solSold.toFixed(2)} SOL → $${p.usdcReceived.toFixed(0)} USDC`,
+    `Price $${p.price.toFixed(2)} | Basis $${p.basis.toFixed(2)} | P&L $${p.pnl.toFixed(2)}`,
+    `Deploy on next cycle.`,
+    ``,
+    `⏰ ${formatTimeCET()}`,
+  ].join('\n');
+  sendTelegramAlert(text);
+}
+
 function fmt(n: number, d = 2): string { return n.toFixed(d); }
 
 function formatTimeCET(): string {

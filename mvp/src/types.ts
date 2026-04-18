@@ -22,7 +22,8 @@ export type EventType =
   | 'CIRCUIT_BREAKER'
   | 'CYCLE_SKIP'
   | 'LIQUIDITY_ADDED'
-  | 'AUTO_DEPLOY';
+  | 'AUTO_DEPLOY'
+  | 'STRATEGIC_REBALANCE';
 
 export interface PythPrice {
   price: number;
