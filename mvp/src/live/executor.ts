@@ -902,15 +902,18 @@ export class LiveExecutor {
     let solAvailable = Math.max(0, solBal - solReserve);
     let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
 
-    // Reserve-aware idle USDC check — only deploy USDC above reserve floor
+    // Reserve-aware idle capital check — match rules.ts formula: idle = SOL value + USDC above floor.
+    // Why: rules.ts greenlights deploy based on total idle (SOL+USDC); executor must use the same
+    // measure or dashboard "idle capital" disagrees with what auto-deploy actually evaluates.
     const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
-    const idleUsdc = Math.max(0, usdcBal - reserveFloor);
+    const idleUsdcRaw = Math.max(0, usdcBal - reserveFloor);
+    const idleUsdc = solAvailable * currentPrice + idleUsdcRaw;
     if (idleUsdc < 100) {
-      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — insufficient USDC above reserve floor. Wallet USDC: $${usdcBal.toFixed(2)}, Floor: $${reserveFloor.toFixed(2)}, Available: $${idleUsdc.toFixed(2)}`, timestamp: Date.now() }));
+      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — insufficient idle capital. Wallet USDC: $${usdcBal.toFixed(2)}, Floor: $${reserveFloor.toFixed(2)}, USDC above floor: $${idleUsdcRaw.toFixed(2)}, SOL value: $${(solAvailable * currentPrice).toFixed(2)}, Total idle: $${idleUsdc.toFixed(2)}`, timestamp: Date.now() }));
       return null;
     }
-    // Use reserve-aware USDC for deposit calculations
-    usdcAvailable = Math.min(usdcAvailable, idleUsdc);
+    // Cap usdcAvailable at USDC-only above floor (SOL portion is handled via solAvailable separately)
+    usdcAvailable = Math.min(usdcAvailable, idleUsdcRaw);
 
     // Proximity guard — don't deploy capital near range edges (about to exit).
     // Formula B (centre-relative): proxB = max(0, (centre - price) / halfWidth).
@@ -936,7 +939,7 @@ export class LiveExecutor {
       }
     }
 
-    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC ($${idleUsdc.toFixed(2)} above floor)${maxDeployUsdc ? `, cap: $${maxDeployUsdc.toFixed(2)}` : ''}`, timestamp: Date.now() }));
+    console.log(JSON.stringify({ level: 'info', msg: `Add liquidity: wallet ${solBal.toFixed(4)} SOL (${solAvailable.toFixed(4)} avail), ${usdcBal.toFixed(2)} USDC ($${idleUsdcRaw.toFixed(2)} above floor), total idle $${idleUsdc.toFixed(2)}${maxDeployUsdc ? `, cap: $${maxDeployUsdc.toFixed(2)}` : ''}`, timestamp: Date.now() }));
 
     // Calculate ideal ratio (same logic as openPosition), capped at maxDeployUsdc if provided
     const ratioQuote = increaseLiquidityQuoteByInputToken(
