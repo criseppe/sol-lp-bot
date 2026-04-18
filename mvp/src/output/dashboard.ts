@@ -4220,7 +4220,8 @@ ${NAV_HTML}
   <h3>4b. Swap Routing</h3>
   <table>
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('swapSlippageBps', c.swapSlippageBps, 15, 'Slippage (bps)', 'Swap slippage tolerance in basis points. 100 bps = 1%.', 'At 10: very tight, may fail in volatile markets. At 50: safer but more expensive.')}
+    ${field('swapSlippageBps', c.swapSlippageBps, 30, 'Trade Slippage (bps)<br><span style="font-size:10px;color:#8b949e;font-weight:normal">Jupiter swaps — 30 = 0.3%</span>', 'Jupiter trade slippage tolerance (bps). Applies to SOL↔USDC swaps. 100 bps = 1%.', 'Trade: 30 bps (0.3%) for Jupiter swaps. Raise if swaps fail on volatile moves.')}
+    ${field('liquiditySlippageBps', c.liquiditySlippageBps, 100, 'Liquidity Slippage (bps)<br><span style="font-size:10px;color:#8b949e;font-weight:normal">Orca LP open/close/increase — 100 = 1.0%</span>', 'Orca LP slippage tolerance (bps). Applies to position open, close, increaseLiquidity. 100 bps = 1%.', 'Liquidity: 50–100 bps typical. Raise if LP deposits fail on volatile moves.')}
     ${field('swapBufferPct', c.swapBufferPct, 3, 'Swap buffer (%)', 'Over-estimate swap amounts by this % to avoid coming up short.', 'At 1%: tighter, less over-swap. At 5%: more buffer, more leftover.')}
     <tr style="border-bottom:1px solid #21262d">
       <td style="padding:6px 8px;color:#8b949e;font-size:11px;min-width:120px">Swap provider</td>
