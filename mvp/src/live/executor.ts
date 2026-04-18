@@ -74,17 +74,49 @@ export class LiveExecutor {
     return { gasSol, gasUsdc: gasSol * solPrice, txCount: this.txCount };
   }
 
-  private async execTx(txBuilder: { buildAndExecute: () => Promise<string> }): Promise<string> {
-    let sig: string;
+  private buildExecOptions(): { computeBudgetOption: { type: 'fixed'; priorityFeeLamports: number; computeBudgetLimit: number } } {
+    const priorityFeeLamports = runtime.priorityFeeLamports ?? 10000;
+    const computeBudgetLimit = runtime.computeBudgetLimit ?? 600000;
+    return { computeBudgetOption: { type: 'fixed', priorityFeeLamports, computeBudgetLimit } };
+  }
+
+  private buildSendOptions(): { skipPreflight: boolean; maxRetries: number; preflightCommitment: 'confirmed' } {
+    return { skipPreflight: runtime.skipPreflight ?? false, maxRetries: 3, preflightCommitment: 'confirmed' };
+  }
+
+  private async execTx(txBuilder: { buildAndExecute: (options?: any, sendOptions?: any) => Promise<string> }): Promise<string> {
+    const isTransientExpiry = (msg: string): boolean =>
+      msg.includes('Blockhash not found') ||
+      msg.includes('timeout') ||
+      msg.includes('429') ||
+      msg.includes('block height exceeded') ||
+      msg.includes('TransactionExpiredBlockheight') ||
+      msg.includes('BlockheightBasedTxnExpired') ||
+      msg.includes('Transaction was not confirmed');
+
+    let sig!: string;
     try {
-      sig = await txBuilder.buildAndExecute();
+      sig = await txBuilder.buildAndExecute(this.buildExecOptions(), this.buildSendOptions());
     } catch (err: any) {
-      const msg = String(err);
-      // Retry once on transient errors (blockhash expired, timeout, 429)
-      if (msg.includes('Blockhash not found') || msg.includes('timeout') || msg.includes('429')) {
-        console.log(JSON.stringify({ level: 'warn', msg: `TX failed (${msg.slice(0, 80)}), retrying in 3s...`, timestamp: Date.now() }));
-        await new Promise(r => setTimeout(r, 3000));
-        sig = await txBuilder.buildAndExecute();
+      const msg = String(err?.message ?? err);
+      // Retry up to 2x on transient errors. Orca TransactionBuilder.buildAndExecute()
+      // fetches a fresh blockhash each call, so retry = fresh blockhash window.
+      if (isTransientExpiry(msg)) {
+        let lastErr = err;
+        let ok = false;
+        for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
+          console.log(JSON.stringify({ level: 'warn', msg: `TX failed (${msg.slice(0, 100)}), retry ${attempt}/2 in 3s (fresh blockhash)...`, timestamp: Date.now() }));
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            sig = await txBuilder.buildAndExecute(this.buildExecOptions(), this.buildSendOptions());
+            ok = true;
+          } catch (retryErr: any) {
+            lastErr = retryErr;
+            const retryMsg = String(retryErr?.message ?? retryErr);
+            if (!isTransientExpiry(retryMsg)) throw retryErr;
+          }
+        }
+        if (!ok) throw lastErr;
       } else {
         throw err;
       }

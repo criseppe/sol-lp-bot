@@ -5,9 +5,13 @@ import { MINTS } from '../constants.js';
 import bs58 from 'bs58';
 
 export function loadWallet(privateKeyBase58: string): Wallet {
+  // NOTE: do NOT zero the decoded buffer — @solana/web3.js Keypair.fromSecretKey stores the
+  // SAME Uint8Array reference internally. Zeroing it corrupts the Keypair's signing key and
+  // every sign() call produces an invalid ed25519 signature (Solana rejects with
+  // "Transaction did not pass signature verification"). Previous L5 "zero key buffer after
+  // keypair creation" attempt caused this exact failure (commit 6bda86f, 2026-04-18).
   const secretKey = bs58.decode(privateKeyBase58);
   const keypair = Keypair.fromSecretKey(secretKey);
-  secretKey.fill(0);
   return new Wallet(keypair);
 }
 
