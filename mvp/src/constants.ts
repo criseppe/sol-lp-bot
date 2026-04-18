@@ -25,7 +25,7 @@ export const REGIME_PARAMS = {
     usdcDepositPct:       0.35,
     deployRatioTolerance: 0.020,
     basisGateThreshold:   0.995,
-    proximityDeployThreshold: 0.40,
+    proximityDeployThreshold: 0.55,
     reserveFloorPct: 0.10,
   },
   BULLISH_TREND: {
@@ -41,7 +41,7 @@ export const REGIME_PARAMS = {
     usdcDepositPct:       0.30,
     deployRatioTolerance: 0.035,
     basisGateThreshold:   0.995,
-    proximityDeployThreshold: 0.55,
+    proximityDeployThreshold: 0.60,
     reserveFloorPct: 0.12,
   },
   BEARISH_TREND: {
@@ -57,7 +57,7 @@ export const REGIME_PARAMS = {
     usdcDepositPct:       0.40,
     deployRatioTolerance: 0.030,
     basisGateThreshold:   0.992,
-    proximityDeployThreshold: 0.55,
+    proximityDeployThreshold: 0.45,
     reserveFloorPct: 0.18,
   },
   EXTREME: {

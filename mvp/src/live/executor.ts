@@ -912,18 +912,24 @@ export class LiveExecutor {
     // Use reserve-aware USDC for deposit calculations
     usdcAvailable = Math.min(usdcAvailable, idleUsdc);
 
-    // Proximity guard — don't deploy capital near range edges (about to exit)
+    // Proximity guard — don't deploy capital near range edges (about to exit).
+    // Formula B (centre-relative): proxB = max(0, (centre - price) / halfWidth).
+    // = 0 when price >= centre (upper half of range is fine to deploy)
+    // = 1 at lower bound (exit-trigger territory)
+    // Threshold comes from regime params (proximityDeployThreshold) and is set below
+    // each regime's exit trigger (proxThresholdLower) so deploy stops before exit fires.
     const { priceLower, priceUpper } = this.currentPosition;
     const positionRange = priceUpper - priceLower;
     if (positionRange > 0) {
-      const distanceToLower = currentPrice - priceLower;
-      const proximityToLower = 1 - (distanceToLower / positionRange);
-      const proxThreshold = this.getProximityDeployThreshold ? this.getProximityDeployThreshold() : 0.40;
-      if (proximityToLower > proxThreshold) {
-        console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — too close to lower boundary. Proximity: ${(proximityToLower * 100).toFixed(1)}% (threshold ${(proxThreshold * 100).toFixed(0)}%). Price $${currentPrice.toFixed(2)}, lower $${priceLower.toFixed(2)}`, timestamp: Date.now() }));
+      const centre = (priceLower + priceUpper) / 2;
+      const halfWidth = positionRange / 2;
+      const proxB = Math.max(0, (centre - currentPrice) / halfWidth);
+      const proxThreshold = this.getProximityDeployThreshold ? this.getProximityDeployThreshold() : 0.55;
+      if (proxB > proxThreshold) {
+        console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — too close to lower boundary. Proximity: ${(proxB * 100).toFixed(1)}% (threshold ${(proxThreshold * 100).toFixed(0)}%). Price $${currentPrice.toFixed(2)}, lower $${priceLower.toFixed(2)}`, timestamp: Date.now() }));
         return null;
       }
-      const proximityToUpper = distanceToLower / positionRange;
+      const proximityToUpper = (currentPrice - priceLower) / positionRange;
       if (proximityToUpper > 0.85) {
         console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — too close to upper boundary. Proximity: ${(proximityToUpper * 100).toFixed(1)}% (threshold 85%). Price $${currentPrice.toFixed(2)}, upper $${priceUpper.toFixed(2)}`, timestamp: Date.now() }));
         return null;
