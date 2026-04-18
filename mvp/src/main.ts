@@ -2289,24 +2289,34 @@ async function runLiveCycle(price: number): Promise<void> {
       const regimeBasisMult: Record<string, number | null> = { RANGING: 1.000, BULLISH_TREND: 1.010, BEARISH_TREND: 1.005, EXTREME: null };
       const regimeMult = regimeBasisMult[liveRegime] ?? null;
       const effectiveMult = regimeMult != null ? regimeMult * runtime.solConversionBasisMultiplier : null;
+      // Progressive basis decay state — used both as threshold source and as regime-gate bypass.
+      const decayState = getProgressiveDecayState(basis, price, now);
+      const decayActive = decayState?.active === true;
       // Progressive basis decay: when enabled, loosen threshold below per-regime default
-      // after extended idle below basis. Default OFF → uses per-regime mult unchanged.
-      const basisThresholdActive = (effectiveMult !== null)
-        ? (runtime.progressiveBasisDecayEnabled
-            ? calculateEffectiveBasisThreshold(basis, price, now)
-            : basis * effectiveMult)
-        : null;
+      // after extended idle below basis. When decay is active, always use the decayed
+      // threshold — including in EXTREME (where the per-regime mult is null) — so the
+      // decay-bypass path never fires without a price check.
+      const basisThresholdActive = decayActive
+        ? calculateEffectiveBasisThreshold(basis, price, now)
+        : (effectiveMult !== null
+            ? (runtime.progressiveBasisDecayEnabled
+                ? calculateEffectiveBasisThreshold(basis, price, now)
+                : basis * effectiveMult)
+            : null);
 
-      // Step 4: Regime gate — RANGING/BULLISH always allowed, BEARISH/EXTREME only via momentum
+      // Step 4: Regime gate — RANGING/BULLISH allowed; BEARISH/EXTREME allowed only via
+      // momentum override OR active progressive decay (past grace period).
       const regimeAllows = liveRegime === 'RANGING' || liveRegime === 'BULLISH_TREND';
+      const decayBypass = !regimeAllows && !momentumOverride && decayActive;
 
       if (!runtime.solConversionEnabled) {
         // silent skip — don't log every cycle
-      } else if (!regimeAllows && !momentumOverride) {
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: regime ${liveRegime} blocked, no momentum override (30m change: ${(priceChange30m * 100).toFixed(2)}%, margin: ${(marginAboveBasis * 100).toFixed(2)}%, need: >${(MOMENTUM_THRESHOLD * 100).toFixed(0)}% momentum + >0.5% margin above basis)`, timestamp: now }));
-      } else if (regimeAllows && basisThresholdActive !== null && price < basisThresholdActive) {
+      } else if (!regimeAllows && !momentumOverride && !decayActive) {
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: regime ${liveRegime} blocked, no momentum override, no decay bypass (30m change: ${(priceChange30m * 100).toFixed(2)}%, margin: ${(marginAboveBasis * 100).toFixed(2)}%, hrsBelowBasis: ${(decayState?.hrsBelowBasis ?? 0).toFixed(2)}, need: >${(MOMENTUM_THRESHOLD * 100).toFixed(0)}% momentum + >0.5% margin OR decay past ${runtime.progressiveBasisDecayStartHours}h grace)`, timestamp: now }));
+      } else if (basisThresholdActive !== null && price < basisThresholdActive) {
         const decayTag = runtime.progressiveBasisDecayEnabled ? ' [progressive-decay]' : '';
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${basisThresholdActive.toFixed(2)} (basis $${basis.toFixed(2)} × ${(basisThresholdActive / basis).toFixed(4)})${decayTag}`, timestamp: now }));
+        const bypassTag = decayBypass ? ` [decay-bypass ${(decayState?.hrsBelowBasis ?? 0).toFixed(1)}h below basis]` : '';
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${basisThresholdActive.toFixed(2)} (basis $${basis.toFixed(2)} × ${(basisThresholdActive / basis).toFixed(4)})${decayTag}${bypassTag}`, timestamp: now }));
       } else if (timeSinceLast < effectiveCooldownMs) {
         const effectiveCooldownMin = effectiveCooldownMs / 60_000;
         console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: cooldown active (${((effectiveCooldownMs - timeSinceLast) / 60_000).toFixed(1)}min remaining, ${effectiveCooldownMin.toFixed(0)}min effective${momentumOverride ? ' [momentum]' : ''} for ${liveRegime})`, timestamp: now }));
