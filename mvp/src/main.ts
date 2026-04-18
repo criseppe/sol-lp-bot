@@ -1699,12 +1699,9 @@ async function runLiveCycle(price: number): Promise<void> {
           console.log(JSON.stringify({ level: 'warn', msg: `[ReserveGate] Deploy blocked: ${gateRR.reason}`, timestamp: Date.now() }));
           return;
         }
-        const basisStateRR = readCostBasis(db);
-        const basisThresholdRR = regimeParamsRR.basisGateThreshold ?? 0.999;
-        if (basisStateRR.solCostBasis > 0 && price < basisStateRR.solCostBasis * basisThresholdRR) {
-          console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} < basis threshold`, timestamp: Date.now() }));
-          return;
-        }
+        // BasisGate skipped on LP open — no realized loss when pairing capital.
+        // Sell-at-loss protection remains in SolConvert and idle-rebalance SOL-sell paths.
+        console.log(JSON.stringify({ level: 'info', msg: '[BasisGate] Skipping for LP open — deploying existing capital, no realized loss', timestamp: Date.now() }));
         // Keep upside ChurnGuard even for regime reopen — prevents opening near upper
         // bound right after an upside exit, which would immediately trigger T1_UPSIDE
         // and waste the reopen. Re-arm the pending timestamp so the check retries next cycle.
@@ -1745,17 +1742,10 @@ async function runLiveCycle(price: number): Promise<void> {
     }
     cycleGateReserve = 'PASS';
     console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateID.reason}`, timestamp: Date.now() }));
-    // Gate 2: BasisGate
-    const basisStateID = readCostBasis(db);
-    const basisThresholdID = regimeParamsID.basisGateThreshold ?? 0.999;
-    const basisThresholdPriceID = basisStateID.solCostBasis * basisThresholdID;
-    if (basisStateID.solCostBasis > 0 && price < basisThresholdPriceID) {
-      cycleGateBasis = 'BLOCK';
-      console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceID.toFixed(2)} (basis $${basisStateID.solCostBasis.toFixed(2)} × ${basisThresholdID})`, timestamp: Date.now() }));
-      return;
-    }
-    cycleGateBasis = 'PASS';
-    console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceID.toFixed(2)} (basis $${basisStateID.solCostBasis.toFixed(2)} × ${basisThresholdID})`, timestamp: Date.now() }));
+    // Gate 2: BasisGate — skipped on LP open (no realized loss).
+    // Sell-at-loss protection remains in SolConvert and idle-rebalance SOL-sell paths.
+    cycleGateBasis = 'SKIP';
+    console.log(JSON.stringify({ level: 'info', msg: '[BasisGate] Skipping for LP open — deploying existing capital, no realized loss', timestamp: Date.now() }));
     // Gate 3: ChurnGuard
     const lastExitID = db.prepare("SELECT timestamp, decision, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as any;
     if (lastExitID) {
@@ -2438,7 +2428,6 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   liveBotState = 'ACTIVE';
-  positionChangedThisCycle = true;
 }
 
 async function liveOpenPosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
@@ -2514,6 +2503,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
     liveRebalancesThisHour++;
     dailyRebalanceCount++;
     liveBotState = 'ACTIVE';
+    positionChangedThisCycle = true;  // guard reconciler from attributing LP deposit to manual swap
 
     const comp = await liveExecutor.getPositionComposition();
     const depositedSol = comp?.sol ?? 0;
@@ -2738,15 +2728,9 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
     return;
   }
   console.log(JSON.stringify({ level: 'info', msg: `[ReserveGate] Passed: ${gateCR.reason}`, timestamp: Date.now() }));
-  // Gate 2: BasisGate
-  const basisStateCR = readCostBasis(db);
-  const basisThresholdCR = regimeParamsCR.basisGateThreshold ?? 0.999;
-  const basisThresholdPriceCR = basisStateCR.solCostBasis * basisThresholdCR;
-  if (basisStateCR.solCostBasis > 0 && price < basisThresholdPriceCR) {
-    console.log(JSON.stringify({ level: 'warn', msg: `[BasisGate] Blocked: price $${price.toFixed(2)} below threshold $${basisThresholdPriceCR.toFixed(2)} (basis $${basisStateCR.solCostBasis.toFixed(2)} × ${basisThresholdCR})`, timestamp: Date.now() }));
-    return;
-  }
-  console.log(JSON.stringify({ level: 'info', msg: `[BasisGate] Passed: price $${price.toFixed(2)} >= threshold $${basisThresholdPriceCR.toFixed(2)} (basis $${basisStateCR.solCostBasis.toFixed(2)} × ${basisThresholdCR})`, timestamp: Date.now() }));
+  // Gate 2: BasisGate — skipped on LP open (no realized loss).
+  // Sell-at-loss protection remains in SolConvert and idle-rebalance SOL-sell paths.
+  console.log(JSON.stringify({ level: 'info', msg: '[BasisGate] Skipping for LP open — deploying existing capital, no realized loss', timestamp: Date.now() }));
   // Gate 3: ChurnGuard
   const lastExitCR = db.prepare("SELECT timestamp, decision, price FROM decision_log WHERE decision IN ('T1_DOWNSIDE','OOR_BELOW') ORDER BY rowid DESC LIMIT 1").get() as any;
   if (lastExitCR) {
