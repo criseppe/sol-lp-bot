@@ -18,7 +18,9 @@ import { alertFloorCheckBlocked, alertShadowSell } from '../output/telegram.js';
 
 const SOL_DECIMALS = 9;
 const USDC_DECIMALS = 6;
-function getSlippage(): Percentage { return Percentage.fromFraction(runtime.swapSlippageBps, 10000); }
+// Orca LP slippage (open/close/increaseLiquidity/decreaseLiquidity quotes). Jupiter swaps use
+// runtime.swapSlippageBps directly (as bps integer) in the executeSwap path (line 162).
+function getLiquiditySlippage(): Percentage { return Percentage.fromFraction(runtime.liquiditySlippageBps ?? 100, 10000); }
 function getSwapBuffer(): number { return 1 + runtime.swapBufferPct / 100; }
 
 // Dynamic reserves — read from runtime config (updated via /config page)
@@ -254,7 +256,7 @@ export class LiveExecutor {
     {
       // Get the LP deposit ratio: how much USDC per 1 SOL at this tick range
       const ratioQuote = increaseLiquidityQuoteByInputToken(
-        solMint, new Decimal(1), range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        solMint, new Decimal(1), range.tickLower, range.tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
       const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
 
@@ -371,7 +373,7 @@ export class LiveExecutor {
     const solForQuote = Math.max(0, solAvailable - 0.05);
     let quote = solForQuote > 0.01 ? increaseLiquidityQuoteByInputToken(
       solMint, new Decimal(solForQuote),
-      range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      range.tickLower, range.tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
     let quotedBy = 'SOL';
 
@@ -381,7 +383,7 @@ export class LiveExecutor {
         // SOL quote needs more USDC than available — try USDC quote instead
         quote = usdcAvailable > 0.5 ? increaseLiquidityQuoteByInputToken(
           usdcMint, new Decimal(usdcAvailable),
-          range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+          range.tickLower, range.tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
         ) : null;
         quotedBy = 'USDC';
         if (quote) {
@@ -393,7 +395,7 @@ export class LiveExecutor {
       // No SOL available — try USDC-only quote
       quote = increaseLiquidityQuoteByInputToken(
         usdcMint, new Decimal(usdcAvailable),
-        range.tickLower, range.tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        range.tickLower, range.tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
       quotedBy = 'USDC';
       if (quote) {
@@ -528,7 +530,7 @@ export class LiveExecutor {
 
     const txBuilders = await whirlpool.closePosition(
       this.currentPosition.positionAddress,
-      getSlippage(),
+      getLiquiditySlippage(),
       this.wallet.publicKey,
       this.wallet.publicKey,
       this.wallet.publicKey,
@@ -833,7 +835,7 @@ export class LiveExecutor {
     const { tickLower, tickUpper } = this.currentPosition;
 
     const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(1), tickLower, tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
@@ -927,7 +929,7 @@ export class LiveExecutor {
 
     // Calculate ideal ratio (same logic as openPosition), capped at maxDeployUsdc if provided
     const ratioQuote = increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(1), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(1), tickLower, tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     );
     const usdcPer1Sol = Number(ratioQuote.tokenEstB.toString()) / 1e6;
     const valuePerSolUnit = currentPrice + usdcPer1Sol;
@@ -979,14 +981,14 @@ export class LiveExecutor {
 
     // Quote with capped balances
     let quote = solAvailable > 0.01 ? increaseLiquidityQuoteByInputToken(
-      solMint, new Decimal(solAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+      solMint, new Decimal(solAvailable), tickLower, tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
     ) : null;
 
     if (quote) {
       const usdcNeeded = Number(quote.tokenEstB.toString()) / 1e6;
       if (usdcNeeded > usdcAvailable) {
         quote = usdcAvailable > 0.5 ? increaseLiquidityQuoteByInputToken(
-          usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+          usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
         ) : null;
         if (quote) {
           const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
@@ -995,7 +997,7 @@ export class LiveExecutor {
       }
     } else if (usdcAvailable > 0.5) {
       quote = increaseLiquidityQuoteByInputToken(
-        usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getSlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+        usdcMint, new Decimal(usdcAvailable), tickLower, tickUpper, getLiquiditySlippage(), whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
       );
       if (quote) {
         const solNeeded = Number(quote.tokenEstA.toString()) / 1e9;
