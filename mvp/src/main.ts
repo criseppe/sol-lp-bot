@@ -1890,9 +1890,9 @@ async function runLiveCycle(price: number): Promise<void> {
         // Check if pending fees are worth the gas cost (~$0.10) before harvesting
         const pendingCheck = await liveExecutor.getPendingFees();
         const pendingTotal = pendingCheck?.feeTotalUsdc ?? 0;
-        if (pendingTotal < 0.50) {
+        if (pendingTotal < 2.00) {
           // Not enough fees to justify gas — skip this harvest, check again next hour
-          console.log(JSON.stringify({ level: 'info', msg: `Harvest skipped: pending fees $${pendingTotal.toFixed(4)} < $0.50 minimum`, timestamp: now }));
+          console.log(JSON.stringify({ level: 'info', msg: `Harvest skipped: pending fees $${pendingTotal.toFixed(4)} < $2.00 minimum`, timestamp: now }));
           // Don't update liveLastHarvestTime — will re-check next hour
           // NOTE: do NOT return here — auto-deploy and idle rebalance still need to run
         } else {
@@ -2564,7 +2564,7 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     try {
       const pendingFees = await liveExecutor.getPendingFees();
       const pendingFeesUsdc = pendingFees ? pendingFees.feeTotalUsdc : 0;
-      if (pendingFeesUsdc >= 0.50) {
+      if (pendingFeesUsdc >= 1.00) {
         console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Collecting $${pendingFeesUsdc.toFixed(2)} pending fees before close`, timestamp: Date.now() }));
         const fees = await liveExecutor.collectFees();
         if (fees && (fees.feeSol > 0.001 || fees.feeUsdc > 0.01)) {
@@ -2603,7 +2603,7 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
           console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Fees too small to harvest ($${pendingFeesUsdc.toFixed(2)}) — skipping conversion`, timestamp: Date.now() }));
         }
       } else {
-        console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Skipped — pending fees $${pendingFeesUsdc.toFixed(2)} below $0.50 threshold`, timestamp: Date.now() }));
+        console.log(JSON.stringify({ level: 'info', msg: `[PreCloseHarvest] Skipped — pending fees $${pendingFeesUsdc.toFixed(2)} below $1.00 threshold`, timestamp: Date.now() }));
       }
     } catch (e) {
       // CRITICAL: harvest failure must never block the close
