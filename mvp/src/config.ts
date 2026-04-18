@@ -154,6 +154,14 @@ export const runtime = {
   // boost). When false, runs with pure static regime params only.
   dynamicAdjustmentsEnabled: false,
 
+  // Progressive basis decay — gradually loosen SolConvert threshold
+  // when price stays below basis for extended periods.
+  progressiveBasisDecayEnabled: false,
+  progressiveBasisDecayStartHours: 0.5,
+  progressiveBasisDecayPerInterval: 0.001,
+  progressiveBasisDecayIntervalMinutes: 15,
+  progressiveBasisDecayMinThreshold: 0.950,
+
   // Strategic SOL Rebalance — unstick bot when idle + SOL-heavy + below basis
   strategicRebalanceEnabled: true,
   strategicRebalanceIdleMinutes: 30,
@@ -348,6 +356,13 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Master switch for dynamic adjustments
   { const v = n('dynamicAdjustmentsEnabled'); if (v != null) runtime.dynamicAdjustmentsEnabled = v !== 0; }
+
+  // Progressive basis decay
+  { const v = n('progressiveBasisDecayEnabled'); if (v != null) runtime.progressiveBasisDecayEnabled = v !== 0; }
+  const pbdS = nv('progressiveBasisDecayStartHours', 0.5, 48);         if (pbdS != null) runtime.progressiveBasisDecayStartHours = pbdS;
+  const pbdP = nv('progressiveBasisDecayPerInterval', 0.0001, 0.01);   if (pbdP != null) runtime.progressiveBasisDecayPerInterval = pbdP;
+  const pbdI = nv('progressiveBasisDecayIntervalMinutes', 1, 60);      if (pbdI != null) runtime.progressiveBasisDecayIntervalMinutes = pbdI;
+  const pbdM = nv('progressiveBasisDecayMinThreshold', 0.80, 0.99);    if (pbdM != null) runtime.progressiveBasisDecayMinThreshold = pbdM;
 
   // Strategic SOL Rebalance
   { const v = n('strategicRebalanceEnabled'); if (v != null) runtime.strategicRebalanceEnabled = v !== 0; }

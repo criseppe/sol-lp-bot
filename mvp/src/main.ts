@@ -150,6 +150,10 @@ let strategicIdleStartTs = 0;           // when this idle period began (0 = not 
 let lastStrategicRebalanceTs = 0;       // cooldown tracker
 let strategicRebalanceFailures = 0;     // consecutive tx failure count
 let strategicRebalanceBackoffUntil = 0; // backoff window after 3 consecutive failures
+
+// Progressive basis decay — gradually loosen sell threshold when stuck below basis
+let belowBasisStartTs = 0;
+let lastDecayLogTs = 0;
 let smartSellPending = false; // DISABLED — any SOL sell loses money in downtrends
 let taRegimeCandidate: Regime | null = null;   // TA-first regime hysteresis candidate
 let taRegimeCandidateCount = 0;                // consecutive cycles candidate has held
@@ -228,6 +232,43 @@ async function reconcileReserveAfterOpen(label: string): Promise<void> {
   }
 }
 
+// ── Progressive basis decay ───────────────────────────────────────────────
+// When price stays below basis for > progressiveBasisDecayStartHours, gradually
+// loosen the effective threshold on a progressiveBasisDecayIntervalMinutes cadence
+// so SolConvert / idle-rebalance SOL-sell can eventually fire at a small loss.
+// Bounded by progressiveBasisDecayMinThreshold (default 95%). Disabled by default.
+function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, now: number): number {
+  const defaultMultiplier = 0.995;
+  const defaultThreshold = basis * defaultMultiplier;
+
+  if (!runtime.progressiveBasisDecayEnabled) return defaultThreshold;
+
+  if (currentPrice >= basis) { belowBasisStartTs = 0; return defaultThreshold; }
+
+  if (belowBasisStartTs === 0) { belowBasisStartTs = now; return defaultThreshold; }
+
+  const hoursBelowBasis = (now - belowBasisStartTs) / 3600_000;
+  if (hoursBelowBasis < runtime.progressiveBasisDecayStartHours) return defaultThreshold;
+
+  const hoursDecaying = hoursBelowBasis - runtime.progressiveBasisDecayStartHours;
+  const intervalsElapsed = Math.floor((hoursDecaying * 60) / runtime.progressiveBasisDecayIntervalMinutes);
+  const decayAmount = intervalsElapsed * runtime.progressiveBasisDecayPerInterval;
+  const effectiveMultiplier = Math.max(runtime.progressiveBasisDecayMinThreshold, defaultMultiplier - decayAmount);
+  const threshold = basis * effectiveMultiplier;
+
+  const logIntervalMs = 15 * 60_000;
+  if (now - lastDecayLogTs > logIntervalMs) {
+    lastDecayLogTs = now;
+    console.log(JSON.stringify({
+      level: 'info',
+      msg: `[ProgressiveDecay] SolConvert threshold loosened. hrsBelowBasis: ${hoursBelowBasis.toFixed(2)}, intervalsElapsed: ${intervalsElapsed}, effectiveMultiplier: ${effectiveMultiplier.toFixed(4)}, threshold: $${threshold.toFixed(2)}, lossTolerance: ${((1 - effectiveMultiplier) * 100).toFixed(2)}%`,
+      timestamp: now,
+    }));
+  }
+
+  return threshold;
+}
+
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
 function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1], overridePositionId?: string) {
   const posId = overridePositionId ?? liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
@@ -276,13 +317,25 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
   const usdcGap = targetUsdc - balances.usdc;
   if (usdcGap < runtime.strategicRebalanceMinUsdcGain) return false;
 
-  const solToSell = Math.min(
-    (usdcGap / price) * 1.01,                                       // +1% slippage buffer
-    (portfolio * runtime.strategicRebalanceMaxPortfolioPct) / price, // cap by max portfolio %
-    Math.max(0, balances.sol - runtime.solReserve),                  // never drop below SOL reserve
-  );
+  // Ensure swap produces enough USDC to actually clear reserveFloor + minDeployUsdc.
+  // Without this floor, the max-portfolio-pct cap can bind and leave USDC still below deploy threshold.
+  const usdcNeeded = reserveFloor + runtime.minDeployUsdc - balances.usdc;
+  const requiredUsdc = Math.max(usdcGap, usdcNeeded * 1.05); // 5% buffer over strict need
+
+  const solNeeded = (requiredUsdc / price) * 1.01;                                       // +1% slippage buffer
+  const solMaxPct = (portfolio * runtime.strategicRebalanceMaxPortfolioPct) / price;      // cap by max portfolio %
+  const solMaxAvailable = Math.max(0, balances.sol - runtime.solReserve);                 // never drop below SOL reserve
+
+  const solToSell = Math.min(solNeeded, solMaxPct, solMaxAvailable);
 
   if (solToSell <= 0 || solToSell * price < runtime.strategicRebalanceMinUsdcGain) return false;
+
+  // Warn if maxPortfolioPct cap binds below what we need to actually deploy next cycle
+  const projectedUsdc = balances.usdc + (solToSell * price);
+  const projectedAvailable = projectedUsdc - reserveFloor;
+  if (projectedAvailable < runtime.minDeployUsdc) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[StrategicRebalance] Warning: maxPortfolioPct cap binds, projected USDC $${projectedAvailable.toFixed(2)} insufficient for minDeployUsdc $${runtime.minDeployUsdc}. Consider raising strategicRebalanceMaxPortfolioPct.`, timestamp: now }));
+  }
 
   const reason = `Strategic rebalance: unstick SOL-heavy idle (share ${(solShare * 100).toFixed(0)}%, price $${price.toFixed(2)} < basis×${runtime.strategicRebalanceBasisMultiplier.toFixed(3)} $${basisFloor.toFixed(2)}, idle ${((now - strategicIdleStartTs) / 60000).toFixed(0)}min)`;
   console.log(JSON.stringify({ level: 'info', msg: `[StrategicRebalance] Triggering: sell ${solToSell.toFixed(3)} SOL → ~$${(solToSell * price).toFixed(0)} USDC. ${reason}`, timestamp: now }));
@@ -2171,6 +2224,13 @@ async function runLiveCycle(price: number): Promise<void> {
       const regimeBasisMult: Record<string, number | null> = { RANGING: 1.000, BULLISH_TREND: 1.010, BEARISH_TREND: 1.005, EXTREME: null };
       const regimeMult = regimeBasisMult[liveRegime] ?? null;
       const effectiveMult = regimeMult != null ? regimeMult * runtime.solConversionBasisMultiplier : null;
+      // Progressive basis decay: when enabled, loosen threshold below per-regime default
+      // after extended idle below basis. Default OFF → uses per-regime mult unchanged.
+      const basisThresholdActive = (effectiveMult !== null)
+        ? (runtime.progressiveBasisDecayEnabled
+            ? calculateEffectiveBasisThreshold(basis, price, now)
+            : basis * effectiveMult)
+        : null;
 
       // Step 4: Regime gate — RANGING/BULLISH always allowed, BEARISH/EXTREME only via momentum
       const regimeAllows = liveRegime === 'RANGING' || liveRegime === 'BULLISH_TREND';
@@ -2179,8 +2239,9 @@ async function runLiveCycle(price: number): Promise<void> {
         // silent skip — don't log every cycle
       } else if (!regimeAllows && !momentumOverride) {
         console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: regime ${liveRegime} blocked, no momentum override (30m change: ${(priceChange30m * 100).toFixed(2)}%, margin: ${(marginAboveBasis * 100).toFixed(2)}%, need: >${(MOMENTUM_THRESHOLD * 100).toFixed(0)}% momentum + >0.5% margin above basis)`, timestamp: now }));
-      } else if (regimeAllows && effectiveMult !== null && price < basis * effectiveMult) {
-        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${(basis * effectiveMult).toFixed(2)} (basis $${basis.toFixed(2)} × ${effectiveMult.toFixed(3)} = regime ${regimeMult} × global ${runtime.solConversionBasisMultiplier})`, timestamp: now }));
+      } else if (regimeAllows && basisThresholdActive !== null && price < basisThresholdActive) {
+        const decayTag = runtime.progressiveBasisDecayEnabled ? ' [progressive-decay]' : '';
+        console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: price $${price.toFixed(2)} below threshold $${basisThresholdActive.toFixed(2)} (basis $${basis.toFixed(2)} × ${(basisThresholdActive / basis).toFixed(4)})${decayTag}`, timestamp: now }));
       } else if (timeSinceLast < effectiveCooldownMs) {
         const effectiveCooldownMin = effectiveCooldownMs / 60_000;
         console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: cooldown active (${((effectiveCooldownMs - timeSinceLast) / 60_000).toFixed(1)}min remaining, ${effectiveCooldownMin.toFixed(0)}min effective${momentumOverride ? ' [momentum]' : ''} for ${liveRegime})`, timestamp: now }));
@@ -2385,12 +2446,16 @@ async function runLiveCycle(price: number): Promise<void> {
             );
             const idealSolToSwap = Math.min(diffUsdc / price, idleSol, sellCapUsdc / price);
 
-            if (price < basis) {
-              // P&L guard: BLOCKED — price below basis
-              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: SOL sell BLOCKED — price $${price.toFixed(2)} below basis $${basis.toFixed(2)}. Waiting.`, timestamp: now }));
+            const idleSellThreshold = runtime.progressiveBasisDecayEnabled
+              ? calculateEffectiveBasisThreshold(basis, price, now)
+              : basis;
+            if (price < idleSellThreshold) {
+              // P&L guard: BLOCKED — price below (possibly decayed) basis threshold
+              const decayTag = runtime.progressiveBasisDecayEnabled ? ' [progressive-decay]' : '';
+              console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: SOL sell BLOCKED — price $${price.toFixed(2)} below threshold $${idleSellThreshold.toFixed(2)} (basis $${basis.toFixed(2)}).${decayTag} Waiting.`, timestamp: now }));
               lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
             } else {
-              // Price >= basis — sell capped amount (profitable)
+              // Price >= threshold — sell capped amount (profitable or within loss tolerance)
               if (idealSolToSwap >= 0.1) {
                 swapDirection = `SOL→USDC (${(currentSolPct * 100).toFixed(0)}% → ${(targetSolPct * 100).toFixed(0)}%)`;
                 console.log(JSON.stringify({ level: 'info', msg: `Idle rebalance: selling ${idealSolToSwap.toFixed(2)} SOL (cap $${sellCapUsdc.toFixed(0)}, gap $${diffUsdc.toFixed(0)}) — price $${price.toFixed(2)} >= basis $${basis.toFixed(2)} (profitable).`, timestamp: now }));
