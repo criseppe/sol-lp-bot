@@ -142,6 +142,10 @@ export const runtime = {
   preOpenSolSellMinUsd: 500,             // min excess-SOL USD value before firing
   preOpenSolSellCooldownMs: 180_000,     // 3 min cooldown
 
+  // SolConvert per-fire size cap (fraction of wallet SOL value). Previously hardcoded
+  // at 0.05 in main.ts; now configurable for DB tuning.
+  solConvertMaxFromSolPct: 0.05,
+
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
   vol1hExtremeThreshold: 0.06,
@@ -255,6 +259,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vPOSSMax = nv('preOpenSolSellMaxPct', 0, 0.5); if (vPOSSMax != null) runtime.preOpenSolSellMaxPct = vPOSSMax;
   const vPOSSMin = nv('preOpenSolSellMinUsd', 0, 10000); if (vPOSSMin != null) runtime.preOpenSolSellMinUsd = vPOSSMin;
   const vPOSSCool = nv('preOpenSolSellCooldownMs', 60_000, 3_600_000); if (vPOSSCool != null) runtime.preOpenSolSellCooldownMs = vPOSSCool;
+  const vSCMaxFrom = nv('solConvertMaxFromSolPct', 0, 1); if (vSCMaxFrom != null) runtime.solConvertMaxFromSolPct = vSCMaxFrom;
 
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
@@ -438,6 +443,7 @@ export function exportConfig(): Record<string, string> {
   out['preOpenSolSellMaxPct'] = String(runtime.preOpenSolSellMaxPct);
   out['preOpenSolSellMinUsd'] = String(runtime.preOpenSolSellMinUsd);
   out['preOpenSolSellCooldownMs'] = String(runtime.preOpenSolSellCooldownMs);
+  out['solConvertMaxFromSolPct'] = String(runtime.solConvertMaxFromSolPct);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);

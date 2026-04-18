@@ -2340,7 +2340,7 @@ async function runLiveCycle(price: number): Promise<void> {
           console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: USDC sufficient ($${deployableUsdc.toFixed(0)} deployable >= $${targetUsdcForDeploy.toFixed(0)} target)`, timestamp: now }));
         } else {
           const needed = targetUsdcForDeploy - deployableUsdc;
-          const maxFromSol = walletSolValue * 0.05;
+          const maxFromSol = walletSolValue * (runtime.solConvertMaxFromSolPct ?? 0.05);
           // Dynamic cap: spread conversion over target deployment time per regime
           const targetDeployMin: number = ({
             RANGING: runtime.solConvertTargetDeployMinRanging ?? 15,
