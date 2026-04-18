@@ -149,6 +149,11 @@ export const runtime = {
   extremeRsiHigh: 78,
   extremeAtrThreshold: 0.60,
 
+  // Master switch for all dynamic param adjustments (TA deploy multiplier,
+  // post-upside centre offsets, RSI-weak centre offsets, post-upside deploy
+  // boost). When false, runs with pure static regime params only.
+  dynamicAdjustmentsEnabled: false,
+
   // Strategic SOL Rebalance — unstick bot when idle + SOL-heavy + below basis
   strategicRebalanceEnabled: true,
   strategicRebalanceIdleMinutes: 30,
@@ -340,6 +345,9 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
       if (val != null) (runtime.regimeParams[regime] as any)[field] = val;
     }
   }
+
+  // Master switch for dynamic adjustments
+  { const v = n('dynamicAdjustmentsEnabled'); if (v != null) runtime.dynamicAdjustmentsEnabled = v !== 0; }
 
   // Strategic SOL Rebalance
   { const v = n('strategicRebalanceEnabled'); if (v != null) runtime.strategicRebalanceEnabled = v !== 0; }

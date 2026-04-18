@@ -1693,7 +1693,7 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Apply TA confidence deploy multiplier (reduces deployPct when TA signal is weak)
-  if (taDeployMultiplier < 1.0) {
+  if (runtime.dynamicAdjustmentsEnabled && taDeployMultiplier < 1.0) {
     params.deployPct *= taDeployMultiplier;
   }
 
@@ -2548,7 +2548,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   let postUpsideNote = '';
   const minsSinceUpside = lastUpsideExitTs > 0 ? (Date.now() - lastUpsideExitTs) / 60000 : 999;
   const isPostUpside = minsSinceUpside < 30 && lastUpsideExitPrice > 0;
-  if (isPostUpside) {
+  if (runtime.dynamicAdjustmentsEnabled && isPostUpside) {
     const postUpsideOffsets: Record<string, number> = {
       'RANGING':       runtime.postUpsideOffsetRanging  ?? -0.005,
       'BULLISH_TREND': runtime.postUpsideOffsetBullish  ??  0.000,
@@ -2565,7 +2565,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   // Defensive centre offset in BULLISH when RSI is oversold — prevents opening
   // a range centred too high when the market is actually weak.
-  if (liveRegime === 'BULLISH_TREND' && lastRsi != null && lastRsi < 45) {
+  if (runtime.dynamicAdjustmentsEnabled && liveRegime === 'BULLISH_TREND' && lastRsi != null && lastRsi < 45) {
     const rsiOffset = -0.003; // -0.3%
     const before = centrePrice;
     centrePrice = centrePrice * (1 + rsiOffset);
@@ -2574,7 +2574,7 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   // Post-upside: override deployPct to 100% for max USDC-constrained deployment,
   // but ONLY in RANGING/BULLISH. BEARISH/EXTREME keep regime default to preserve reserves.
-  const postUpsideDeployBoost = isPostUpside && liveRegime !== 'BEARISH_TREND' && liveRegime !== 'EXTREME';
+  const postUpsideDeployBoost = runtime.dynamicAdjustmentsEnabled && isPostUpside && liveRegime !== 'BEARISH_TREND' && liveRegime !== 'EXTREME';
   const effectiveDeployPct = postUpsideDeployBoost ? 1.0 : params.deployPct;
   if (postUpsideDeployBoost && params.deployPct < 1.0) {
     console.log(JSON.stringify({ level: 'info', msg: `[PostUpside] deployPct ${(params.deployPct * 100).toFixed(0)}% → 100% (RANGING/BULLISH only)`, timestamp: Date.now() }));
