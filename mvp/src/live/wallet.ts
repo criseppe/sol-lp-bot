@@ -7,6 +7,7 @@ import bs58 from 'bs58';
 export function loadWallet(privateKeyBase58: string): Wallet {
   const secretKey = bs58.decode(privateKeyBase58);
   const keypair = Keypair.fromSecretKey(secretKey);
+  secretKey.fill(0);
   return new Wallet(keypair);
 }
 

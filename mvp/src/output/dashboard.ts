@@ -2,6 +2,12 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import type { Server } from 'http';
 import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 import type { BotState, RebalanceEvent } from '../types.js';
 import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSnapshots, getLiveInRangePct, getDecisionLogs, getRegimeHistory, getRebalanceEvents as dbGetRebalanceEvents, exportAllData, getRule2PerfComparison, getRule2EventsCsv, getConfig, setConfigBatch, getDailySummaries, getAllDailySummaries, getRegimeSnapshots, getFeesCollected, getFeesCollectedByDay } from '../db/sqlite.js';
 import { Connection, PublicKey } from '@solana/web3.js';
@@ -165,11 +171,40 @@ export interface DashboardServer {
 export function startDashboard(port: number): DashboardServer {
   const app = express();
   app.set('etag', false);
+  app.set('trust proxy', 'loopback');
   let server: Server;
+
+  // --- Security headers (helmet) ---
+  app.use(helmet({ contentSecurityPolicy: false }));
+
+  // --- Rate limiting (applies to every request; /api gets a stricter bucket) ---
+  const globalLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'too many requests' },
+  });
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'too many requests' },
+  });
+  app.use(globalLimiter);
+  app.use('/api', apiLimiter);
 
   // --- Auth helper (reusable per-route and as global middleware) ---
   const dashUserEarly = process.env.DASHBOARD_USER;
   const dashPassEarly = process.env.DASHBOARD_PASS;
+  if ((!dashUserEarly || !dashPassEarly) && process.env.BOT_MODE === 'LIVE') {
+    console.error('[SECURITY] CRITICAL: BOT_MODE=LIVE but DASHBOARD_USER or DASHBOARD_PASS not set. Refusing to start.');
+    process.exit(1);
+  }
+  if (!dashUserEarly || !dashPassEarly) {
+    console.warn('[SECURITY] WARNING: Dashboard auth disabled — env vars missing');
+  }
   const requireAuth = (req: Request, res: Response, next: NextFunction) => {
     if (!dashUserEarly || !dashPassEarly) { next(); return; }
     const auth = req.headers.authorization;
@@ -338,7 +373,7 @@ export function startDashboard(port: number): DashboardServer {
         },
         ilTracker: { byDay: ilByDay, byRegime: ilByRegime, allTime: ilAllTime },
       });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Hourly Performance endpoint — feeds the Intelligence hourly widget
@@ -431,7 +466,7 @@ export function startDashboard(port: number): DashboardServer {
       `).all() as any[]).map((r: any) => r.d);
 
       res.json({ date, hours, availableDates });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Daily Fees Intelligence endpoint
@@ -579,7 +614,7 @@ export function startDashboard(port: number): DashboardServer {
         hourly7dAvg,
         currentHour,
       });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Arcade — temporarily offline
@@ -595,6 +630,25 @@ export function startDashboard(port: number): DashboardServer {
     app.use(requireAuth);
     console.log(JSON.stringify({ level: 'info', msg: 'dashboard auth enabled', timestamp: Date.now() }));
   }
+
+  // --- CSRF origin check (applies to mutating verbs on all routes below) ---
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const mutating = ['POST', 'DELETE', 'PUT', 'PATCH'];
+    if (!mutating.includes(req.method)) return next();
+    const allowed = [
+      'https://gcamlp.duckdns.org',
+      'http://localhost:3000',
+      'http://localhost',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1',
+    ];
+    const origin = String(req.headers.origin || req.headers.referer || '');
+    if (origin && !allowed.some(a => origin.startsWith(a))) {
+      res.status(403).json({ error: 'forbidden origin' });
+      return;
+    }
+    next();
+  });
 
   // Prevent browser caching of HTML pages (ensures fresh content after deploys)
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -784,7 +838,7 @@ export function startDashboard(port: number): DashboardServer {
         }
       }
       res.json({ swaps, summary: { totalPnl, swapCount: swaps.length, buys, sells, profitable, unprofitable, totalGas, totalProtocolFee } });
-    } catch (e) { res.status(500).json({ error: String(e) }); }
+    } catch (e) { console.error('[API Error]', e); res.status(500).json({ error: 'internal server error' }); }
   });
 
   app.get('/api/regime-history', (_req, res) => {
@@ -856,15 +910,23 @@ export function startDashboard(port: number): DashboardServer {
 
   app.post('/api/investors', express.json(), (req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
-    const { name, amount, date } = req.body;
-    if (!name || !amount || !date) { res.status(400).json({ error: 'name, amount, date required' }); return; }
-    dbRef.prepare('INSERT INTO investors (name, amount_usdc, invest_date, created_at) VALUES (?, ?, ?, ?)').run(name, parseFloat(amount), date, Date.now());
+    const { name, amount, date } = req.body ?? {};
+    const amountNum = parseFloat(amount);
+    if (typeof name !== 'string' || name.trim().length === 0 || name.length > 80 ||
+        !Number.isFinite(amountNum) || amountNum <= 0 || amountNum > 1e9 ||
+        typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: 'invalid input' });
+      return;
+    }
+    dbRef.prepare('INSERT INTO investors (name, amount_usdc, invest_date, created_at) VALUES (?, ?, ?, ?)').run(name.trim(), amountNum, date, Date.now());
     res.json({ success: true });
   });
 
   app.delete('/api/investors/:id', (req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
-    dbRef.prepare('DELETE FROM investors WHERE id = ?').run(parseInt(req.params.id));
+    const id = parseInt(req.params.id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: 'invalid id' }); return; }
+    dbRef.prepare('DELETE FROM investors WHERE id = ?').run(id);
     res.json({ success: true });
   });
 
@@ -899,7 +961,7 @@ export function startDashboard(port: number): DashboardServer {
       const analyticsDailyFeesMap = new Map(analyticsDailyFees.map(d => [d.date, d.fees]));
       const dailySummaries = dailySummariesRaw.map((d: any) => ({ ...d, fees_earned_usdc: analyticsDailyFeesMap.get(d.date) ?? d.fees_earned_usdc }));
       res.json({ snaps, events, regimeHist, dailySummaries, state, days, currentPrice: analyticsCurrentPrice });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Projection page
@@ -1055,7 +1117,7 @@ export function startDashboard(port: number): DashboardServer {
         dataStartDate: new Date(snaps[0].timestamp).toLocaleDateString('en-CA', { timeZone: TZ }),
         dataEndDate: new Date(snaps[snaps.length-1].timestamp).toLocaleDateString('en-CA', { timeZone: TZ }),
       });
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Analysis agent page + API
@@ -1078,19 +1140,19 @@ export function startDashboard(port: number): DashboardServer {
 
   let analysisRunning = false;
   app.post('/api/analysis/run', async (_req, res) => {
-    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
-    if (analysisRunning) { res.status(429).json({ error: 'Analysis already running' }); return; }
+    if (!dbRef) { res.status(500).json({ error: 'internal server error' }); return; }
+    if (analysisRunning) { res.status(429).json({ error: 'analysis already running' }); return; }
     analysisRunning = true;
     try {
-      const { execSync } = await import('child_process');
-      const output = execSync('node scripts/weekly-analysis.cjs --days=7', { cwd: process.cwd(), timeout: 30000 }).toString();
+      const { stdout } = await execAsync('node scripts/weekly-analysis.cjs --days=7', { cwd: process.cwd(), timeout: 30000 });
       dbRef.prepare("INSERT INTO config (key, value, updated_at) VALUES ('analysisLastReport', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-        .run(output, Date.now());
+        .run(stdout, Date.now());
       dbRef.prepare("INSERT INTO config (key, value, updated_at) VALUES ('analysisLastRunTime', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
         .run(String(Date.now()), Date.now());
-      res.json({ success: true, report: output });
+      res.json({ success: true, report: stdout });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error('[API Error] /api/analysis/run:', err);
+      res.status(500).json({ error: 'analysis failed' });
     } finally {
       analysisRunning = false;
     }
@@ -1133,7 +1195,8 @@ export function startDashboard(port: number): DashboardServer {
       console.log(JSON.stringify({ level: 'info', msg: `Config updated: ${Object.keys(filtered).length} keys`, keys: Object.keys(filtered), timestamp: Date.now() }));
       res.json({ success: true, updated: Object.keys(filtered).length, rejected });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error('[API Error] /api/config:', err);
+      res.status(500).json({ error: 'internal server error' });
     }
   });
 
@@ -1171,7 +1234,7 @@ export function startDashboard(port: number): DashboardServer {
       } else {
         res.status(404).json({ error: 'Generate first: node scripts/generate-simulation-data.cjs' });
       }
-    } catch (err) { res.status(500).json({ error: String(err) }); }
+    } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
   // Health check state
@@ -1379,7 +1442,7 @@ export function startDashboard(port: number): DashboardServer {
         await onEmergencyStop();
         res.json({ success: true, msg: 'Position closed and bot stopped.' });
       } catch (err) {
-        res.status(500).json({ success: false, msg: String(err) });
+        console.error('[API Error]', err); res.status(500).json({ success: false, msg: 'internal server error' });
       }
     } else {
       res.status(400).json({ success: false, msg: 'No emergency stop handler registered.' });
@@ -1414,7 +1477,7 @@ export function startDashboard(port: number): DashboardServer {
         await onClosePosition();
         res.json({ success: true, msg: 'Position closed. Bot paused in IDLE state. Click Resume to restart.' });
       } catch (err) {
-        res.status(500).json({ success: false, msg: String(err) });
+        console.error('[API Error]', err); res.status(500).json({ success: false, msg: 'internal server error' });
       }
     } else {
       res.status(400).json({ success: false, msg: 'No close-position handler registered.' });
@@ -1429,7 +1492,7 @@ export function startDashboard(port: number): DashboardServer {
         const fees = await onHarvest();
         res.json({ success: true, msg: `Harvested ${fees.feeSol.toFixed(6)} SOL + ${fees.feeUsdc.toFixed(6)} USDC` });
       } catch (err) {
-        res.status(500).json({ success: false, msg: String(err) });
+        console.error('[API Error]', err); res.status(500).json({ success: false, msg: 'internal server error' });
       }
     } else {
       res.status(400).json({ success: false, msg: 'No harvest handler registered.' });
@@ -1621,7 +1684,8 @@ export function startDashboard(port: number): DashboardServer {
       if (!preview) { res.json({ available: false, reason: 'No open position or insufficient wallet balance' }); return; }
       res.json({ available: true, ...preview });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      console.error('[API Error] /api/add-liquidity-preview:', err);
+      res.status(500).json({ error: 'internal server error' });
     }
   });
 
@@ -1631,7 +1695,8 @@ export function startDashboard(port: number): DashboardServer {
       const result = await onAddLiquidity();
       res.json({ success: true, ...result, msg: `Added ${result.solDeposited.toFixed(4)} SOL + ${result.usdcDeposited.toFixed(2)} USDC ($${result.totalUsdc.toFixed(2)}) to position` });
     } catch (err) {
-      res.status(500).json({ success: false, msg: String(err) });
+      console.error('[API Error] /api/add-liquidity:', err);
+      res.status(500).json({ success: false, msg: 'internal server error' });
     }
   });
 

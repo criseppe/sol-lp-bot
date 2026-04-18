@@ -87,6 +87,9 @@ td{padding:6px 8px;border-bottom:1px solid #21262d}
 
 <script>
 var fmt = function(n, d) { return n != null ? Number(n).toFixed(d || 2) : '0.00'; };
+var escHtml = function(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+};
 
 // Default date to today
 document.getElementById('inv-date').value = new Date().toLocaleDateString('en-CA');
@@ -156,14 +159,14 @@ function loadData() {
       var ivCol = invValue >= inv.amount_usdc ? '#22c55e' : '#ef4444';
 
       html += '<tr>';
-      html += '<td style="font-weight:bold">' + inv.name + '</td>';
+      html += '<td style="font-weight:bold">' + escHtml(inv.name) + '</td>';
       html += '<td style="text-align:right;color:#58a6ff">$' + fmt(inv.amount_usdc, 2) + '</td>';
       html += '<td style="text-align:right;color:' + ivCol + ';font-weight:bold">$' + fmt(invValue, 2) + '</td>';
-      html += '<td style="text-align:center;color:#8b949e">' + inv.invest_date + '</td>';
+      html += '<td style="text-align:center;color:#8b949e">' + escHtml(inv.invest_date) + '</td>';
       html += '<td style="text-align:right;color:' + shareCol + ';font-weight:bold">' + fmt(share * 100, 1) + '%</td>';
       html += '<td style="text-align:right;color:#ffd700;font-weight:bold">$' + fmt(returnUsdc, 2) + '</td>';
       html += '<td style="text-align:right;color:#22c55e">' + fmt(returnPct, 2) + '%</td>';
-      html += '<td><button class="del-btn" onclick="deleteInvestor(' + inv.id + ',\\'' + inv.name.replace(/'/g, "\\\\'") + '\\')">✕</button></td>';
+      html += '<td><button class="del-btn" data-id="' + escHtml(inv.id) + '" data-name="' + escHtml(inv.name) + '">✕</button></td>';
       html += '</tr>';
     });
 
@@ -182,8 +185,13 @@ function loadData() {
 
     html += '</table></div>';
     document.getElementById('investors-table').innerHTML = html;
+    document.querySelectorAll('#investors-table .del-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        deleteInvestor(parseInt(btn.getAttribute('data-id')), btn.getAttribute('data-name') || '');
+      });
+    });
   }).catch(function(e) {
-    document.getElementById('investors-table').innerHTML = '<div style="color:#ef4444">Failed to load: ' + e + '</div>';
+    document.getElementById('investors-table').innerHTML = '<div style="color:#ef4444">Failed to load: ' + escHtml(String(e)) + '</div>';
   });
 }
 
