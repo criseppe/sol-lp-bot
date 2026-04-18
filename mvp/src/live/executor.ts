@@ -498,15 +498,20 @@ export class LiveExecutor {
     const feeUsdcCollected = pendingFees?.feeUsdcDecimal ?? 0;
     const feeTotalUsdc = pendingFees?.feeTotalUsdc ?? 0;
 
-    // 2. Compute IL before close
-    let ilAtClose = 0;
+    // 2. Compute IL as (LP value at close) − (HODL counterfactual value at close).
+    // HODL uses cumulative deposited SOL+USDC across initial open and any
+    // increaseLiquidity additions (entrySol/entryUsdc are accumulated in
+    // openPosition and increaseLiquidity). Replaces the V2 full-range formula
+    // which severely underestimates IL for concentrated-liquidity positions.
     const entryPrice = this.currentPosition.entryPrice;
-    if (entryPrice && entryPrice !== currentPrice) {
+    let ilAtClose = 0;
+    {
       const posComp = await this.getPositionComposition();
-      const posValue = posComp?.totalUsdc ?? 0;
-      const priceRatio = currentPrice / entryPrice;
-      const ilPct = 2 * Math.sqrt(priceRatio) / (1 + priceRatio) - 1;
-      ilAtClose = ilPct * posValue;
+      const lpValue = posComp?.totalUsdc ?? 0;
+      const hodlValue = this.currentPosition.entrySol * currentPrice + this.currentPosition.entryUsdc;
+      if (hodlValue > 0) {
+        ilAtClose = lpValue - hodlValue;
+      }
     }
 
     // 3. Capture position info before it's cleared
