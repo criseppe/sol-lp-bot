@@ -276,6 +276,29 @@ function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, n
   return threshold;
 }
 
+// Pure (no side-effects, no logging) accessor for dashboard visibility.
+// Must match the math in calculateEffectiveBasisThreshold above.
+function getProgressiveDecayState(basis: number, currentPrice: number, now: number) {
+  if (!runtime.progressiveBasisDecayEnabled) return null;
+  if (basis <= 0) return null;
+  const defaultMultiplier = 0.995;
+  if (currentPrice >= basis || belowBasisStartTs === 0) {
+    return { active: false, hrsBelowBasis: 0, effectiveMultiplier: defaultMultiplier, effectiveThresholdUsd: basis * defaultMultiplier, lossTolerancePct: (1 - defaultMultiplier) * 100 };
+  }
+  const hrsBelowBasis = (now - belowBasisStartTs) / 3600_000;
+  const hoursDecaying = Math.max(0, hrsBelowBasis - runtime.progressiveBasisDecayStartHours);
+  const intervalsElapsed = Math.floor((hoursDecaying * 60) / runtime.progressiveBasisDecayIntervalMinutes);
+  const decayAmount = intervalsElapsed * runtime.progressiveBasisDecayPerInterval;
+  const effectiveMultiplier = Math.max(runtime.progressiveBasisDecayMinThreshold, defaultMultiplier - decayAmount);
+  return {
+    active: hrsBelowBasis >= runtime.progressiveBasisDecayStartHours,
+    hrsBelowBasis,
+    effectiveMultiplier,
+    effectiveThresholdUsd: basis * effectiveMultiplier,
+    lossTolerancePct: (1 - effectiveMultiplier) * 100,
+  };
+}
+
 // Wrapper to auto-tag rebalance events with rule2 state and position ID
 function insertRebalanceEventWithRule2(db_: typeof db, event: Parameters<typeof insertRebalanceEvent>[1], overridePositionId?: string) {
   const posId = overridePositionId ?? liveExecutor?.getCurrentPosition()?.positionMint?.toBase58() ?? null;
@@ -925,6 +948,24 @@ async function main() {
             botState: liveBotState,
             liveEvents: [],
             marketSignals: marketData.getSignals() ?? undefined,
+            progressiveDecay: getProgressiveDecayState(costBasisState.solCostBasis || 0, price.price, Date.now()),
+            strategicRebalance: runtime.strategicRebalanceEnabled ? (() => {
+              const total = balances.sol * price.price + balances.usdc;
+              const solSharePct = total > 0 ? (balances.sol * price.price) / total * 100 : 0;
+              const idleSeconds = strategicIdleStartTs > 0 ? Math.floor((Date.now() - strategicIdleStartTs) / 1000) : 0;
+              const cooldownRemainingSec = lastStrategicRebalanceTs > 0
+                ? Math.max(0, Math.floor((lastStrategicRebalanceTs + runtime.strategicRebalanceCooldownHours * 3600_000 - Date.now()) / 1000))
+                : 0;
+              return {
+                enabled: true,
+                idleSeconds,
+                triggerSeconds: runtime.strategicRebalanceIdleMinutes * 60,
+                solSharePct,
+                solShareThresholdPct: runtime.strategicRebalanceMinSolSharePct * 100,
+                cooldownRemainingSec,
+                lastFiredTs: lastStrategicRebalanceTs,
+              };
+            })() : null,
           };
           currentLiveData = liveDataUpdate;
           dashboard.updateLiveData(liveDataUpdate);

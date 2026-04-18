@@ -141,6 +141,22 @@ export interface LiveData {
     lastUpdated: number;
     errors: string[];
   };
+  progressiveDecay?: {
+    active: boolean;
+    hrsBelowBasis: number;
+    effectiveMultiplier: number;
+    effectiveThresholdUsd: number;
+    lossTolerancePct: number;
+  } | null;
+  strategicRebalance?: {
+    enabled: boolean;
+    idleSeconds: number;
+    triggerSeconds: number;
+    solSharePct: number;
+    solShareThresholdPct: number;
+    cooldownRemainingSec: number;
+    lastFiredTs: number;
+  } | null;
 }
 
 export interface DashboardServer {
@@ -1618,7 +1634,11 @@ export function startDashboard(port: number): DashboardServer {
         const scMult = scRegimeMult[regime] ?? null;
         if (scMult !== null) {
           const scEffective = scMult * runtime.solConversionBasisMultiplier;
-          triggers.push({ id: 'solConvert', label: 'SOL convert', triggerPrice: parseFloat((basis * scEffective).toFixed(2)), direction: 'above', color: '#a855f7' });
+          const decay = live.progressiveDecay;
+          const staticPrice = basis * scEffective;
+          const effectivePrice = decay?.active ? decay.effectiveThresholdUsd : staticPrice;
+          const subNote = decay?.active ? `decay: -${decay.lossTolerancePct.toFixed(2)}% tol, ${decay.hrsBelowBasis.toFixed(1)}h below basis` : null;
+          triggers.push({ id: 'solConvert', label: decay?.active ? 'SOL convert (decayed)' : 'SOL convert', triggerPrice: parseFloat(effectivePrice.toFixed(2)), direction: 'above', color: decay?.active ? '#c084fc' : '#a855f7', subNote });
         }
       }
       if (live.botState !== 'ACTIVE' && basis > 0) {
@@ -1669,7 +1689,16 @@ export function startDashboard(port: number): DashboardServer {
         t.pctFilled = parseFloat(t.pctFilled.toFixed(1));
       }
       const closest = triggers.length > 0 ? triggers.reduce((a, b) => a.distanceAbs < b.distanceAbs ? a : b) : null;
-      res.json({ currentPrice: price, triggers, closestTrigger: closest ? { label: closest.label, price: closest.triggerPrice, distance: closest.distance } : null });
+      let strategicStatus: any = null;
+      if (live.botState !== 'ACTIVE' && live.strategicRebalance?.enabled) {
+        const sr = live.strategicRebalance;
+        const idlePct = sr.triggerSeconds > 0 ? Math.min(100, (sr.idleSeconds / sr.triggerSeconds) * 100) : 0;
+        const priceFloor = basis > 0 ? basis * runtime.strategicRebalanceBasisMultiplier : 0;
+        const priceBelowFloor = basis > 0 && price < priceFloor;
+        const armed = sr.idleSeconds >= sr.triggerSeconds && sr.solSharePct >= sr.solShareThresholdPct && sr.cooldownRemainingSec === 0 && priceBelowFloor;
+        strategicStatus = { idleSec: sr.idleSeconds, triggerSec: sr.triggerSeconds, idlePct: parseFloat(idlePct.toFixed(1)), solSharePct: parseFloat(sr.solSharePct.toFixed(1)), solShareThresholdPct: parseFloat(sr.solShareThresholdPct.toFixed(1)), cooldownSec: sr.cooldownRemainingSec, priceFloor: parseFloat(priceFloor.toFixed(2)), priceBelowFloor, armed };
+      }
+      res.json({ currentPrice: price, triggers, closestTrigger: closest ? { label: closest.label, price: closest.triggerPrice, distance: closest.distance } : null, strategicRebalance: strategicStatus });
     } catch { res.json(null); }
   });
 
@@ -2440,6 +2469,23 @@ ${NAV_HTML}
           if(t.subNote){h+='<div style="font-size:9px;color:'+t.color+';text-align:right;margin-top:1px">'+t.subNote+'</div>';}
           h+='</div>';
         });
+        if(d.strategicRebalance){
+          var sr=d.strategicRebalance;
+          var srCol=sr.armed?'#ef4444':'#a855f7';
+          var mins=function(s){return Math.floor(s/60)+'m'+(s%60<10?'0':'')+(s%60)+'s'};
+          var state=sr.armed?'ARMED':(sr.cooldownSec>0?'COOLDOWN':'WAITING');
+          h+='<div style="margin-top:8px;padding:6px 8px;border:1px solid #30363d;border-radius:4px;background:#0d1117">';
+          h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">';
+          h+='<span style="font-size:11px;color:'+srCol+'">● Strategic Rebalance <span style="padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;background:'+srCol+'20;color:'+srCol+'">'+state+'</span></span>';
+          h+='<span style="font-size:10px;color:#8b949e">idle '+mins(sr.idleSec)+'/'+mins(sr.triggerSec)+'</span>';
+          h+='</div>';
+          h+='<div style="background:#21262d;height:6px;border-radius:3px;overflow:hidden">';
+          h+='<div style="width:'+sr.idlePct+'%;height:100%;background:'+srCol+';border-radius:3px;transition:width 0.5s"></div>';
+          h+='</div>';
+          h+='<div style="font-size:9px;color:#8b949e;margin-top:3px">SOL '+sr.solSharePct.toFixed(0)+'%/'+sr.solShareThresholdPct.toFixed(0)+'% · price '+(sr.priceBelowFloor?'<':'≥')+' floor $'+sr.priceFloor.toFixed(2);
+          if(sr.cooldownSec>0)h+=' · cooldown '+mins(sr.cooldownSec);
+          h+='</div></div>';
+        }
         if(d.closestTrigger){
           var ct=d.closestTrigger;
           var ctCol=ct.distance<0&&Math.abs(ct.distance)<0.50?'#ef4444':ct.distance<0&&Math.abs(ct.distance)<1.00?'#eab308':'#8b949e';
