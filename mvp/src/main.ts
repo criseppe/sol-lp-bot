@@ -161,6 +161,13 @@ let taDeployMultiplier = 1.0;                  // latest deploy multiplier from 
 let smartSellEntryPrice = 0; // price at position open (cost basis reference)
 let smartSellStartTime = 0; // when the smart sell was triggered
 let positionChangedThisCycle = false; // guards manual swap detection against LP deposit/withdrawal interference
+
+// Cycle-scoped accumulators for bot-initiated swaps. Reconciler subtracts bot
+// activity from observed wallet delta so user swaps that coincide with bot
+// swaps are still detected (was: 30s time-based guard that wrongly suppressed
+// detection when bot swapped in the same cycle as a user's external swap).
+let botSolDeltaThisCycle = 0;
+let botUsdcDeltaThisCycle = 0;
 // Cycle-scoped regime snapshot tracking (module-level so runLiveCycle can write, setInterval can read)
 let cycleGateReserve = 'NA';
 let cycleGateBasis = 'NA';
@@ -513,6 +520,15 @@ async function main() {
     // Log swaps as events
     liveExecutor.onSwap = (event) => {
       lastBotSwapTime = Date.now(); // mark bot swap to avoid false manual detection
+      // Track bot-swap impact for reconciler delta accounting
+      const isSolOut = event.fromToken === 'SOL';
+      if (isSolOut) {
+        botSolDeltaThisCycle -= event.fromAmount;
+        botUsdcDeltaThisCycle += event.toAmount;
+      } else {
+        botSolDeltaThisCycle += event.toAmount;
+        botUsdcDeltaThisCycle -= event.fromAmount;
+      }
       const swapPrice = currentLiveData?.solPrice || oracle.getPrice()?.price || 0;
       insertRebalanceEventWithRule2(db, {
         timestamp: event.timestamp, eventType: 'PRICE_UPDATE', price: swapPrice, regime: liveRegime,
@@ -747,6 +763,8 @@ async function main() {
       cycleGateReserve = 'NA'; cycleGateBasis = 'NA'; cycleGateChurn = 'NA';
       cyclePrevRegime = liveRegime;
       positionChangedThisCycle = false;
+      botSolDeltaThisCycle = 0;
+      botUsdcDeltaThisCycle = 0;
 
       // Reload config from DB every 5 minutes (picks up threshold changes without restart)
       const now0 = Date.now();
@@ -917,9 +935,15 @@ async function main() {
           // Skip if position opened/closed this cycle — balance diff includes LP deposit/withdrawal
           if (positionChangedThisCycle) {
             // Update previous balances without recording a swap
-          } else if (prevBalSol > 0 && Date.now() - lastBotSwapTime > 30_000) {
-            const solDiff = balances.sol - prevBalSol;
-            const usdcDiff = balances.usdc - prevBalUsdc;
+          } else if (prevBalSol > 0) {
+            // Subtract bot-initiated swap impact from observed wallet delta.
+            // Remainder is user-attributable (external Jupiter swap, etc.).
+            // Replaces older 30s lastBotSwapTime guard which wrongly suppressed
+            // detection when bot swapped in the same cycle as a user swap.
+            const totalSolDiff = balances.sol - prevBalSol;
+            const totalUsdcDiff = balances.usdc - prevBalUsdc;
+            const solDiff = totalSolDiff - botSolDeltaThisCycle;
+            const usdcDiff = totalUsdcDiff - botUsdcDeltaThisCycle;
             // Manual SOL→USDC sell: SOL dropped, USDC increased (not from position close)
             if (solDiff < -0.5 && usdcDiff > 10 && liveBotState === 'ACTIVE') {
               const solSold = Math.abs(solDiff);
