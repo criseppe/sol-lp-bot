@@ -76,10 +76,15 @@ export class LiveExecutor {
     return { gasSol, gasUsdc: gasSol * solPrice, txCount: this.txCount };
   }
 
-  private buildExecOptions(): { computeBudgetOption: { type: 'fixed'; priorityFeeLamports: number; computeBudgetLimit: number } } {
-    const priorityFeeLamports = runtime.priorityFeeLamports ?? 10000;
-    const computeBudgetLimit = runtime.computeBudgetLimit ?? 600000;
-    return { computeBudgetOption: { type: 'fixed', priorityFeeLamports, computeBudgetLimit } };
+  private buildExecOptions(): { computeBudgetOption: { type: 'none' } | { type: 'fixed'; priorityFeeLamports: number; computeBudgetLimit?: number } } {
+    const priorityFeeLamports = runtime.priorityFeeLamports ?? 0;
+    const computeBudgetLimit = runtime.computeBudgetLimit ?? 0;
+    if (priorityFeeLamports > 0) {
+      return computeBudgetLimit > 0
+        ? { computeBudgetOption: { type: 'fixed', priorityFeeLamports, computeBudgetLimit } }
+        : { computeBudgetOption: { type: 'fixed', priorityFeeLamports } };
+    }
+    return { computeBudgetOption: { type: 'none' } };
   }
 
   private buildSendOptions(): { skipPreflight: boolean; maxRetries: number; preflightCommitment: 'confirmed' } {

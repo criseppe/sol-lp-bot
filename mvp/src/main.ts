@@ -360,9 +360,18 @@ async function main() {
         costBasisState = updateCostBasis(db, solAmt, swapPrice, `swap onSwap (${event.reason.slice(0, 60)})`);
         sirCostBasis = costBasisState.solCostBasis;
       } else {
-        reduceCostBasisHoldings(db, solAmt, `swap sell (${event.reason.slice(0, 40)})`);
-        costBasisState = readCostBasis(db);
-        sirCostBasis = costBasisState.solCostBasis;
+        // Harvest fee-SOL sells: fee SOL was never added to sol_total_acquired,
+        // so reducing the tracked pool would shrink totals below real capital acquisitions.
+        const isHarvestSell = /harvest/i.test(event.reason);
+        if (isHarvestSell) {
+          console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Harvest sell — skipping reduce (${solAmt.toFixed(4)} SOL fee-income, not capital)`, timestamp: Date.now() }));
+          costBasisState = readCostBasis(db);
+          sirCostBasis = costBasisState.solCostBasis;
+        } else {
+          reduceCostBasisHoldings(db, solAmt, `swap sell (${event.reason.slice(0, 40)})`);
+          costBasisState = readCostBasis(db);
+          sirCostBasis = costBasisState.solCostBasis;
+        }
       }
       insertSwapLedger(db, {
         timestamp: event.timestamp, direction, sol_amount: solAmt, usdc_amount: usdcAmt,
@@ -763,10 +772,11 @@ async function main() {
                   price: effectivePrice, reason: 'Manual swap from phone (USDC→SOL)', pnl_usdc: 0,
                   cost_basis_before: sirCostBasis, cost_basis_after: sirCostBasis, source: 'manual',
                 });
-                // Update cost basis
-                const { updateCostBasis } = await import('./tracking/costBasis.js');
+                // Update cost basis (module-level state + sirCostBasis so next upsertBotState doesn't stomp DB)
                 const result = updateCostBasis(db, solBought, effectivePrice, 'manual_buy');
+                costBasisState = result;
                 sirCostBasis = result.solCostBasis;
+                console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Manual buy detected — costBasisState refreshed (basis $${result.solCostBasis.toFixed(2)})`, timestamp: Date.now() }));
               } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_buy_detect: ${String(e)}`, timestamp: Date.now() })); }
             }
           }
@@ -2608,12 +2618,17 @@ async function liveClosePosition(price: number, eventType: EventType, triggerRea
     liveRebalancesThisHour++;
     dailyRebalanceCount++;
 
-    // COST_BASIS: tracked — SOL returned from LP close is a new SOL acquisition at current price
+    // COST_BASIS: SOL returned from LP close was ALREADY tracked when it entered the LP
+    // (via pre-open USDC→SOL buy and add-liquidity ratio swaps). Re-adding here would
+    // double-count. Fees are tracked separately (liveCumFeesSol / cum_fees_sol).
     const solReturnedFromClose = balancesAfter.sol - balancesBefore.sol;
-    if (solReturnedFromClose > 0.0001) {
-      costBasisState = updateCostBasis(db, solReturnedFromClose, price, `LP close (${eventType})`);
-      sirCostBasis = costBasisState.solCostBasis;
-    }
+    costBasisState = readCostBasis(db);
+    sirCostBasis = costBasisState.solCostBasis;
+    console.log(JSON.stringify({
+      level: 'info',
+      msg: `[CostBasis] LP close — no basis update (returned ${solReturnedFromClose.toFixed(4)} SOL was already tracked)`,
+      timestamp: Date.now(),
+    }));
 
     const why = triggerReason ?? `Position closed (${eventType}).`;
     const posInfo = ` Range was $${result.priceLower.toFixed(2)}-$${result.priceUpper.toFixed(2)}, entry at $${result.entryPrice.toFixed(2)}, close at $${result.closePrice.toFixed(2)}.`;

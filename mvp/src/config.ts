@@ -65,8 +65,8 @@ export const runtime = {
 
   // Priority fee for Orca on-chain TXs (close/open/increaseLiquidity/collectFees/Orca-swap-fallback).
   // Jupiter swaps already use prioritizationFeeLamports='auto' and don't use this.
-  priorityFeeLamports: 10000,   // total priority fee per Orca TX (lamports). 10000 = 0.00001 SOL ≈ $0.0009 @ $89.
-  computeBudgetLimit: 600000,   // compute unit limit. At 600k CU + 10k lamports → ~16.6 microLamports/CU.
+  priorityFeeLamports: 0,        // 0 = disabled (no ComputeBudget instructions added).
+  computeBudgetLimit: 0,         // 0 = no explicit CU cap (only used when priorityFeeLamports > 0).
   skipPreflight: false,          // bypass RPC simulation — validators decide. Use when Helius sim spuriously rejects.
 
   // Position max age (hours) — rebalance to reset IL baseline. 0 = disabled.
@@ -247,7 +247,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vBuf = nv('swapBufferPct', 0, 10); if (vBuf != null) runtime.swapBufferPct = vBuf;
   const vProv = g('swapProvider'); if (vProv === 'jupiter' || vProv === 'orca' || vProv === 'jupiter-fallback') runtime.swapProvider = vProv;
   const vPrio = nv('priorityFeeLamports', 0, 10_000_000); if (vPrio != null) runtime.priorityFeeLamports = vPrio;
-  const vCul = nv('computeBudgetLimit', 50_000, 1_400_000); if (vCul != null) runtime.computeBudgetLimit = vCul;
+  const vCul = nv('computeBudgetLimit', 0, 1_400_000); if (vCul != null) runtime.computeBudgetLimit = vCul;
   const vSkip = g('skipPreflight'); if (vSkip === 'true' || vSkip === 'false') runtime.skipPreflight = vSkip === 'true';
 
   // Position max age

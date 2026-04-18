@@ -412,6 +412,23 @@ export function getRebalanceEvents(db: Database.Database, limit: number): Rebala
 }
 
 export function upsertBotState(db: Database.Database, state: BotStateRow): void {
+  // Log any basis mutation coming through upsertBotState so silent stomps become visible.
+  // Catches cases where caller's in-memory cost basis is stale (see BUG-1 class bugs).
+  try {
+    const prior = db.prepare('SELECT sol_cost_basis FROM bot_state WHERE id = 1').get() as { sol_cost_basis: number } | undefined;
+    const newBasis = state.sol_cost_basis;
+    if (prior && newBasis != null && prior.sol_cost_basis > 0 && Math.abs(newBasis - prior.sol_cost_basis) > 0.01) {
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: '[CostBasis] upsertBotState mutation',
+        from: prior.sol_cost_basis,
+        to: newBasis,
+        delta: newBasis - prior.sol_cost_basis,
+        timestamp: Date.now(),
+      }));
+    }
+  } catch { /* non-fatal diagnostic */ }
+
   db.prepare(`
     INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts)
     VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated, @last_upside_exit_price, @last_upside_exit_ts)
