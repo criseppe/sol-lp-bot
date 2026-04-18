@@ -133,6 +133,15 @@ export const runtime = {
   solConvertTargetDeployMinBearish: 90, // minutes to fully convert idle SOL in BEARISH
   solConvertTargetDeployMinExtreme: 240, // minutes to fully convert idle SOL in EXTREME
 
+  // Pre-open SOL→USDC sell (conditional). Fires only when wallet is SOL-heavy at open
+  // AND price is at or above basis (no loss realization). Contradicts the prior
+  // "never sell SOL pre-open" rule; gated strictly by basis margin to avoid the
+  // historical loss pattern.
+  preOpenSolSellEnabled: true,
+  preOpenSolSellMaxPct: 0.10,            // max fraction of wallet SOL value per fire
+  preOpenSolSellMinUsd: 500,             // min excess-SOL USD value before firing
+  preOpenSolSellCooldownMs: 180_000,     // 3 min cooldown
+
   // Enhanced regime detection (market data signals)
   useEnhancedRegime: true,
   vol1hExtremeThreshold: 0.06,
@@ -240,6 +249,12 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const scTdB = nv('solConvertTargetDeployMinBullish', 10, 120); if (scTdB != null) runtime.solConvertTargetDeployMinBullish = scTdB;
   const scTdBe = nv('solConvertTargetDeployMinBearish', 30, 240); if (scTdBe != null) runtime.solConvertTargetDeployMinBearish = scTdBe;
   const scTdE = nv('solConvertTargetDeployMinExtreme', 60, 480); if (scTdE != null) runtime.solConvertTargetDeployMinExtreme = scTdE;
+
+  // Pre-open SOL sell
+  const vPOSSEn = g('preOpenSolSellEnabled'); if (vPOSSEn === 'true' || vPOSSEn === 'false') runtime.preOpenSolSellEnabled = vPOSSEn === 'true';
+  const vPOSSMax = nv('preOpenSolSellMaxPct', 0, 0.5); if (vPOSSMax != null) runtime.preOpenSolSellMaxPct = vPOSSMax;
+  const vPOSSMin = nv('preOpenSolSellMinUsd', 0, 10000); if (vPOSSMin != null) runtime.preOpenSolSellMinUsd = vPOSSMin;
+  const vPOSSCool = nv('preOpenSolSellCooldownMs', 60_000, 3_600_000); if (vPOSSCool != null) runtime.preOpenSolSellCooldownMs = vPOSSCool;
 
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
@@ -419,6 +434,10 @@ export function exportConfig(): Record<string, string> {
   out['solConvertTargetDeployMinBullish'] = String(runtime.solConvertTargetDeployMinBullish);
   out['solConvertTargetDeployMinBearish'] = String(runtime.solConvertTargetDeployMinBearish);
   out['solConvertTargetDeployMinExtreme'] = String(runtime.solConvertTargetDeployMinExtreme);
+  out['preOpenSolSellEnabled'] = runtime.preOpenSolSellEnabled ? '1' : '0';
+  out['preOpenSolSellMaxPct'] = String(runtime.preOpenSolSellMaxPct);
+  out['preOpenSolSellMinUsd'] = String(runtime.preOpenSolSellMinUsd);
+  out['preOpenSolSellCooldownMs'] = String(runtime.preOpenSolSellCooldownMs);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
   out['flashCrashPct'] = String(runtime.flashCrashPct);

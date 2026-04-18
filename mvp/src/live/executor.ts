@@ -70,6 +70,7 @@ export class LiveExecutor {
   public isPostUpsideOpen = false;
   public cumGasLamports = 0;
   public txCount = 0;
+  private lastPreOpenSellTs = 0;
 
   getGasStats(solPrice: number): { gasSol: number; gasUsdc: number; txCount: number } {
     const gasSol = this.cumGasLamports / 1_000_000_000;
@@ -335,16 +336,58 @@ export class LiveExecutor {
         }
         } // end else (basis cap not exceeded)
       } else if (solDeficit < 0) {
-        // SOL-heavy wallet — never sell SOL. Deposit SOL-constrained, respect reserve floor.
+        // SOL-heavy wallet. Original rule was never sell SOL pre-open (see
+        // feedback_never_sell_sol.md: historical -$20+/day loss pattern).
+        // New guarded path: sell a capped amount when price ≥ basis (no loss
+        // realization). Gated by runtime.preOpenSolSellEnabled and basis margin.
+        // Shadow-sell alert still fires when the guarded sell is disabled or
+        // conditions are not met.
+        const excessSol = Math.abs(solDeficit);
+        const excessUsd = excessSol * currentPrice;
+        const basis = this.getCostBasis?.() ?? 0;
+        const marginPct = basis > 0 ? ((currentPrice / basis) - 1) * 100 : 0;
+        let sellExecuted = false;
+
+        if (
+          runtime.preOpenSolSellEnabled === true &&
+          basis > 0 &&
+          currentPrice >= basis &&
+          excessUsd >= (runtime.preOpenSolSellMinUsd ?? 500) &&
+          Date.now() - this.lastPreOpenSellTs >= (runtime.preOpenSolSellCooldownMs ?? 180_000)
+        ) {
+          const maxPct = runtime.preOpenSolSellMaxPct ?? 0.10;
+          const walletSolValue = solBal * currentPrice;
+          const capUsd = walletSolValue * maxPct;
+          const sellUsd = Math.min(excessUsd * 0.5, capUsd);
+          const sellSol = sellUsd / currentPrice;
+          if (sellSol >= 0.1 && sellUsd >= 50) {
+            console.log(JSON.stringify({
+              level: 'info',
+              msg: `[PreOpenSell] Selling ${sellSol.toFixed(3)} SOL ($${sellUsd.toFixed(2)}) at $${currentPrice.toFixed(2)} (basis $${basis.toFixed(2)}, margin +${marginPct.toFixed(2)}%). Excess was ${excessSol.toFixed(2)} SOL ($${excessUsd.toFixed(0)}). Cap: ${(maxPct * 100).toFixed(0)}% = $${capUsd.toFixed(0)}.`,
+              timestamp: Date.now(),
+            }));
+            await this.doSwap(MINTS.SOL, MINTS.USDC, Math.floor(sellSol * 1e9), `Pre-open: SOL->USDC (${sellSol.toFixed(2)} SOL, margin +${marginPct.toFixed(1)}%)`);
+            this.lastPreOpenSellTs = Date.now();
+            await new Promise(r => setTimeout(r, 4000));
+            solBal = await this.getSolBalance();
+            usdcBal = await this.getUsdcBalance();
+            solAvailable = Math.max(0, solBal - getSolReserve());
+            usdcAvailable = Math.max(0, usdcBal - getUsdcReserve());
+            sellExecuted = true;
+          } else {
+            console.log(JSON.stringify({
+              level: 'info',
+              msg: `[PreOpenSell] Skipped: computed sell size ${sellSol.toFixed(3)} SOL / $${sellUsd.toFixed(2)} below $50 min.`,
+              timestamp: Date.now(),
+            }));
+          }
+        }
+
         const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
         const availableUsdc = Math.max(0, usdcAvailable - reserveFloor);
         console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL-heavy wallet — depositing SOL-constrained. Wallet USDC: $${usdcAvailable.toFixed(2)}, Reserve floor: $${reserveFloor.toFixed(2)}, Available for deposit: $${availableUsdc.toFixed(2)}`, timestamp: Date.now() }));
-        // Shadow sell alert: would selling excess SOL be profitable?
-        const excessSol = Math.abs(solDeficit);
-        const basis = this.getCostBasis?.() ?? 0;
-        if (basis > 0 && currentPrice > basis) {
-          const marginPct = ((currentPrice / basis) - 1) * 100;
-          alertShadowSell({ solAmount: excessSol, usdcValue: excessSol * currentPrice, price: currentPrice, marginPct, basis, regime: this.getCurrentRegime?.() ?? 'UNKNOWN' });
+        if (!sellExecuted && basis > 0 && currentPrice > basis) {
+          alertShadowSell({ solAmount: excessSol, usdcValue: excessUsd, price: currentPrice, marginPct, basis, regime: this.getCurrentRegime?.() ?? 'UNKNOWN' });
         }
         usdcAvailable = availableUsdc;
       } else {
