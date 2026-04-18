@@ -359,7 +359,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Progressive basis decay
   { const v = n('progressiveBasisDecayEnabled'); if (v != null) runtime.progressiveBasisDecayEnabled = v !== 0; }
-  const pbdS = nv('progressiveBasisDecayStartHours', 0.5, 48);         if (pbdS != null) runtime.progressiveBasisDecayStartHours = pbdS;
+  const pbdS = nv('progressiveBasisDecayStartHours', 0.0, 48);         if (pbdS != null) runtime.progressiveBasisDecayStartHours = pbdS;
   const pbdP = nv('progressiveBasisDecayPerInterval', 0.0001, 0.01);   if (pbdP != null) runtime.progressiveBasisDecayPerInterval = pbdP;
   const pbdI = nv('progressiveBasisDecayIntervalMinutes', 1, 60);      if (pbdI != null) runtime.progressiveBasisDecayIntervalMinutes = pbdI;
   const pbdM = nv('progressiveBasisDecayMinThreshold', 0.80, 0.99);    if (pbdM != null) runtime.progressiveBasisDecayMinThreshold = pbdM;
