@@ -258,6 +258,29 @@ export function startDashboard(port: number): DashboardServer {
     const { renderIntelligenceHtml } = await import('./intelligence-page.js');
     res.type('html').send(renderIntelligenceHtml());
   });
+
+  // --- IL Analysis routes (auth-protected) ---
+  app.get('/il-analysis', requireAuth, async (_req, res) => {
+    if (!dbRef) { res.status(500).send('DB not ready'); return; }
+    try {
+      const { computeIlAnalysisData, renderIlAnalysisHtml } = await import('./ilAnalysis.js');
+      const data = computeIlAnalysisData(dbRef);
+      res.type('html').send(renderIlAnalysisHtml(data));
+    } catch (err) {
+      console.error('[API Error] /il-analysis', err);
+      res.status(500).send('Internal error');
+    }
+  });
+  app.get('/api/il-analysis', requireAuth, async (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const { computeIlAnalysisData } = await import('./ilAnalysis.js');
+      res.json(computeIlAnalysisData(dbRef));
+    } catch (err) {
+      console.error('[API Error] /api/il-analysis', err);
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   app.get('/api/defensive-history', requireAuth, (_req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
     try {
@@ -1898,7 +1921,7 @@ function fmt(n: number, d = 2): string {
 
 // ── Shared styles ─────────────────────────────────────────────────────────
 
-const SHARED_STYLES = `
+export const SHARED_STYLES = `
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:'SF Mono',Menlo,monospace;font-size:13px;padding:16px;-webkit-text-size-adjust:100%}
 .banner{text-align:center;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:12px}
@@ -1948,7 +1971,7 @@ td:last-child{color:#8b949e;font-size:11px;line-height:1.4;max-width:500px}
 }
 `;
 
-const NAV_HTML = `
+export const NAV_HTML = `
 <div class="nav">
   <a href="/live" id="nav-live">Live Wallet</a>
   <a href="/insights" id="nav-insights">Insights</a>
@@ -1959,6 +1982,7 @@ const NAV_HTML = `
   <a href="/projection" id="nav-projection">Projection</a>
   <a href="/analysis" id="nav-analysis">Agent</a>
   <a href="/intelligence" id="nav-intelligence">Intelligence</a>
+  <a href="/il-analysis" id="nav-il-analysis">IL Analysis</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
