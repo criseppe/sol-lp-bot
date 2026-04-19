@@ -21,6 +21,7 @@ import type { VarConfig, SirConfig } from './engine/var.js';
 import { insertSwapLedger, backfillSwapLedgerCostBasis } from './db/sqlite.js';
 import { bootstrapCostBasis, updateCostBasis, readCostBasis, recalculateFromCurrentHoldings, reduceCostBasisHoldings } from './tracking/costBasis.js';
 import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeployGate, checkReserveFloor } from './reserve/reserveManager.js';
+import { checkDefensiveTriggers, checkDefensiveExit, updateEntryPriceLow, makeInitialState, type DefensiveState } from './engine/defensive.js';
 
 // ── Process-level safety nets ─────────────────────────────────────────────
 // Prevent stray promise rejections or exceptions (e.g. Solana web3.js retry
@@ -207,6 +208,68 @@ try {
   console.log(JSON.stringify({ level: 'info', msg: `[Startup] Pre-populated ${liveRecentPrices.length} prices for flash crash detection`, timestamp: Date.now() }));
 } catch (e) {
   console.log(JSON.stringify({ level: 'warn', msg: `[Startup] Flash-crash prepopulate failed: ${String(e)}`, timestamp: Date.now() }));
+}
+
+// ── Defensive Downtrend Mode state (Phase C core) ────────────────────────
+// Restored from DB so a restart while active does not silently resume
+// normal operation. Default state = inactive.
+let defensiveState: DefensiveState = (() => {
+  const s = makeInitialState();
+  if (!savedState) return s;
+  if (savedState.defensive_active === 1 && savedState.defensive_entered_at) {
+    s.active = true;
+    s.enteredAt = savedState.defensive_entered_at ?? null;
+    s.enteredPrice = savedState.defensive_entered_price ?? null;
+    s.enteredTrigger = savedState.defensive_entered_trigger ?? null;
+    s.entryPriceLow = savedState.defensive_entry_price_low ?? null;
+    s.cooldownUntil = savedState.defensive_cooldown_until ?? null;
+    console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] State restored from DB: trigger=${s.enteredTrigger}, enteredAt=${s.enteredAt ? new Date(s.enteredAt).toISOString() : 'null'}, priceLow=${s.entryPriceLow ?? 'null'}`, timestamp: Date.now() }));
+  } else if (savedState.defensive_cooldown_until) {
+    s.cooldownUntil = savedState.defensive_cooldown_until;
+  }
+  return s;
+})();
+
+function defensiveFields() {
+  return {
+    defensive_active: defensiveState.active ? 1 : 0,
+    defensive_entered_at: defensiveState.enteredAt,
+    defensive_entered_price: defensiveState.enteredPrice,
+    defensive_entered_trigger: defensiveState.enteredTrigger,
+    defensive_entry_price_low: defensiveState.entryPriceLow,
+    defensive_cooldown_until: defensiveState.cooldownUntil,
+  };
+}
+
+// Targeted write of defensive_* columns only. Runs at ENTER, EXIT, and when
+// entryPriceLow moves. Avoids needing to thread defensiveFields() through
+// every existing upsertBotState call.
+function persistDefensiveState(): void {
+  try {
+    db.prepare(`UPDATE bot_state SET defensive_active=?, defensive_entered_at=?, defensive_entered_price=?, defensive_entered_trigger=?, defensive_entry_price_low=?, defensive_cooldown_until=? WHERE id=1`).run(
+      defensiveState.active ? 1 : 0,
+      defensiveState.enteredAt,
+      defensiveState.enteredPrice,
+      defensiveState.enteredTrigger,
+      defensiveState.entryPriceLow,
+      defensiveState.cooldownUntil,
+    );
+  } catch (e) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[DEFENSIVE] persist failed: ${String(e)}`, timestamp: Date.now() }));
+  }
+}
+
+// Query regime_snapshots for historical price closest to targetTs (±window ms).
+// Returns null if no snapshot found within window.
+function queryPriceAt(targetTs: number, windowMs = 300_000): number | null {
+  try {
+    const row = db.prepare(
+      `SELECT price FROM regime_snapshots WHERE ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) ASC LIMIT 1`,
+    ).get(targetTs - windowMs, targetTs + windowMs, targetTs) as { price: number } | undefined;
+    return row?.price ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // Helper: upside exit fields for every state save
@@ -1636,6 +1699,81 @@ async function runLiveCycle(price: number): Promise<void> {
   liveRecentPrices.push(price);
   if (liveRecentPrices.length > 10) liveRecentPrices.shift();
 
+  // ── Defensive Downtrend Mode (Phase C core) ─────────────────────────────
+  // When enabled: detect sustained drawdown and stop LP operations.
+  // Gating (AUTO_DEPLOY / open / idle-rebal buy) is applied at each site.
+  // When disabled: triggers return null, state never flips active.
+  if (runtime.defensiveDowntrendEnabled || defensiveState.active) {
+    try {
+      // Always update entry price low while active (tracks recovery baseline)
+      if (defensiveState.active) {
+        const updated = updateEntryPriceLow(defensiveState, price);
+        if (updated !== defensiveState) {
+          defensiveState = updated;
+          persistDefensiveState();
+        }
+      }
+
+      // Exit path: already active → check if we should leave
+      if (defensiveState.active) {
+        const exit = checkDefensiveExit(defensiveState, price, lastRsi, now);
+        if (exit.shouldExit) {
+          const durationMin = defensiveState.enteredAt ? (now - defensiveState.enteredAt) / 60_000 : 0;
+          console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] EXIT: reason=${exit.reason}, duration=${durationMin.toFixed(1)}min, enteredPrice=$${(defensiveState.enteredPrice ?? 0).toFixed(2)}, priceLow=$${(defensiveState.entryPriceLow ?? 0).toFixed(2)}, currentPrice=$${price.toFixed(2)}`, timestamp: now }));
+          const cooldownUntil = now + runtime.defensiveDowntrendCooldownMinutes * 60_000;
+          const preExit = defensiveState;
+          defensiveState = { active: false, enteredAt: null, enteredPrice: null, enteredTrigger: null, entryPriceLow: null, cooldownUntil };
+          persistDefensiveState();
+          // Clear the manual force-exit flag after honoring it (one-shot)
+          if (exit.reason === 'manual_force_exit') runtime.defensiveDowntrendForceExit = false;
+          insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+            prox_lower: null, prox_upper: null, in_range: null,
+            decision: 'DEFENSIVE_EXIT', reasoning: `Defensive mode exit: ${exit.reason}. Cooldown ${runtime.defensiveDowntrendCooldownMinutes}min.`,
+            params_json: JSON.stringify({ durationMin, enteredPrice: preExit.enteredPrice, priceLow: preExit.entryPriceLow, currentPrice: price, exitReason: exit.reason }) });
+        }
+      } else if (runtime.defensiveDowntrendEnabled) {
+        // Entry path: feature enabled, not active → check triggers
+        const cooldownActive = defensiveState.cooldownUntil != null && now < defensiveState.cooldownUntil;
+        const price1hAgo = queryPriceAt(now - 3_600_000);
+        const price4hAgo = queryPriceAt(now - 14_400_000);
+        const price24hAgo = queryPriceAt(now - 86_400_000);
+        const price7dAgo = queryPriceAt(now - 604_800_000);
+        const trig = checkDefensiveTriggers(price, price1hAgo, price4hAgo, price24hAgo, price7dAgo, lastRsi, now);
+
+        // Emergency re-entry: allow re-enter during cooldown if trigger is this many × stricter.
+        // Implementation: during cooldown, multiply configured thresholds by the emergency multiplier
+        // by temporarily checking a stricter drop (price fell faster than normal threshold × multiplier).
+        let allowEntry = !cooldownActive && trig.trigger != null;
+        if (!allowEntry && cooldownActive && trig.trigger != null) {
+          const mult = runtime.defensiveDowntrendEmergencyReentryMultiplier;
+          // Derive a stricter drop check: compare realized drop to threshold × multiplier.
+          // Only the most severe trigger types need re-checking.
+          const drops: Array<[number | null, number]> = [
+            [price1hAgo, runtime.defensiveDowntrend1hDropPct * mult],
+            [price4hAgo, runtime.defensiveDowntrend4hDropPct * mult],
+            [price24hAgo, runtime.defensiveDowntrend24hDropPct * mult],
+            [price7dAgo, runtime.defensiveDowntrend7dDropPct * mult],
+          ];
+          for (const [pAgo, thresh] of drops) {
+            if (pAgo != null && pAgo > 0 && (pAgo - price) / pAgo >= thresh) { allowEntry = true; break; }
+          }
+        }
+
+        if (allowEntry) {
+          defensiveState = { active: true, enteredAt: now, enteredPrice: price, enteredTrigger: trig.trigger, entryPriceLow: price, cooldownUntil: defensiveState.cooldownUntil };
+          persistDefensiveState();
+          console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] ENTER: trigger=${trig.trigger}, price=$${price.toFixed(2)}, rsi=${lastRsi?.toFixed(1) ?? 'null'}${cooldownActive ? ' [emergency-reentry]' : ''}`, timestamp: now }));
+          insertDecisionLog(db, { timestamp: now, price, regime: liveRegime, bot_state: liveBotState,
+            prox_lower: null, prox_upper: null, in_range: null,
+            decision: 'DEFENSIVE_ENTER', reasoning: `Defensive downtrend mode entered: ${trig.trigger}. Price=$${price.toFixed(2)}, RSI=${lastRsi?.toFixed(1) ?? 'null'}. Blocks AUTO_DEPLOY / openPosition / idle-rebal buys until exit.`,
+            params_json: JSON.stringify({ trigger: trig.trigger, price1hAgo, price4hAgo, price24hAgo, price7dAgo, rsi: lastRsi, emergencyReentry: cooldownActive }) });
+        }
+      }
+    } catch (err) {
+      console.log(JSON.stringify({ level: 'warn', msg: `[DEFENSIVE] check failed: ${err instanceof Error ? err.message : String(err)}`, timestamp: now }));
+    }
+  }
+
   // Regime update (every 1 hour)
   if (now - liveLastRegimeCheck > runtime.regimeCheckIntervalMs) {
     const closes = getDailyCloses(db, runtime.regimeWindowDays);
@@ -2198,7 +2336,7 @@ async function runLiveCycle(price: number): Promise<void> {
   }
 
   // Auto capital deployment — check every 5 minutes for idle wallet funds to deploy
-  if (prox.inRange && now - liveLastAutoDeployCheck >= runtime.autoDeployCheckIntervalSec * 1_000) {
+  if (prox.inRange && now - liveLastAutoDeployCheck >= runtime.autoDeployCheckIntervalSec * 1_000 && !defensiveState.active) {
     liveLastAutoDeployCheck = now;
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
@@ -2594,6 +2732,11 @@ async function runLiveCycle(price: number): Promise<void> {
             );
             const usdcToSwap = Math.min(diffUsdc, idleUsdc, idleRebalanceCap);
             if (usdcToSwap > 1 && diffUsdc > 5) {
+              // Defensive Downtrend Mode (Phase C) blocks USDC→SOL buys.
+              if (defensiveState.active) {
+                console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] BLOCK: idle-rebal USDC→SOL blocked (trigger=${defensiveState.enteredTrigger}, deviation=${(Math.abs(deviation) * 100).toFixed(0)}%)`, timestamp: now }));
+                lastIdleRebalanceRegime = liveRegime; lastIdleRebalanceTime = now; idleRebalancePending = false;
+              } else {
               // P&L awareness: only buy SOL when price is at or near basis (≤ basis × 1.01).
               // Never buy significantly above basis — even large deviations — because it
               // inflates cost basis and makes future BasisGate blocks more likely.
@@ -2610,6 +2753,7 @@ async function runLiveCycle(price: number): Promise<void> {
                   `Idle wallet rebalance (${liveRegime}): ${swapDirection}`,
                 );
               }
+              } // end else (defensive not active)
             }
           }
 
@@ -2721,6 +2865,10 @@ async function runLiveCycle(price: number): Promise<void> {
 }
 
 async function liveOpenPosition(price: number, eventType: EventType, triggerReason?: string): Promise<void> {
+  if (defensiveState.active) {
+    console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] BLOCK: openPosition blocked (trigger=${defensiveState.enteredTrigger}, eventType=${eventType})`, timestamp: Date.now() }));
+    return;
+  }
   if (!liveExecutor) return;
   // Exponential backoff on repeated TX failures
   if (Date.now() < txBackoffUntil) {

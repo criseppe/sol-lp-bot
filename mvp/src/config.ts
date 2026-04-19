@@ -179,6 +179,27 @@ export const runtime = {
   progressiveBasisDecayIntervalMinutes: 15,
   progressiveBasisDecayMinThreshold: 0.950,
 
+  // ── Defensive Downtrend Mode (Phase C core) ─────────────────────────────
+  // Master switch + 16 parameters. Default OFF — no behavior change when disabled.
+  // When enabled: trigger on sustained drawdown, park in USDC, resume on recovery.
+  defensiveDowntrendEnabled: false,
+  defensiveDowntrend1hDropPct: 0.05,
+  defensiveDowntrend4hDropPct: 0.10,
+  defensiveDowntrend24hDropPct: 0.15,
+  defensiveDowntrend7dDropPct: 0.25,
+  defensiveDowntrendRsiThreshold: 25,
+  defensiveDowntrendUseRsi: true,
+  defensiveDowntrendExitRecoveryPct: 0.04,
+  defensiveDowntrendExitRsiThreshold: 40,
+  defensiveDowntrendMaxHoldHours: 12,
+  defensiveDowntrendForceExit: false,
+  defensiveDowntrendTargetUsdcPct: 0.90,
+  defensiveDowntrendGradualSellPct: 0.20,
+  defensiveDowntrendMaxCloseWaitHours: 2,
+  defensiveDowntrendMinHoldMinutes: 10,
+  defensiveDowntrendCooldownMinutes: 60,
+  defensiveDowntrendEmergencyReentryMultiplier: 1.5,
+
   // Strategic SOL Rebalance — unstick bot when idle + SOL-heavy + below basis
   strategicRebalanceEnabled: true,
   strategicRebalanceIdleMinutes: 30,
@@ -414,6 +435,28 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const pbdI = nv('progressiveBasisDecayIntervalMinutes', 1, 60);      if (pbdI != null) runtime.progressiveBasisDecayIntervalMinutes = pbdI;
   const pbdM = nv('progressiveBasisDecayMinThreshold', 0.80, 0.99);    if (pbdM != null) runtime.progressiveBasisDecayMinThreshold = pbdM;
 
+  // Defensive Downtrend Mode (Phase C)
+  { const vs = g('defensiveDowntrendEnabled');
+    if (vs != null) runtime.defensiveDowntrendEnabled = (vs === 'true' || vs === '1'); }
+  { const vs = g('defensiveDowntrendUseRsi');
+    if (vs != null) runtime.defensiveDowntrendUseRsi = (vs === 'true' || vs === '1'); }
+  { const vs = g('defensiveDowntrendForceExit');
+    if (vs != null) runtime.defensiveDowntrendForceExit = (vs === 'true' || vs === '1'); }
+  const ddD1h = nv('defensiveDowntrend1hDropPct', 0, 1);               if (ddD1h != null) runtime.defensiveDowntrend1hDropPct = ddD1h;
+  const ddD4h = nv('defensiveDowntrend4hDropPct', 0, 1);               if (ddD4h != null) runtime.defensiveDowntrend4hDropPct = ddD4h;
+  const ddD24 = nv('defensiveDowntrend24hDropPct', 0, 1);              if (ddD24 != null) runtime.defensiveDowntrend24hDropPct = ddD24;
+  const ddD7d = nv('defensiveDowntrend7dDropPct', 0, 1);               if (ddD7d != null) runtime.defensiveDowntrend7dDropPct = ddD7d;
+  const ddRsi = nv('defensiveDowntrendRsiThreshold', 0, 100);          if (ddRsi != null) runtime.defensiveDowntrendRsiThreshold = ddRsi;
+  const ddRec = nv('defensiveDowntrendExitRecoveryPct', 0, 1);         if (ddRec != null) runtime.defensiveDowntrendExitRecoveryPct = ddRec;
+  const ddExR = nv('defensiveDowntrendExitRsiThreshold', 0, 100);      if (ddExR != null) runtime.defensiveDowntrendExitRsiThreshold = ddExR;
+  const ddMaxH = nv('defensiveDowntrendMaxHoldHours', 0, 168);         if (ddMaxH != null) runtime.defensiveDowntrendMaxHoldHours = ddMaxH;
+  const ddTgt = nv('defensiveDowntrendTargetUsdcPct', 0, 1);           if (ddTgt != null) runtime.defensiveDowntrendTargetUsdcPct = ddTgt;
+  const ddGrad = nv('defensiveDowntrendGradualSellPct', 0, 1);         if (ddGrad != null) runtime.defensiveDowntrendGradualSellPct = ddGrad;
+  const ddMCW = nv('defensiveDowntrendMaxCloseWaitHours', 0, 48);      if (ddMCW != null) runtime.defensiveDowntrendMaxCloseWaitHours = ddMCW;
+  const ddMinH = nv('defensiveDowntrendMinHoldMinutes', 0, 1440);      if (ddMinH != null) runtime.defensiveDowntrendMinHoldMinutes = ddMinH;
+  const ddCool = nv('defensiveDowntrendCooldownMinutes', 0, 1440);     if (ddCool != null) runtime.defensiveDowntrendCooldownMinutes = ddCool;
+  const ddEmer = nv('defensiveDowntrendEmergencyReentryMultiplier', 1, 10); if (ddEmer != null) runtime.defensiveDowntrendEmergencyReentryMultiplier = ddEmer;
+
   // Strategic SOL Rebalance
   { const vs = g('strategicRebalanceEnabled');
     if (vs != null) runtime.strategicRebalanceEnabled = (vs === 'true' || vs === '1'); }
@@ -550,6 +593,25 @@ export function exportConfig(): Record<string, string> {
   out['progressiveBasisDecayPerInterval'] = String(runtime.progressiveBasisDecayPerInterval);
   out['progressiveBasisDecayIntervalMinutes'] = String(runtime.progressiveBasisDecayIntervalMinutes);
   out['progressiveBasisDecayMinThreshold'] = String(runtime.progressiveBasisDecayMinThreshold);
+  // Defensive Downtrend Mode (Phase C core)
+  out['defensiveDowntrendEnabled'] = String(runtime.defensiveDowntrendEnabled);
+  out['defensiveDowntrend1hDropPct'] = String(runtime.defensiveDowntrend1hDropPct);
+  out['defensiveDowntrend4hDropPct'] = String(runtime.defensiveDowntrend4hDropPct);
+  out['defensiveDowntrend24hDropPct'] = String(runtime.defensiveDowntrend24hDropPct);
+  out['defensiveDowntrend7dDropPct'] = String(runtime.defensiveDowntrend7dDropPct);
+  out['defensiveDowntrendRsiThreshold'] = String(runtime.defensiveDowntrendRsiThreshold);
+  out['defensiveDowntrendUseRsi'] = String(runtime.defensiveDowntrendUseRsi);
+  out['defensiveDowntrendExitRecoveryPct'] = String(runtime.defensiveDowntrendExitRecoveryPct);
+  out['defensiveDowntrendExitRsiThreshold'] = String(runtime.defensiveDowntrendExitRsiThreshold);
+  out['defensiveDowntrendMaxHoldHours'] = String(runtime.defensiveDowntrendMaxHoldHours);
+  out['defensiveDowntrendForceExit'] = String(runtime.defensiveDowntrendForceExit);
+  out['defensiveDowntrendTargetUsdcPct'] = String(runtime.defensiveDowntrendTargetUsdcPct);
+  out['defensiveDowntrendGradualSellPct'] = String(runtime.defensiveDowntrendGradualSellPct);
+  out['defensiveDowntrendMaxCloseWaitHours'] = String(runtime.defensiveDowntrendMaxCloseWaitHours);
+  out['defensiveDowntrendMinHoldMinutes'] = String(runtime.defensiveDowntrendMinHoldMinutes);
+  out['defensiveDowntrendCooldownMinutes'] = String(runtime.defensiveDowntrendCooldownMinutes);
+  out['defensiveDowntrendEmergencyReentryMultiplier'] = String(runtime.defensiveDowntrendEmergencyReentryMultiplier);
+
   out['strategicRebalanceEnabled'] = String(runtime.strategicRebalanceEnabled);
   out['strategicRebalanceIdleMinutes'] = String(runtime.strategicRebalanceIdleMinutes);
   out['strategicRebalanceBasisMultiplier'] = String(runtime.strategicRebalanceBasisMultiplier);
