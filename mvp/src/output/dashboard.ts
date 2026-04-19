@@ -4084,6 +4084,10 @@ function renderConfigHtml(): string {
     { key: 'basisGateThreshold', label: 'Basis gate threshold', desc: 'Price must be >= basis × threshold to open position. Lower = more permissive.', ex: '0.999 = 0.1% buffer. 0.995 = 0.5% buffer. 0.992 = 0.8% buffer.' },
     { key: 'proximityDeployThreshold', label: 'Prox deploy threshold', desc: 'Max proximity to lower bound before auto-deploy pauses (0-1).', ex: '0.40→0.55: deploys closer to edge. 0.40: pauses when 40% to lower bound.' },
     { key: 'reserveFloorPct', label: 'Reserve floor %', desc: 'Reserve floor as fraction of total portfolio. Higher = more USDC held back from deployment.', ex: '0.10 = 10% reserve. 0.18 = 18%. 0.20 = 20%. Higher in bearish regimes for safety.' },
+    { key: 'solConvertBasisMultiplier', label: 'SolConvert basis mult', desc: 'Price must be > basis x this to fire SolConvert in this regime. 1.000 = sell at basis, 1.025 = 2.5% profit required.', ex: '1.000 permissive. 1.005 = 0.5% margin. 1.025 = tight gate for bearish regimes.' },
+    { key: 'progressiveBasisDecayStartHours', label: 'Decay grace (h)', desc: 'Per-regime grace period (hours) below basis before progressive decay activates. Overrides global.', ex: '0.25 = decay starts after 15 min. 1.0 = 1h grace. 0 = immediate.' },
+    { key: 'progressiveBasisDecayPerInterval', label: 'Decay per interval', desc: 'Per-regime decay step each interval. 0.001 = 0.1% reduction per interval after grace.', ex: '0.001 = gentle. 0.005 = aggressive. Used by SolConvert threshold.' },
+    { key: 'progressiveBasisDecayMinThreshold', label: 'Decay floor mult', desc: 'Per-regime decay floor. Maximum threshold reduction allowed. 0.98 = 2% max loss tolerance.', ex: '0.98 = tight floor. 0.95 = looser. 0.90 = accept larger drawdown to convert.' },
   ];
 
   // Original defaults from constants (for "Default" column)
@@ -4113,6 +4117,19 @@ function renderConfigHtml(): string {
       <td style="padding:8px;color:#c9d1d9;font-size:12px">${label}</td>
       <td style="padding:8px;color:#30363d;font-size:11px">${defaultVal}</td>
       <td style="padding:8px">${inputHtml}</td>
+      <td style="padding:8px;color:#8b949e;font-size:11px;max-width:220px">${desc}</td>
+      <td style="padding:8px;color:#58a6ff;font-size:11px;max-width:220px">${ex}</td>
+    </tr>`;
+  }
+
+  function boolField(key: string, value: boolean, defaultVal: boolean, label: string, desc: string, ex: string): string {
+    return `<tr style="border-bottom:1px solid #21262d">
+      <td style="padding:8px;color:#c9d1d9;font-size:12px">${label}</td>
+      <td style="padding:8px;color:#30363d;font-size:11px">${defaultVal}</td>
+      <td style="padding:8px"><select class="cfg-input" data-key="${key}" style="width:80px">
+        <option value="true" ${value ? 'selected' : ''}>On</option>
+        <option value="false" ${!value ? 'selected' : ''}>Off</option>
+      </select></td>
       <td style="padding:8px;color:#8b949e;font-size:11px;max-width:220px">${desc}</td>
       <td style="padding:8px;color:#58a6ff;font-size:11px;max-width:220px">${ex}</td>
     </tr>`;
@@ -4221,6 +4238,23 @@ ${NAV_HTML}
   </table>
 </div>
 
+<!-- SECTION 1c: Master Switches -->
+<div class="cfg-section">
+  <h3>1c. Master Switches</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${boolField('flashCrashEnabled', c.flashCrashEnabled, true, 'Flash crash detection', 'Enable flash crash detection and post-crash cooldown. Off disables Section 5 flashCrash* logic.', 'Off = faster re-entry after drops. On = safer, waits for settle.')}
+    ${boolField('solConversionEnabled', c.solConversionEnabled, true, 'SolConvert master', 'Enable periodic SOL to USDC conversion. Off disables SolConvert across all regimes.', 'Off = pure HODL SOL. On = skim profits per regime schedule.')}
+    ${boolField('progressiveBasisDecayEnabled', c.progressiveBasisDecayEnabled, false, 'Progressive basis decay', 'Enable decay of SolConvert basis threshold over time. Lets stuck SOL eventually convert.', 'Off = strict basis gate. On = gradual loosening after grace period.')}
+    ${boolField('dynamicAdjustmentsEnabled', c.dynamicAdjustmentsEnabled, false, 'Dynamic adjustments (TA)', 'Enable TA-driven dynamic deploy multiplier and related adjustments.', 'Off = static params. On = RSI/BB nudges size and timing.')}
+    ${boolField('strategicRebalanceEnabled', c.strategicRebalanceEnabled, true, 'Strategic rebalance', 'Enable strategic rebalance for stuck positions (idle too long below basis).', 'Off = hold forever. On = force-rebalance after idle timeout.')}
+    ${boolField('regimeReopenEnabled', c.regimeReopenEnabled, true, 'Regime reopen (v2 gate)', 'Enable gated position reopen on regime change (uses proximity + confidence gates).', 'Off = never reopen on regime change. On = reopen only when gates pass.')}
+    ${boolField('t1DownsideAgeGuardEnabled', c.t1DownsideAgeGuardEnabled, true, 'T1 downside age guard', 'Require minimum age before T1_DOWNSIDE close fires. Prevents churn on new positions.', 'Off = close immediately on prox trigger. On = let position mature.')}
+    ${boolField('varEnabled', c.varEnabled, false, 'VAR engine', 'Enable Volatility-Adaptive Range engine. Adjusts range width based on observed volatility.', 'Off = static width per regime. On = width scales with vol.')}
+    ${boolField('sirEnabled', c.sirEnabled, false, 'SIR engine', 'Enable Smart Idle Rebalancing engine. Rebalances idle capital on TA signals.', 'Off = only Rule 8 idle rebalance. On = adds TA-driven rebalances.')}
+  </table>
+</div>
+
 <!-- SECTION 2: Position Rules -->
 <div class="cfg-section">
   <h3>2. Position Rules</h3>
@@ -4320,6 +4354,16 @@ ${NAV_HTML}
   </table>
 </div>
 
+<!-- SECTION 4d: SolConvert Tuning -->
+<div class="cfg-section">
+  <h3>4d. SolConvert Tuning</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('solConvertMinSolPct', c.solConvertMinSolPct, 0.20, 'Min wallet SOL % (gate)', 'SolConvert only fires when wallet SOL value is above this fraction of total wallet.', '0.20 = 20% SOL-heavy before converting. 0.50 = very SOL-heavy only.')}
+    ${field('solConvertMaxFromSolPct', c.solConvertMaxFromSolPct, 0.05, 'Max per-fire SOL %', 'Cap on SOL fraction converted per SolConvert fire. Limits sell-pressure per event.', '0.05 = up to 5% of SOL per fire. 0.10 = more aggressive. 0.02 = very gentle.')}
+  </table>
+</div>
+
 <!-- SECTION 5: Re-entry -->
 <div class="cfg-section">
   <h3>5. Post-Upside Re-entry</h3>
@@ -4333,6 +4377,7 @@ ${NAV_HTML}
     ${field('postUpsideFloorMultiplier', c.postUpsideFloorMultiplier, 0.5, 'Floor multiplier (post-upside)', 'Fraction of USDC reserve floor to enforce during post-upside pre-open SOL buy. Lower = more aggressive SOL purchase for fuller deployment.', '0.5 = 50% of normal floor. 1.0 = normal floor. 0.25 = very aggressive.')}
     ${field('flashCrashPct', c.flashCrashPct, 5, 'Flash crash threshold (%)', 'Drop this % in ~5 min = flash crash. Triggers cooldown.', 'At 10%: only extreme crashes trigger. At 3%: even moderate drops pause.')}
     ${field('flashCrashWaitMinutes', c.flashCrashWaitMinutes, 15, 'Flash crash cooldown (min)', 'Block re-entry for this long after crash.', 'At 30 min: more settle time. At 5 min: minimal wait.')}
+    ${field('t1DownsideEmergencyOffset', c.t1DownsideEmergencyOffset, 0.10, 'T1 emergency offset', 'Proximity offset above proxThresholdLower that bypasses the age guard. Emergency close for deep drops.', '0.10 = bypass when prox is 10% past threshold. 0.18 = larger cushion. 0.05 = trip-wire close.')}
   </table>
 </div>
 
@@ -4363,6 +4408,18 @@ ${NAV_HTML}
   </table>
 </div>
 
+<!-- SECTION 5c: Pre-Open SOL Sell -->
+<div class="cfg-section">
+  <h3>5c. Pre-Open SOL Sell</h3>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${boolField('preOpenSolSellEnabled', c.preOpenSolSellEnabled, true, 'Pre-open SOL sell', 'Sell excess SOL to USDC before opening a new position, to rebalance deposit mix.', 'Off = open with whatever wallet has. On = trim SOL first for balanced deposits.')}
+    ${field('preOpenSolSellMaxPct', c.preOpenSolSellMaxPct, 0.10, 'Max per-fire SOL %', 'Max fraction of wallet SOL value to sell pre-open.', '0.10 = up to 10% of SOL per open. 0.25 = more aggressive. 0.05 = gentle.')}
+    ${field('preOpenSolSellMinUsd', c.preOpenSolSellMinUsd, 500, 'Min excess USD', 'Minimum excess-SOL USD value to trigger pre-open sell. Skips dust.', '500 = only fire on >$500 excess. 100 = even small excess. 1000 = only large imbalances.')}
+    ${field('preOpenSolSellCooldownMs', c.preOpenSolSellCooldownMs, 180000, 'Cooldown (ms)', 'Minimum ms between pre-open sells. 180000 = 3 min.', '180000 = 3 min. 300000 = 5 min. 60000 = 1 min (aggressive).')}
+  </table>
+</div>
+
 <!-- SECTION 6: Circuit Breakers -->
 <div class="cfg-section">
   <h3>6. Circuit Breakers</h3>
@@ -4372,6 +4429,19 @@ ${NAV_HTML}
     ${field('weeklyDrawdownLimitPct', c.weeklyDrawdownLimitPct, 15, 'Weekly drawdown (%)', 'HALT if portfolio drops this from weekly peak.', 'At 25%: allows larger drawdown. At 10%: halts early in downtrends.')}
     ${field('maxIlPct', c.maxIlPct, 8, 'Max IL (%)', 'Force rebalance if IL exceeds this on any position.', 'At 15%: allows more IL (wider ranges). At 5%: very tight IL control.')}
     ${field('rebalanceLoopLimit', c.rebalanceLoopLimit, 10, 'Rebalance limit (/hour)', 'Max close+reopen cycles per hour.', 'At 20: more activity in volatile markets. At 5: stricter limit.')}
+  </table>
+</div>
+
+<!-- SECTION 6b: Progressive Decay (Global Defaults) -->
+<div class="cfg-section">
+  <h3>6b. Progressive Decay (Global Defaults)</h3>
+  <div style="color:#8b949e;font-size:11px;margin-bottom:8px">Used when the active regime does not have its own per-regime override (Section 2 grid takes precedence).</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('progressiveBasisDecayStartHours', c.progressiveBasisDecayStartHours, 0.5, 'Grace period (h)', 'Hours below basis before decay activates.', '0.5 = 30 min grace. 0.25 = 15 min. 1.0 = 1h.')}
+    ${field('progressiveBasisDecayPerInterval', c.progressiveBasisDecayPerInterval, 0.001, 'Decay per interval', 'Threshold reduction per interval after grace. 0.001 = 0.1%.', '0.001 = gentle. 0.005 = aggressive. 0.0005 = very slow decay.')}
+    ${field('progressiveBasisDecayIntervalMinutes', c.progressiveBasisDecayIntervalMinutes, 15, 'Decay interval (min)', 'How often the threshold steps down.', '15 = every 15 min. 5 = every 5 min (faster). 30 = every 30 min.')}
+    ${field('progressiveBasisDecayMinThreshold', c.progressiveBasisDecayMinThreshold, 0.95, 'Floor multiplier', 'Floor for decayed threshold. Never goes below basis x this.', '0.95 = accept up to 5% loss. 0.98 = tight floor. 0.90 = looser.')}
   </table>
 </div>
 
