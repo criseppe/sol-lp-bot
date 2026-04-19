@@ -122,6 +122,17 @@ export function reduceCostBasisHoldings(
   const state = readCostBasis(db);
   if (!state.solCostBasis || state.solTotalAcquired <= 0) return;
 
+  // Drift detection: reduction larger than tracked total indicates a bug upstream
+  // (double-reduce, untracked acquisition, or stale totals). Log loudly; still clamp to 0
+  // to keep downstream math safe.
+  if (solSoldAmount > state.solTotalAcquired + 0.001) {
+    console.log(JSON.stringify({
+      level: 'warn',
+      msg: `[CostBasis] ANOMALY [${label}]: reduce ${solSoldAmount.toFixed(3)} SOL exceeds tracked ${state.solTotalAcquired.toFixed(3)} SOL — clamping to 0. Possible double-reduce or untracked acquisition upstream.`,
+      timestamp: Date.now(),
+    }));
+  }
+
   const newTotalAcquired = Math.max(0, state.solTotalAcquired - solSoldAmount);
   const reductionRatio = state.solTotalAcquired > 0 ? newTotalAcquired / state.solTotalAcquired : 0;
   const newTotalCost = state.solTotalCost * reductionRatio;
@@ -153,6 +164,19 @@ export function recalculateFromCurrentHoldings(
 ): void {
   const existing = readCostBasis(db);
   if (!existing.solCostBasis || existing.solCostBasis <= 0) return;
+
+  // Downward drift alarm: tracked << actual indicates over-reduction (e.g. double-reduce
+  // bug, or reduce path where acquisition wasn't recorded). Log only — do not auto-reset,
+  // because caller's currentSolBalance may use entrySol (not live LP composition) which
+  // is unreliable for an upward adjustment. Operator should reconcile manually.
+  if (currentSolBalance > 0.01 && existing.solTotalAcquired < currentSolBalance * 0.5) {
+    console.log(JSON.stringify({
+      level: 'warn',
+      msg: `[CostBasis] Downward drift: tracked ${existing.solTotalAcquired.toFixed(3)} SOL vs on-hand ~${currentSolBalance.toFixed(3)} SOL (ratio ${(existing.solTotalAcquired / currentSolBalance).toFixed(2)}×). Basis $${existing.solCostBasis.toFixed(2)} is still consistent; totals are under-counted. Investigate reduce paths.`,
+      timestamp: Date.now(),
+    }));
+  }
+
   if (existing.solTotalAcquired <= currentSolBalance * 2) return; // not wildly off
 
   const newTotalAcquired = currentSolBalance;

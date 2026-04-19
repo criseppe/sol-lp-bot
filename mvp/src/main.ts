@@ -2429,7 +2429,8 @@ async function runLiveCycle(price: number): Promise<void> {
               console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Converting ${convertSol.toFixed(3)} SOL → $${convertUsdc.toFixed(2)} USDC. Price: $${price.toFixed(2)}, basis: $${basis.toFixed(2)}, margin: ${((price / basis - 1) * 100).toFixed(2)}%, cap: $${effectiveCap.toFixed(0)} (${(dynamicCapPct * 100).toFixed(1)}% of $${walletSolValue.toFixed(0)}, target ${targetDeployMin}min), cooldown: ${(effectiveCooldownMs / 60_000).toFixed(0)}min${momentumOverride ? ' [momentum]' : ''}`, timestamp: now }));
               const swapResult = await liveExecutor!.doSwapPublic(MINTS.SOL, MINTS.USDC, Math.floor(convertSol * 1e9), swapReason);
               if (swapResult) {
-                reduceCostBasisHoldings(db, convertSol, 'sol_convert');
+                // NOTE: cost-basis reduction is handled by onSwap callback (main.ts:607).
+                // Do NOT call reduceCostBasisHoldings here — would double-reduce.
                 costBasisState = readCostBasis(db);
                 sirCostBasis = costBasisState.solCostBasis;
                 solConversionLastTs = now;
