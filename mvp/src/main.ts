@@ -1635,7 +1635,9 @@ async function runLiveCycle(price: number): Promise<void> {
       taRegimeCandidate = taResult.candidateRegime;
       taRegimeCandidateCount = taResult.newCandidateCount;
       deployMultiplier = taResult.deployMultiplier;
-      taDeployMultiplier = taResult.deployMultiplier;
+      // Master switch: force 1.0 when dynamic adjustments disabled so downstream
+      // position-size sites (auto-deploy, rebalance, SolConvert cap) are static.
+      taDeployMultiplier = runtime.dynamicAdjustmentsEnabled ? taResult.deployMultiplier : 1.0;
 
       newRegime = taResult.regime;
       reasoningText = taResult.log;
@@ -2939,8 +2941,9 @@ async function liveCloseAndReopen(price: number, eventType: EventType, triggerRe
     : null;
   const freshRegimeValue: Regime = freshTaResult?.regime ?? liveRegime;
   if (freshTaResult) {
-    // Deploy multiplier is safe to carry forward (reflects current score, not hysteresis)
-    taDeployMultiplier = freshTaResult.deployMultiplier;
+    // Deploy multiplier is safe to carry forward (reflects current score, not hysteresis).
+    // Master switch: force 1.0 when dynamic adjustments disabled.
+    taDeployMultiplier = runtime.dynamicAdjustmentsEnabled ? freshTaResult.deployMultiplier : 1.0;
   }
   console.log(JSON.stringify({
     level: 'info',

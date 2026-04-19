@@ -374,8 +374,9 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
     }
   }
 
-  // Master switch for dynamic adjustments
-  { const v = n('dynamicAdjustmentsEnabled'); if (v != null) runtime.dynamicAdjustmentsEnabled = v !== 0; }
+  // Master switch for dynamic adjustments.
+  // Absent DB key → reset to default (false) so removing the key actually disables.
+  { const v = n('dynamicAdjustmentsEnabled'); runtime.dynamicAdjustmentsEnabled = (v != null) ? (v !== 0) : false; }
 
   // Progressive basis decay
   { const v = n('progressiveBasisDecayEnabled'); if (v != null) runtime.progressiveBasisDecayEnabled = v !== 0; }
