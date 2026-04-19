@@ -83,8 +83,10 @@ function startOfUtcDayMs(d = new Date()): number {
   return utc;
 }
 
-function feeSumWhere(db: Database.Database, whereTs: string, params: unknown[]): number {
-  const r = db.prepare(`SELECT COALESCE(SUM(fee_usdc),0) as s FROM rebalance_events WHERE (fee_usdc > 0 OR fee_sol > 0) AND ${whereTs}`).get(...params as []) as { s: number };
+function feeSumWhere(db: Database.Database, solPrice: number, whereTs: string, params: unknown[]): number {
+  // USD-equivalent of both fee halves (matches Intelligence page convention).
+  // Historical fee_sol is re-valued at current SOL price.
+  const r = db.prepare(`SELECT COALESCE(SUM(fee_usdc + fee_sol * ?),0) as s FROM rebalance_events WHERE (fee_usdc > 0 OR fee_sol > 0) AND ${whereTs}`).get(solPrice, ...params as []) as { s: number };
   return r.s ?? 0;
 }
 
@@ -108,12 +110,17 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
   const sevenDayStart = now - 7 * 86_400_000;
   const thirtyDayStart = now - 30 * 86_400_000;
 
+  // Current SOL price for USD-equivalent conversion of fee_sol across all
+  // fee queries in this function. Historical fee_sol is valued at the
+  // latest price (same convention as the Intelligence page).
+  const solPrice = getCurrentSolPrice(db);
+
   // Hero — all time
-  const totalFees = feeSumWhere(db, 'timestamp > 0', []);
+  const totalFees = feeSumWhere(db, solPrice, 'timestamp > 0', []);
   const totalIl = ilSumWhere(db, 'timestamp > 0', []); // negative
   const absIl = Math.abs(totalIl);
   const gasRow = db.prepare('SELECT COALESCE(cum_gas_lamports, 0) as g FROM bot_state WHERE id = 1').get() as { g: number } | undefined;
-  const totalGas = (gasRow?.g ?? 0) * 1e-9 * solPriceForGas(db);
+  const totalGas = (gasRow?.g ?? 0) * 1e-9 * solPrice;
   const netVsHodl = totalFees + totalIl - totalGas; // il is negative already
   const ratio = absIl > 0 ? totalFees / absIl : Infinity;
   const healthStatus: 'healthy' | 'marginal' | 'losing' =
@@ -123,7 +130,7 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
   const mkWindow = (period: string, startTs: number, endTs: number | null): IlTimeWindow => {
     const where = endTs != null ? 'timestamp >= ? AND timestamp < ?' : 'timestamp >= ?';
     const params = endTs != null ? [startTs, endTs] : [startTs];
-    const fees = feeSumWhere(db, where, params);
+    const fees = feeSumWhere(db, solPrice, where, params);
     const il = ilSumWhere(db, where, params);
     const absIl2 = Math.abs(il);
     const r = absIl2 > 0 ? fees / absIl2 : (fees > 0 ? Infinity : 0);
@@ -151,12 +158,12 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
   // Cumulative chart — 30 daily buckets
   const dailyRows = db.prepare(`
     SELECT date(timestamp/1000,'unixepoch') as d,
-           COALESCE(SUM(fee_usdc),0) as fees,
+           COALESCE(SUM(fee_usdc + fee_sol * ?),0) as fees,
            COALESCE(SUM(CASE WHEN event_type IN (${CLOSE_SQL_LIST}) THEN il_at_close ELSE 0 END),0) as il
     FROM rebalance_events
     WHERE timestamp >= ?
     GROUP BY d ORDER BY d ASC
-  `).all(thirtyDayStart) as Array<{ d: string; fees: number; il: number }>;
+  `).all(solPrice, thirtyDayStart) as Array<{ d: string; fees: number; il: number }>;
   const cumulativeChart: IlCumulativePoint[] = [];
   let cf = 0, ci = 0;
   for (const r of dailyRows) {
@@ -170,11 +177,11 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
            COUNT(*) as n,
            COALESCE(AVG(il_at_close),0) as avg_il,
            COALESCE(SUM(il_at_close),0) as total_il,
-           COALESCE((SELECT SUM(fee_usdc) FROM rebalance_events f WHERE f.regime = rebalance_events.regime AND (f.fee_usdc > 0 OR f.fee_sol > 0)),0) as total_fees
+           COALESCE((SELECT SUM(fee_usdc + fee_sol * ?) FROM rebalance_events f WHERE f.regime = rebalance_events.regime AND (f.fee_usdc > 0 OR f.fee_sol > 0)),0) as total_fees
     FROM rebalance_events
     WHERE event_type IN (${CLOSE_SQL_LIST}) AND il_at_close IS NOT NULL
     GROUP BY regime ORDER BY total_il ASC
-  `).all() as Array<{ regime: string | null; n: number; avg_il: number; total_il: number; total_fees: number }>;
+  `).all(solPrice) as Array<{ regime: string | null; n: number; avg_il: number; total_il: number; total_fees: number }>;
   const regimeBreakdown: IlRegimeRow[] = regimeRows.map(r => {
     const absIl3 = Math.abs(r.total_il ?? 0);
     return {
@@ -254,7 +261,7 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
   };
 }
 
-function solPriceForGas(db: Database.Database): number {
+function getCurrentSolPrice(db: Database.Database): number {
   const r = db.prepare(`SELECT price FROM live_snapshots ORDER BY timestamp DESC LIMIT 1`).get() as { price: number } | undefined;
   return r?.price ?? 0;
 }
@@ -464,6 +471,11 @@ ${NAV_HTML}
     <span>IL: <b class="red">$${h.totalIl.toFixed(2)}</b></span>
     <span>Gas: <b>$${h.totalGas.toFixed(2)}</b></span>
     <span>Ratio: <b>${h.ratio > 0 ? h.ratio.toFixed(2) + 'x' : '—'}</b></span>
+  </div>
+  <div style="font-size:10px;color:#8b949e;margin-top:10px;font-style:italic">
+    Fees are <b>realized-to-wallet only</b> (book-closed events in rebalance_events).
+    Pending unharvested fees appear on the Live Wallet page.
+    fee_sol valued at latest SOL price, matching Intelligence-page convention.
   </div>
 </div>
 
