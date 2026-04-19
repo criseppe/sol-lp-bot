@@ -204,6 +204,7 @@ const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
   'rangeWidthPct', 'skewDown', 'skewUp', 'proxThresholdLower', 'proxThresholdUpper',
   'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold', 'reserveFloorPct',
   'solConvertBasisMultiplier',
+  'progressiveBasisDecayStartHours', 'progressiveBasisDecayPerInterval', 'progressiveBasisDecayMinThreshold',
 ];
 
 /**
@@ -377,6 +378,9 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
     deployPct: [0.01, 1], solReentrySplit: [0, 1],
     harvestIntervalDays: [0.1, 30], harvestSolConvertPct: [0, 1],
     solConvertBasisMultiplier: [0.95, 1.10],
+    progressiveBasisDecayStartHours: [0, 24],
+    progressiveBasisDecayPerInterval: [0, 0.01],
+    progressiveBasisDecayMinThreshold: [0.5, 1.0],
   };
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {

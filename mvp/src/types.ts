@@ -56,6 +56,9 @@ export interface RegimeParams {
   proximityDeployThreshold: number; // max proximity to lower bound before auto-deploy skips (0-1)
   reserveFloorPct: number; // reserve floor as fraction of portfolio (0-1)
   solConvertBasisMultiplier: number; // price must be >= basis × this (per-regime) before SolConvert fires (non-decay path)
+  progressiveBasisDecayStartHours: number;    // per-regime grace period before decay starts
+  progressiveBasisDecayPerInterval: number;   // per-regime decrement per interval (0.001 = 0.1%)
+  progressiveBasisDecayMinThreshold: number;  // per-regime floor multiplier (e.g., 0.98 = 2% max loss)
 }
 
 export interface RangeBounds {

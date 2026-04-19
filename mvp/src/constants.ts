@@ -28,6 +28,9 @@ export const REGIME_PARAMS = {
     proximityDeployThreshold: 0.55,
     reserveFloorPct: 0.10,
     solConvertBasisMultiplier: 1.000,
+    progressiveBasisDecayStartHours: 0.25,     // 15 min grace
+    progressiveBasisDecayPerInterval: 0.001,   // 0.1% per interval
+    progressiveBasisDecayMinThreshold: 0.98,   // 2% max loss
   },
   BULLISH_TREND: {
     rangeWidthPct:        3,
@@ -45,6 +48,9 @@ export const REGIME_PARAMS = {
     proximityDeployThreshold: 0.60,
     reserveFloorPct: 0.12,
     solConvertBasisMultiplier: 1.010,
+    progressiveBasisDecayStartHours: 0.50,     // 30 min grace — dips likely reverse
+    progressiveBasisDecayPerInterval: 0.0005,  // 0.05% per interval — slow
+    progressiveBasisDecayMinThreshold: 0.97,   // 3% max loss
   },
   BEARISH_TREND: {
     rangeWidthPct:        2,
@@ -62,6 +68,9 @@ export const REGIME_PARAMS = {
     proximityDeployThreshold: 0.45,
     reserveFloorPct: 0.18,
     solConvertBasisMultiplier: 1.005,
+    progressiveBasisDecayStartHours: 0.083,    // 5 min grace — dips likely persist
+    progressiveBasisDecayPerInterval: 0.002,   // 0.2% per interval — fast
+    progressiveBasisDecayMinThreshold: 0.95,   // 5% max loss
   },
   EXTREME: {
     rangeWidthPct:        5,
@@ -79,6 +88,9 @@ export const REGIME_PARAMS = {
     proximityDeployThreshold: 0.40,
     reserveFloorPct: 0.20,
     solConvertBasisMultiplier: 1.000,
+    progressiveBasisDecayStartHours: 0.167,    // 10 min grace
+    progressiveBasisDecayPerInterval: 0.0015,  // 0.15% per interval
+    progressiveBasisDecayMinThreshold: 0.96,   // 4% max loss
   },
 } as const;
 

@@ -244,7 +244,7 @@ async function reconcileReserveAfterOpen(label: string): Promise<void> {
 // loosen the effective threshold on a progressiveBasisDecayIntervalMinutes cadence
 // so SolConvert / idle-rebalance SOL-sell can eventually fire at a small loss.
 // Bounded by progressiveBasisDecayMinThreshold (default 95%). Disabled by default.
-function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, now: number): number {
+function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, now: number, regime?: Regime): number {
   const defaultMultiplier = 0.995;
   const defaultThreshold = basis * defaultMultiplier;
 
@@ -254,13 +254,19 @@ function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, n
 
   if (belowBasisStartTs === 0) { belowBasisStartTs = now; return defaultThreshold; }
 
-  const hoursBelowBasis = (now - belowBasisStartTs) / 3600_000;
-  if (hoursBelowBasis < runtime.progressiveBasisDecayStartHours) return defaultThreshold;
+  // Per-regime decay params (fall back to globals when regime not provided)
+  const rp = regime ? runtime.regimeParams[regime] : null;
+  const startHours   = rp?.progressiveBasisDecayStartHours    ?? runtime.progressiveBasisDecayStartHours;
+  const perInterval  = rp?.progressiveBasisDecayPerInterval   ?? runtime.progressiveBasisDecayPerInterval;
+  const minThreshold = rp?.progressiveBasisDecayMinThreshold  ?? runtime.progressiveBasisDecayMinThreshold;
 
-  const hoursDecaying = hoursBelowBasis - runtime.progressiveBasisDecayStartHours;
+  const hoursBelowBasis = (now - belowBasisStartTs) / 3600_000;
+  if (hoursBelowBasis < startHours) return defaultThreshold;
+
+  const hoursDecaying = hoursBelowBasis - startHours;
   const intervalsElapsed = Math.floor((hoursDecaying * 60) / runtime.progressiveBasisDecayIntervalMinutes);
-  const decayAmount = intervalsElapsed * runtime.progressiveBasisDecayPerInterval;
-  const effectiveMultiplier = Math.max(runtime.progressiveBasisDecayMinThreshold, defaultMultiplier - decayAmount);
+  const decayAmount = intervalsElapsed * perInterval;
+  const effectiveMultiplier = Math.max(minThreshold, defaultMultiplier - decayAmount);
   const threshold = basis * effectiveMultiplier;
 
   const logIntervalMs = 15 * 60_000;
@@ -278,20 +284,24 @@ function calculateEffectiveBasisThreshold(basis: number, currentPrice: number, n
 
 // Pure (no side-effects, no logging) accessor for dashboard visibility.
 // Must match the math in calculateEffectiveBasisThreshold above.
-function getProgressiveDecayState(basis: number, currentPrice: number, now: number) {
+function getProgressiveDecayState(basis: number, currentPrice: number, now: number, regime?: Regime) {
   if (!runtime.progressiveBasisDecayEnabled) return null;
   if (basis <= 0) return null;
   const defaultMultiplier = 0.995;
   if (currentPrice >= basis || belowBasisStartTs === 0) {
     return { active: false, hrsBelowBasis: 0, effectiveMultiplier: defaultMultiplier, effectiveThresholdUsd: basis * defaultMultiplier, lossTolerancePct: (1 - defaultMultiplier) * 100 };
   }
+  const rp = regime ? runtime.regimeParams[regime] : null;
+  const startHours   = rp?.progressiveBasisDecayStartHours    ?? runtime.progressiveBasisDecayStartHours;
+  const perInterval  = rp?.progressiveBasisDecayPerInterval   ?? runtime.progressiveBasisDecayPerInterval;
+  const minThreshold = rp?.progressiveBasisDecayMinThreshold  ?? runtime.progressiveBasisDecayMinThreshold;
   const hrsBelowBasis = (now - belowBasisStartTs) / 3600_000;
-  const hoursDecaying = Math.max(0, hrsBelowBasis - runtime.progressiveBasisDecayStartHours);
+  const hoursDecaying = Math.max(0, hrsBelowBasis - startHours);
   const intervalsElapsed = Math.floor((hoursDecaying * 60) / runtime.progressiveBasisDecayIntervalMinutes);
-  const decayAmount = intervalsElapsed * runtime.progressiveBasisDecayPerInterval;
-  const effectiveMultiplier = Math.max(runtime.progressiveBasisDecayMinThreshold, defaultMultiplier - decayAmount);
+  const decayAmount = intervalsElapsed * perInterval;
+  const effectiveMultiplier = Math.max(minThreshold, defaultMultiplier - decayAmount);
   return {
-    active: hrsBelowBasis >= runtime.progressiveBasisDecayStartHours,
+    active: hrsBelowBasis >= startHours,
     hrsBelowBasis,
     effectiveMultiplier,
     effectiveThresholdUsd: basis * effectiveMultiplier,
@@ -536,7 +546,7 @@ async function main() {
       if (direction === 'sell_sol') {
         const basis = sirCostBasis || 0;
         if (basis > 0) {
-          const effectiveThreshold = calculateEffectiveBasisThreshold(basis, price, Date.now());
+          const effectiveThreshold = calculateEffectiveBasisThreshold(basis, price, Date.now(), liveRegime);
           if (price < effectiveThreshold) {
             const decayActive = effectiveThreshold < basis * 0.995 - 1e-9;
             console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell SOL at $${price.toFixed(4)} (below effective threshold $${effectiveThreshold.toFixed(4)}, basis $${basis.toFixed(4)}${decayActive ? ', decay active' : ''})`, timestamp: Date.now() }));
@@ -955,7 +965,7 @@ async function main() {
             botState: liveBotState,
             liveEvents: [],
             marketSignals: marketData.getSignals() ?? undefined,
-            progressiveDecay: getProgressiveDecayState(costBasisState.solCostBasis || 0, price.price, Date.now()),
+            progressiveDecay: getProgressiveDecayState(costBasisState.solCostBasis || 0, price.price, Date.now(), liveRegime),
             strategicRebalance: runtime.strategicRebalanceEnabled ? (() => {
               const total = balances.sol * price.price + balances.usdc;
               const solSharePct = total > 0 ? (balances.sol * price.price) / total * 100 : 0;
@@ -2312,17 +2322,17 @@ async function runLiveCycle(price: number): Promise<void> {
       const regimeMult: number | null = (regimeMultRaw == null || regimeMultRaw === 0) ? null : regimeMultRaw;
       const effectiveMult = regimeMult != null ? regimeMult * runtime.solConversionBasisMultiplier : null;
       // Progressive basis decay state — used both as threshold source and as regime-gate bypass.
-      const decayState = getProgressiveDecayState(basis, price, now);
+      const decayState = getProgressiveDecayState(basis, price, now, liveRegime);
       const decayActive = decayState?.active === true;
       // Progressive basis decay: when enabled, loosen threshold below per-regime default
       // after extended idle below basis. When decay is active, always use the decayed
       // threshold — including in EXTREME (where the per-regime mult is null) — so the
       // decay-bypass path never fires without a price check.
       const basisThresholdActive = decayActive
-        ? calculateEffectiveBasisThreshold(basis, price, now)
+        ? calculateEffectiveBasisThreshold(basis, price, now, liveRegime)
         : (effectiveMult !== null
             ? (runtime.progressiveBasisDecayEnabled
-                ? calculateEffectiveBasisThreshold(basis, price, now)
+                ? calculateEffectiveBasisThreshold(basis, price, now, liveRegime)
                 : basis * effectiveMult)
             : null);
 
@@ -2545,7 +2555,7 @@ async function runLiveCycle(price: number): Promise<void> {
             const idealSolToSwap = Math.min(diffUsdc / price, idleSol, sellCapUsdc / price);
 
             const idleSellThreshold = runtime.progressiveBasisDecayEnabled
-              ? calculateEffectiveBasisThreshold(basis, price, now)
+              ? calculateEffectiveBasisThreshold(basis, price, now, liveRegime)
               : basis;
             if (price < idleSellThreshold) {
               // P&L guard: BLOCKED — price below (possibly decayed) basis threshold
