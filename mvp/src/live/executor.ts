@@ -748,7 +748,7 @@ export class LiveExecutor {
     }
   }
 
-  async getPositionComposition(): Promise<{ sol: number; usdc: number; totalUsdc: number } | null> {
+  async getPositionComposition(): Promise<{ sol: number; usdc: number; totalUsdc: number; poolPrice: number } | null> {
     if (!this.currentPosition) return null;
     try {
       const whirlpool = await this.client.getPool(this.whirlpoolAddress, IGNORE_CACHE);
@@ -756,7 +756,10 @@ export class LiveExecutor {
       const position = await this.client.getPosition(this.currentPosition.positionAddress, IGNORE_CACHE);
       const posData = position.getData();
 
-      if (posData.liquidity.isZero()) return { sol: 0, usdc: 0, totalUsdc: 0 };
+      if (posData.liquidity.isZero()) {
+        const zeroPoolPrice = PriceMath.sqrtPriceX64ToPrice(poolData.sqrtPrice, 9, 6).toNumber();
+        return { sol: 0, usdc: 0, totalUsdc: 0, poolPrice: zeroPoolPrice };
+      }
 
       const currentSqrtPrice = poolData.sqrtPrice;
       const lowerSqrtPrice = PriceMath.tickIndexToSqrtPriceX64(this.currentPosition.tickLower);
@@ -773,7 +776,7 @@ export class LiveExecutor {
       const sol = Number(amounts.tokenA.toString()) / 1e9;
       const usdc = Number(amounts.tokenB.toString()) / 1e6;
       const solPrice = PriceMath.sqrtPriceX64ToPrice(currentSqrtPrice, 9, 6).toNumber();
-      return { sol, usdc, totalUsdc: sol * solPrice + usdc };
+      return { sol, usdc, totalUsdc: sol * solPrice + usdc, poolPrice: solPrice };
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'getPositionComposition failed', error: String(err), timestamp: Date.now() }));
       return null;

@@ -952,15 +952,12 @@ async function main() {
           } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] daily_fee_calc: ${String(e)}`, timestamp: Date.now() })); }
 
           // CL-accurate IL (matches executor.closePosition formula at src/live/executor.ts:567-580).
-          // IL = lpValue - hodlValue
-          //   lpValue   = actual LP composition at current price (posComp already fetched above)
-          //   hodlValue = cumulative entry deposits valued at current price
-          // Replaces the V2 full-range analytical approximation (2*sqrt(r)/(1+r) - 1 * posValue),
-          // which systematically underestimates IL for concentrated-liquidity positions.
-          // Single source of truth: matches realizedIlUsdc and Intelligence-page aggregations.
+          // IL = lpValue - hodlValue, both legs priced at pool sqrtPrice for source-consistency.
+          // Using Pyth for hodl vs pool for lp creates a ~1-2 bp oracle-mix bias that can flip
+          // sign at small deltas. closePosition uses pool for both — mirror that here.
           let ilUsdc = 0;
-          if (livePos && livePos.entrySol != null && livePos.entryUsdc != null && positionValueUsdc > 0) {
-            const hodlValue = livePos.entrySol * price.price + livePos.entryUsdc;
+          if (livePos && livePos.entrySol != null && livePos.entryUsdc != null && posComp && positionValueUsdc > 0) {
+            const hodlValue = livePos.entrySol * posComp.poolPrice + livePos.entryUsdc;
             if (hodlValue > 0) {
               ilUsdc = positionValueUsdc - hodlValue;
             }
