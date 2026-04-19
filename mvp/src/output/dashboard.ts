@@ -78,6 +78,15 @@ export interface PoolStats {
   lastFetched: number;
 }
 
+export interface DefensiveSnapshot {
+  active: boolean;
+  enteredAt: number | null;
+  enteredPrice: number | null;
+  enteredTrigger: string | null;
+  entryPriceLow: number | null;
+  cooldownUntil: number | null;
+}
+
 export interface LiveData {
   walletAddress: string;
   solBalance: number;
@@ -249,6 +258,66 @@ export function startDashboard(port: number): DashboardServer {
     const { renderIntelligenceHtml } = await import('./intelligence-page.js');
     res.type('html').send(renderIntelligenceHtml());
   });
+  app.get('/api/defensive-history', requireAuth, (_req, res) => {
+    if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
+    try {
+      const rows = dbRef.prepare(`
+        SELECT timestamp, decision, reasoning, params_json, price
+        FROM decision_log
+        WHERE decision = 'DEFENSIVE_ENTER' OR decision = 'DEFENSIVE_EXIT'
+        ORDER BY timestamp DESC
+        LIMIT 200
+      `).all() as Array<{ timestamp: number; decision: string; reasoning: string; params_json: string | null; price: number }>;
+
+      let totalMs = 0;
+      let enters = 0;
+      let exits = 0;
+      let avgDropAvoided = 0;
+      let dropCount = 0;
+
+      const pairs: Array<{ enter: any; exit: any | null }> = [];
+      let pending: any = null;
+      for (const r of [...rows].reverse()) {
+        if (r.decision === 'DEFENSIVE_ENTER') {
+          enters++;
+          if (pending) pairs.push({ enter: pending, exit: null });
+          pending = r;
+        } else if (r.decision === 'DEFENSIVE_EXIT' && pending) {
+          exits++;
+          totalMs += r.timestamp - pending.timestamp;
+          pairs.push({ enter: pending, exit: r });
+          try {
+            const p = JSON.parse(r.params_json ?? '{}');
+            if (p.enteredPrice && p.priceLow) {
+              avgDropAvoided += (p.enteredPrice - p.priceLow) / p.enteredPrice;
+              dropCount++;
+            }
+          } catch { /* ignore */ }
+          pending = null;
+        }
+      }
+      if (pending) pairs.push({ enter: pending, exit: null });
+
+      const avgDurationMin = exits > 0 ? (totalMs / exits / 60_000) : 0;
+      const avgDropAvoidedPct = dropCount > 0 ? (avgDropAvoided / dropCount * 100) : 0;
+      const cooldownsTriggered = exits;
+
+      res.json({
+        events: rows,
+        summary: {
+          totalActivations: enters,
+          totalExits: exits,
+          totalDefensiveHours: totalMs / 3_600_000,
+          avgDurationMinutes: avgDurationMin,
+          avgDropAvoidedPct,
+          cooldownsTriggered,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.get('/api/intelligence', requireAuth, (req, res) => {
     if (!dbRef) { res.status(500).json({ error: 'DB not ready' }); return; }
     try {
@@ -1435,7 +1504,23 @@ export function startDashboard(port: number): DashboardServer {
     await fetchPoolStats();
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     const allEvents = dbRef ? dbGetRebalanceEvents(dbRef, 50) : currentEvents;
-    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled, solConversionEnabled));
+    let defensive: DefensiveSnapshot = { active: false, enteredAt: null, enteredPrice: null, enteredTrigger: null, entryPriceLow: null, cooldownUntil: null };
+    try {
+      if (dbRef) {
+        const row = dbRef.prepare(`SELECT defensive_active, defensive_entered_at, defensive_entered_price, defensive_entered_trigger, defensive_entry_price_low, defensive_cooldown_until FROM bot_state WHERE id=1`).get() as any;
+        if (row) {
+          defensive = {
+            active: row.defensive_active === 1,
+            enteredAt: row.defensive_entered_at ?? null,
+            enteredPrice: row.defensive_entered_price ?? null,
+            enteredTrigger: row.defensive_entered_trigger ?? null,
+            entryPriceLow: row.defensive_entry_price_low ?? null,
+            cooldownUntil: row.defensive_cooldown_until ?? null,
+          };
+        }
+      }
+    } catch { /* non-fatal */ }
+    res.type('html').send(renderLiveHtml(currentLive, allEvents, uptime, poolStats, rule2Enabled, autoDeployEnabled, solConversionEnabled, defensive));
   });
 
   // Wallet v2 — new dashboard design (design validation)
@@ -2011,7 +2096,55 @@ ${NAV_HTML}
 
 // ── Live page ─────────────────────────────────────────────────────────────
 
-function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null, rule2Enabled = true, autoDeployEnabled = true, solConversionEnabled = false): string {
+function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], uptime: number, pool: PoolStats | null = null, rule2Enabled = true, autoDeployEnabled = true, solConversionEnabled = false, defensive: DefensiveSnapshot = { active: false, enteredAt: null, enteredPrice: null, enteredTrigger: null, entryPriceLow: null, cooldownUntil: null }): string {
+  const nowMs = Date.now();
+  const defensiveBannerHtml = (() => {
+    const masterOn = runtime.defensiveDowntrendEnabled;
+    const cooldownMsLeft = defensive.cooldownUntil != null ? Math.max(0, defensive.cooldownUntil - nowMs) : 0;
+    if (defensive.active && defensive.enteredAt) {
+      const elapsedMs = nowMs - defensive.enteredAt;
+      const eH = Math.floor(elapsedMs / 3_600_000);
+      const eM = Math.floor((elapsedMs % 3_600_000) / 60_000);
+      const maxMs = runtime.defensiveDowntrendMaxHoldHours * 3_600_000;
+      const leftMs = Math.max(0, maxMs - elapsedMs);
+      const lH = Math.floor(leftMs / 3_600_000);
+      const lM = Math.floor((leftMs % 3_600_000) / 60_000);
+      const entryPrice = defensive.enteredPrice ?? 0;
+      const low = defensive.entryPriceLow ?? entryPrice;
+      const cur = live?.solPrice ?? 0;
+      const recoveryPct = low > 0 ? ((cur - low) / low * 100) : 0;
+      const exitPct = (runtime.defensiveDowntrendExitRecoveryPct * 100).toFixed(1);
+      const targetUsdc = Math.round(runtime.defensiveDowntrendTargetUsdcPct * 100);
+      return `<div class="card" style="background:#5c1f1f;border:2px solid #ef4444;margin-bottom:12px">
+  <div style="font-size:16px;font-weight:bold;color:#ffd1d1">&#9888; DEFENSIVE MODE ACTIVE</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;font-size:12px;color:#ffe5e5">
+    <div>Entered: <b>${eH}h ${eM}m ago</b></div>
+    <div>Time left: <b>${lH}h ${lM}m</b> (max ${runtime.defensiveDowntrendMaxHoldHours}h)</div>
+    <div>Trigger: <b style="color:#fff">${defensive.enteredTrigger ?? 'unknown'}</b></div>
+    <div>Target USDC: <b>${targetUsdc}%</b></div>
+    <div>Entry price: <b>$${entryPrice.toFixed(2)}</b></div>
+    <div>Entry low: <b>$${low.toFixed(2)}</b></div>
+    <div>Current price: <b>$${cur.toFixed(2)}</b></div>
+    <div>Recovery: <b>${recoveryPct >= 0 ? '+' : ''}${recoveryPct.toFixed(1)}%</b> (exit at +${exitPct}%)</div>
+    <div>RSI exit: <b>${runtime.defensiveDowntrendExitRsiThreshold}</b></div>
+    <div>Min hold: <b>${runtime.defensiveDowntrendMinHoldMinutes}m</b></div>
+  </div>
+</div>`;
+    }
+    if (cooldownMsLeft > 0) {
+      const cM = Math.floor(cooldownMsLeft / 60_000);
+      return `<div class="card" style="background:#5c4a1f;border:2px solid #eab308;margin-bottom:12px;font-size:12px;color:#fff3c4">
+  <div style="font-size:14px;font-weight:bold;color:#ffe066">&#128260; DEFENSIVE COOLDOWN</div>
+  <div style="margin-top:6px">${cM} min remaining &middot; Re-entry blocked unless drop exceeds ${runtime.defensiveDowntrendEmergencyReentryMultiplier}&times; trigger.</div>
+</div>`;
+    }
+    if (masterOn) {
+      return `<div style="background:#0f2a1e;border:1px solid #22c55e;border-radius:6px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#7ee8a6">
+  &#128737;&#65039; Defensive: <b>MONITORING</b> (no trigger fired)
+</div>`;
+    }
+    return '';
+  })();
   const regimeColours: Record<string, string> = {
     RANGING: '#4a9eff', BULLISH_TREND: '#22c55e', BEARISH_TREND: '#ef4444', EXTREME: '#a855f7',
   };
@@ -2040,6 +2173,7 @@ function renderLiveHtml(live: LiveData | null, liveEvents: RebalanceEvent[], upt
 </div>
 ${NAV_HTML}
 <script>document.getElementById('nav-live').classList.add('active')</script>
+${defensiveBannerHtml}
 <div class="card" style="text-align:center;padding:40px">
   <h2>Not Available</h2>
   <p style="color:#8b949e;margin-top:12px">Bot is running in SHADOW mode. Set <code>BOT_MODE=LIVE</code> in .env to enable.</p>
@@ -2277,6 +2411,7 @@ ${pool ? `<div class="card" style="margin-top:12px">
 </div>
 ${NAV_HTML}
 <script>document.getElementById('nav-live').classList.add('active')</script>
+${defensiveBannerHtml}
 
 <div class="grid">
   <div class="card full">
@@ -4442,6 +4577,54 @@ ${NAV_HTML}
     ${field('progressiveBasisDecayPerInterval', c.progressiveBasisDecayPerInterval, 0.001, 'Decay per interval', 'Threshold reduction per interval after grace. 0.001 = 0.1%.', '0.001 = gentle. 0.005 = aggressive. 0.0005 = very slow decay.')}
     ${field('progressiveBasisDecayIntervalMinutes', c.progressiveBasisDecayIntervalMinutes, 15, 'Decay interval (min)', 'How often the threshold steps down.', '15 = every 15 min. 5 = every 5 min (faster). 30 = every 30 min.')}
     ${field('progressiveBasisDecayMinThreshold', c.progressiveBasisDecayMinThreshold, 0.95, 'Floor multiplier', 'Floor for decayed threshold. Never goes below basis x this.', '0.95 = accept up to 5% loss. 0.98 = tight floor. 0.90 = looser.')}
+  </table>
+</div>
+
+<!-- SECTION 7: Defensive Downtrend Mode -->
+<div class="cfg-section">
+  <h3>7. Defensive Downtrend Mode</h3>
+  <div style="color:#8b949e;font-size:11px;margin-bottom:8px">Pauses LP operations during sustained drawdowns and parks capital in USDC. Master switch default OFF.</div>
+
+  <div style="color:#58a6ff;font-size:11px;margin:8px 0 4px;text-transform:uppercase;letter-spacing:0.5px">7a. Master Switch</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${boolField('defensiveDowntrendEnabled', c.defensiveDowntrendEnabled, false, 'Defensive mode enabled', 'Master switch. When On, bot monitors sustained drawdowns and pauses LP operations in favour of USDC-heavy wallet.', 'Off = normal operation. On = feature armed. Triggers below decide when to actually enter.')}
+  </table>
+
+  <div style="color:#58a6ff;font-size:11px;margin:12px 0 4px;text-transform:uppercase;letter-spacing:0.5px">7b. Entry Triggers (ANY fires)</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('defensiveDowntrend1hDropPct', c.defensiveDowntrend1hDropPct, 0.05, '1h drop %', 'Enter defensive when SOL has dropped this fraction in the last 1h.', '0.05 = 5% drop. 0.08 = 8% (stricter, fewer entries). 0.03 = 3% (earlier entry).')}
+    ${field('defensiveDowntrend4hDropPct', c.defensiveDowntrend4hDropPct, 0.10, '4h drop %', 'Enter defensive when SOL has dropped this fraction in the last 4h.', '0.10 = 10% drop in 4h. 0.15 = 15% (slower regimes). 0.07 = 7% (more sensitive).')}
+    ${field('defensiveDowntrend24hDropPct', c.defensiveDowntrend24hDropPct, 0.15, '24h drop %', 'Enter defensive when SOL has dropped this fraction in the last 24h.', '0.15 = 15% day-over-day. 0.20 = 20% (major moves only). 0.10 = 10% (faster react).')}
+    ${field('defensiveDowntrend7dDropPct', c.defensiveDowntrend7dDropPct, 0.25, '7d drop %', 'Enter defensive when SOL has dropped this fraction over 7 days.', '0.25 = 25% weekly. 0.35 = only deep weekly drops. 0.15 = slower regime shifts.')}
+    ${field('defensiveDowntrendRsiThreshold', c.defensiveDowntrendRsiThreshold, 25, 'RSI entry threshold', 'Enter defensive when RSI14 falls at or below this value (oversold).', '25 = classic oversold. 20 = extreme only. 30 = earlier entry in weakness.')}
+    ${boolField('defensiveDowntrendUseRsi', c.defensiveDowntrendUseRsi, true, 'Use RSI in triggers', 'Include RSI oversold check in entry triggers.', 'Off = rely on drops only. On = also enter on momentum collapse.')}
+  </table>
+
+  <div style="color:#58a6ff;font-size:11px;margin:12px 0 4px;text-transform:uppercase;letter-spacing:0.5px">7c. Exit Conditions (first fires)</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('defensiveDowntrendExitRecoveryPct', c.defensiveDowntrendExitRecoveryPct, 0.04, 'Recovery % from low', 'Exit when price has recovered this fraction from the entry-period low.', '0.04 = 4% bounce. 0.06 = wait for stronger bounce. 0.02 = fast re-engagement.')}
+    ${field('defensiveDowntrendExitRsiThreshold', c.defensiveDowntrendExitRsiThreshold, 40, 'RSI exit threshold', 'Exit when RSI14 recovers to at or above this value.', '40 = moderate recovery. 50 = wait for full mid-line cross. 35 = earlier exit.')}
+    ${field('defensiveDowntrendMaxHoldHours', c.defensiveDowntrendMaxHoldHours, 12, 'Max hold (hours)', 'Force exit after this many hours in defensive mode (safety cap).', '12 = force exit after half-day. 24 = full day. 4 = short-lived defensive only.')}
+    ${boolField('defensiveDowntrendForceExit', c.defensiveDowntrendForceExit, false, 'Manual force exit', 'Set On to force exit on next cycle. Auto-resets to Off after honoring.', 'Use only to recover manually. Auto-clears to false after exit fires.')}
+  </table>
+
+  <div style="color:#58a6ff;font-size:11px;margin:12px 0 4px;text-transform:uppercase;letter-spacing:0.5px">7d. Behavior During Mode</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('defensiveDowntrendTargetUsdcPct', c.defensiveDowntrendTargetUsdcPct, 0.90, 'Target USDC %', 'Target USDC fraction of wallet while defensive (rest stays as SOL).', '0.90 = 90% USDC. 0.80 = hold more SOL. 0.95 = near-all USDC.')}
+    ${field('defensiveDowntrendGradualSellPct', c.defensiveDowntrendGradualSellPct, 0.20, 'Gradual sell %/h', 'Fraction of idle SOL to convert per hour (spreads selling to limit slippage).', '0.20 = 20% per hour. 0.50 = faster (more slippage). 0.10 = very slow.')}
+    ${field('defensiveDowntrendMaxCloseWaitHours', c.defensiveDowntrendMaxCloseWaitHours, 2, 'Max close wait (hours)', 'Max hours to wait for a natural position close before forcing it.', '2 = reasonable wait. 4 = patient. 0.5 = force close fast.')}
+  </table>
+
+  <div style="color:#58a6ff;font-size:11px;margin:12px 0 4px;text-transform:uppercase;letter-spacing:0.5px">7e. Safety Guards</div>
+  <table>
+    <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
+    ${field('defensiveDowntrendMinHoldMinutes', c.defensiveDowntrendMinHoldMinutes, 10, 'Min hold (minutes)', 'Minimum time in defensive before any exit can fire. Prevents whipsaw exits.', '10 = 10-min floor. 5 = fast react. 30 = conservative.')}
+    ${field('defensiveDowntrendCooldownMinutes', c.defensiveDowntrendCooldownMinutes, 60, 'Cooldown (minutes)', 'After exit, block re-entry for this many minutes (prevents churn).', '60 = 1h cooldown. 30 = faster re-engage. 120 = longer rest.')}
+    ${field('defensiveDowntrendEmergencyReentryMultiplier', c.defensiveDowntrendEmergencyReentryMultiplier, 1.5, 'Emergency re-entry ×', 'Allow re-entry during cooldown if drop exceeds trigger × this multiplier.', '1.5 = re-enter on 1.5× severe drop. 2.0 = only on catastrophic. 1.0 = cooldown effectively disabled.')}
   </table>
 </div>
 

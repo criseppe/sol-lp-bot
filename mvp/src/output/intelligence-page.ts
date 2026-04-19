@@ -99,6 +99,19 @@ body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFo
 <div class="sum" id="summary"></div>
 <div class="grid" id="widgets"></div>
 
+<div class="grid" style="margin-top:16px">
+  <div class="w full">
+    <h3>Defensive Mode History</h3>
+    <div id="defensive-summary" class="sum" style="margin-bottom:12px"></div>
+    <div class="tbl-wrap">
+      <table id="defensive-table">
+        <thead><tr><th>Time (UTC)</th><th>Event</th><th>Trigger / Reason</th><th>Price</th><th>Duration</th></tr></thead>
+        <tbody id="defensive-tbody"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <script>
 var DATA=null,CHS={},rangeDays=30,FEES_DATA=null,ANALYTICS=null;
 
@@ -852,9 +865,54 @@ function hpRender(){
   }
 }
 
+async function loadDefensiveHistory(){
+  try{
+    var r=await fetch('/api/defensive-history');
+    if(!r.ok){document.getElementById('defensive-tbody').innerHTML='<tr><td colspan="5" class="empty">Auth/fetch failed</td></tr>';return;}
+    var d=await r.json();
+    var s=d.summary||{};
+    var sh='';
+    sh+='<div class="s"><div class="v" style="color:#ef4444;font-size:14px">'+(s.totalActivations||0)+'</div><div class="l">Activations</div></div>';
+    sh+='<div class="s"><div class="v" style="color:#eab308;font-size:14px">'+(s.totalExits||0)+'</div><div class="l">Exits</div></div>';
+    sh+='<div class="s"><div class="v" style="color:#58a6ff;font-size:14px">'+((s.totalDefensiveHours||0).toFixed(1))+'h</div><div class="l">Total time</div></div>';
+    sh+='<div class="s"><div class="v" style="color:#22c55e;font-size:14px">'+((s.avgDurationMinutes||0).toFixed(0))+'m</div><div class="l">Avg duration</div></div>';
+    sh+='<div class="s"><div class="v" style="color:#f97316;font-size:14px">'+((s.avgDropAvoidedPct||0).toFixed(1))+'%</div><div class="l">Avg drop avoided</div></div>';
+    sh+='<div class="s"><div class="v" style="color:#8b949e;font-size:14px">'+(s.cooldownsTriggered||0)+'</div><div class="l">Cooldowns</div></div>';
+    document.getElementById('defensive-summary').innerHTML=sh;
+    var evs=d.events||[];
+    if(evs.length===0){document.getElementById('defensive-tbody').innerHTML='<tr><td colspan="5" class="empty">No defensive events yet</td></tr>';return;}
+    var enterByIdx={};
+    // Build a simple lookup of the previous enter for each exit (pairs are walked on server side, but client can pair for duration)
+    var rev=evs.slice().reverse();
+    var pendingEnter=null;
+    var paired={};
+    for(var i=0;i<rev.length;i++){var e=rev[i];if(e.decision==='DEFENSIVE_ENTER'){pendingEnter=e;}else if(e.decision==='DEFENSIVE_EXIT'&&pendingEnter){paired[e.timestamp]={enter:pendingEnter,durationMs:e.timestamp-pendingEnter.timestamp};pendingEnter=null;}}
+    var body='';
+    for(var i=0;i<evs.length&&i<50;i++){
+      var e=evs[i];
+      var t=new Date(e.timestamp).toISOString().replace('T',' ').substring(0,16);
+      var ev=e.decision==='DEFENSIVE_ENTER'?'<span class="badge" style="background:#ef444420;color:#ef4444">ENTER</span>':'<span class="badge" style="background:#22c55e20;color:#22c55e">EXIT</span>';
+      var trig='—';
+      try{
+        var p=JSON.parse(e.params_json||'{}');
+        trig=e.decision==='DEFENSIVE_ENTER'?(p.trigger||'—'):(p.exitReason||'—');
+      }catch{}
+      var dur='—';
+      if(e.decision==='DEFENSIVE_EXIT'&&paired[e.timestamp]){
+        var m=Math.round(paired[e.timestamp].durationMs/60000);
+        dur=m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m';
+      }
+      body+='<tr><td style="font-family:monospace">'+t+'</td><td>'+ev+'</td><td style="font-family:monospace;font-size:10px">'+trig+'</td><td>$'+(e.price||0).toFixed(2)+'</td><td>'+dur+'</td></tr>';
+    }
+    document.getElementById('defensive-tbody').innerHTML=body;
+  }catch(err){document.getElementById('defensive-tbody').innerHTML='<tr><td colspan="5" class="empty">Error: '+err+'</td></tr>';}
+}
+
 load();
 loadFeesData();
 loadAnalyticsData();
+loadDefensiveHistory();
+setInterval(loadDefensiveHistory,300000);
 setInterval(function(){var sel=document.getElementById('hpDate');if(sel&&sel.value)hpLoad(sel.value);},300000);
 setInterval(loadFeesData,300000);
 setInterval(loadAnalyticsData,300000);
