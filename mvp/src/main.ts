@@ -527,14 +527,21 @@ async function main() {
     liveExecutor.getCurrentRegime = () => liveRegime;
     liveExecutor.getCostBasis = () => costBasisState?.solCostBasis ?? 0;
 
-    // P&L guard for auto-deploy ratio matching swaps
+    // P&L guard for auto-deploy ratio matching swaps.
+    // Allow SOL sells when price is at or above the decay-aware effective
+    // threshold (basis × 0.995 by default; lower when progressive decay is
+    // active and price has been below basis past the grace period). This
+    // aligns the guard with the idle-rebalance path's decay behavior.
     liveExecutor.shouldAllowSwap = (direction, _amount, price) => {
-      // Allow SOL sells ONLY when price is above avg cost basis (profitable)
       if (direction === 'sell_sol') {
         const basis = sirCostBasis || 0;
-        if (basis > 0 && price < basis) {
-          console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell SOL at $${price.toFixed(2)} (below basis $${basis.toFixed(2)})`, timestamp: Date.now() }));
-          return false;
+        if (basis > 0) {
+          const effectiveThreshold = calculateEffectiveBasisThreshold(basis, price, Date.now());
+          if (price < effectiveThreshold) {
+            const decayActive = effectiveThreshold < basis * 0.995 - 1e-9;
+            console.log(JSON.stringify({ level: 'info', msg: `P&L guard: BLOCKED sell SOL at $${price.toFixed(4)} (below effective threshold $${effectiveThreshold.toFixed(4)}, basis $${basis.toFixed(4)}${decayActive ? ', decay active' : ''})`, timestamp: Date.now() }));
+            return false;
+          }
         }
       }
       return true; // buys always allowed
