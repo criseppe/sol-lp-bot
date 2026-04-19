@@ -138,6 +138,7 @@ export const RISK = {
 export const REENTRY = {
   PULLBACK_THRESHOLD_PCT:    2.5,
   TIMEOUT_HOURS:             4,      // 4 hours before timeout re-entry
+  FLASH_CRASH_ENABLED:       true,  // master on/off for flash crash detection
   FLASH_CRASH_PCT:           5,     // single candle drop
   FLASH_CRASH_WAIT_MINUTES:  15,
 } as const;

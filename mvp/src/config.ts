@@ -37,6 +37,7 @@ export const runtime = {
   // Re-entry (Rule 3) — DEPRECATED pullback fields kept for compat
   pullbackThresholdPct: REENTRY.PULLBACK_THRESHOLD_PCT as number,
   timeoutHours: REENTRY.TIMEOUT_HOURS as number,
+  flashCrashEnabled: REENTRY.FLASH_CRASH_ENABLED as boolean, // master on/off for flash crash detection
   flashCrashPct: REENTRY.FLASH_CRASH_PCT as number,
   flashCrashWaitMinutes: REENTRY.FLASH_CRASH_WAIT_MINUTES as number,
 
@@ -270,6 +271,12 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   // Re-entry
   const v16 = nv('pullbackThresholdPct', 0.1, 20); if (v16 != null) runtime.pullbackThresholdPct = v16;
   const v17 = nv('timeoutHours', 0.05, 48); if (v17 != null) runtime.timeoutHours = v17;
+  // Absent DB key → reset to default (true) so removing the key re-enables detection.
+  // Accepts 'true'/'false' strings (written by config UI) and numeric '1'/'0'.
+  { const vs = g('flashCrashEnabled');
+    runtime.flashCrashEnabled = (vs === 'true' || vs === '1') ? true
+      : (vs === 'false' || vs === '0') ? false
+      : true; }
   const v18 = nv('flashCrashPct', 1, 30); if (v18 != null) runtime.flashCrashPct = v18;
   const v19 = nv('flashCrashWaitMinutes', 1, 120); if (v19 != null) runtime.flashCrashWaitMinutes = v19;
 
@@ -470,6 +477,7 @@ export function exportConfig(): Record<string, string> {
   out['solConvertMaxFromSolPct'] = String(runtime.solConvertMaxFromSolPct);
   out['pullbackThresholdPct'] = String(runtime.pullbackThresholdPct);
   out['timeoutHours'] = String(runtime.timeoutHours);
+  out['flashCrashEnabled'] = String(runtime.flashCrashEnabled);
   out['flashCrashPct'] = String(runtime.flashCrashPct);
   out['flashCrashWaitMinutes'] = String(runtime.flashCrashWaitMinutes);
   out['upsideChurnCooldownMin'] = String(runtime.upsideChurnCooldownMin);

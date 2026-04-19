@@ -104,7 +104,18 @@ export function isFlashCrash(prices: number[]): boolean {
       if (drawdown > maxDrawdownPct) maxDrawdownPct = drawdown;
     }
   }
-  return maxDrawdownPct >= runtime.flashCrashPct;
+  const wouldTrigger = maxDrawdownPct >= runtime.flashCrashPct;
+  if (!runtime.flashCrashEnabled) {
+    if (wouldTrigger) {
+      console.log(JSON.stringify({
+        level: 'warn',
+        msg: `Flash crash threshold exceeded (${maxDrawdownPct.toFixed(2)}%) but detection disabled — no action taken`,
+        timestamp: Date.now(),
+      }));
+    }
+    return false;
+  }
+  return wouldTrigger;
 }
 
 // ─── RULE 4: Re-entry Split ───────────────────────────────────────────────
