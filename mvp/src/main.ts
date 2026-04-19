@@ -2017,11 +2017,22 @@ async function runLiveCycle(price: number): Promise<void> {
       if (shouldFireDownside(prox, params.proxThresholdLower, 0, 0)) {
         const proxPct = (prox.proxToLower * 100).toFixed(0);
         const posAgeMin = currentPos.entryTime > 0 ? (now - currentPos.entryTime) / 60000 : Infinity;
+        const ageGuardEnabled = runtime.t1DownsideAgeGuardEnabled ?? true;
         const minAgeMin = runtime.t1DownsideMinAgeMin ?? 30;
         const isFastExitRegime = liveRegime === 'BEARISH_TREND' || liveRegime === 'EXTREME';
-        if (posAgeMin < minAgeMin && !isFastExitRegime) {
-          console.log(JSON.stringify({ level: 'info', msg: `[Rule2] T1_DOWNSIDE suppressed — age ${posAgeMin.toFixed(1)}min < ${minAgeMin}min minimum (regime ${liveRegime}). proxToLower=${proxPct}%.`, timestamp: now }));
+        // Emergency proximity override: bypass age guard when price is dangerously
+        // close to the lower bound regardless of position age or regime gate.
+        const emergencyOffset = runtime.t1DownsideEmergencyOffset ?? 0.10;
+        const emergencyThreshold = Math.min(1.0, params.proxThresholdLower + emergencyOffset);
+        const isEmergency = prox.proxToLower >= emergencyThreshold;
+        // Three bypass paths: master switch off, fast-exit regime, or emergency proximity.
+        const bypassAgeGuard = !ageGuardEnabled || isFastExitRegime || isEmergency;
+        if (posAgeMin < minAgeMin && !bypassAgeGuard) {
+          console.log(JSON.stringify({ level: 'info', msg: `[Rule2] T1_DOWNSIDE suppressed — age ${posAgeMin.toFixed(1)}min < ${minAgeMin}min minimum (regime ${liveRegime}). proxToLower=${proxPct}% (emergency at ${(emergencyThreshold*100).toFixed(0)}%).`, timestamp: now }));
         } else {
+          if (isEmergency && posAgeMin < minAgeMin) {
+            console.log(JSON.stringify({ level: 'warn', msg: `[Rule2] T1_DOWNSIDE EMERGENCY EXIT — age ${posAgeMin.toFixed(1)}min < ${minAgeMin}min but proxToLower=${proxPct}% >= ${(emergencyThreshold*100).toFixed(0)}% emergency threshold.`, timestamp: now }));
+          }
           const reason = `Rule 2 early downside exit: proxToLower=${proxPct}% >= threshold ${(params.proxThresholdLower*100).toFixed(0)}% (${liveRegime} regime). Price $${price.toFixed(2)} drifting toward lower bound $${currentPos.priceLower.toFixed(2)}. Closing to avoid full OOR impermanent loss.`;
           await liveCloseAndReopen(price, 'T1_DOWNSIDE', reason);
           return;

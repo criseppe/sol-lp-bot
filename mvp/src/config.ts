@@ -50,6 +50,8 @@ export const runtime = {
   postUpsideMaxBuyAboveBasis: 0.02, // skip post-upside pre-open SOL buy when currentPrice > basis × (1 + this) — avoids ratcheting cost basis
   preOpenMaxBuyAboveBasis: 0.005,  // strict cap on ALL pre-open SOL buys: skip when currentPrice > basis × (1 + this) (0.5% default)
   t1DownsideMinAgeMin: 30,         // minimum position age (min) before Rule 2 T1_DOWNSIDE may fire (not applied in BEARISH/EXTREME)
+  t1DownsideAgeGuardEnabled: true, // master on/off for T1_DOWNSIDE age guard
+  t1DownsideEmergencyOffset: 0.10, // bypass age guard when proxToLower >= proxThresholdLower + this offset
 
   // Circuit Breakers
   dailyLossLimitPct: RISK.DAILY_LOSS_LIMIT_PCT as number,
@@ -277,6 +279,13 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vPUMBAB = nv('postUpsideMaxBuyAboveBasis', 0, 0.10); if (vPUMBAB != null) runtime.postUpsideMaxBuyAboveBasis = vPUMBAB;
   const vPreMBAB = nv('preOpenMaxBuyAboveBasis', 0, 0.10); if (vPreMBAB != null) runtime.preOpenMaxBuyAboveBasis = vPreMBAB;
   const vT1DMA = nv('t1DownsideMinAgeMin', 0, 240); if (vT1DMA != null) runtime.t1DownsideMinAgeMin = vT1DMA;
+  // Absent DB key → reset to default (true) so removing the key actually re-enables the guard.
+  // Accepts 'true'/'false' strings (written by config UI) and numeric '1'/'0'.
+  { const vs = g('t1DownsideAgeGuardEnabled');
+    runtime.t1DownsideAgeGuardEnabled = (vs === 'true' || vs === '1') ? true
+      : (vs === 'false' || vs === '0') ? false
+      : true; }
+  const vT1DEO = nv('t1DownsideEmergencyOffset', 0, 0.5); if (vT1DEO != null) runtime.t1DownsideEmergencyOffset = vT1DEO;
 
   // Circuit breakers
   const v20 = nv('dailyLossLimitPct', 1, 50); if (v20 != null) runtime.dailyLossLimitPct = v20;
@@ -376,7 +385,11 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Master switch for dynamic adjustments.
   // Absent DB key → reset to default (false) so removing the key actually disables.
-  { const v = n('dynamicAdjustmentsEnabled'); runtime.dynamicAdjustmentsEnabled = (v != null) ? (v !== 0) : false; }
+  // Accepts 'true'/'false' strings (written by config UI) and numeric '1'/'0'.
+  { const vs = g('dynamicAdjustmentsEnabled');
+    runtime.dynamicAdjustmentsEnabled = (vs === 'true' || vs === '1') ? true
+      : (vs === 'false' || vs === '0') ? false
+      : false; }
 
   // Progressive basis decay
   { const v = n('progressiveBasisDecayEnabled'); if (v != null) runtime.progressiveBasisDecayEnabled = v !== 0; }
