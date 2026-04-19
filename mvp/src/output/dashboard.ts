@@ -4248,7 +4248,7 @@ ${NAV_HTML}
   <h3>3. Capital &amp; Reserves</h3>
   <table>
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
-    ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 5000, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $10k: allows large wallet. At $500: stops on accidental deposits.')}
+    ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 25000, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $25k: accommodates grown portfolio. At $500: stops on accidental deposits.')}
     ${field('solReserve', c.solReserve, 0.1, 'SOL reserve', 'Always kept for gas + rent. Never deposited.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
     ${field('usdcReserve', c.usdcReserve, 1, 'USDC reserve ($)', 'Minimum USDC always in wallet.', 'At $5: more buffer. At $0: risk token account errors.')}
     ${field('minPositionSizeUsdc', c.minPositionSizeUsdc, 100, 'Min position size ($)', 'Won&#39;t open below this. Prevents dust positions.', 'At $500: only meaningful positions. At $50: allows small deploys.')}

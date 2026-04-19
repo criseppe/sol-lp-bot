@@ -20,7 +20,7 @@ export const runtime = {
   pythMaxStalenessSec: 60,
 
   // Capital & Reserves
-  maxLiveCapitalUsdc: 5000,
+  maxLiveCapitalUsdc: 25000,
   solReserve: 0.1,
   usdcReserve: 1,
   minPositionSizeUsdc: RISK.MIN_POSITION_SIZE_USDC as number,
