@@ -13,7 +13,7 @@ export const MINTS = {
 // Regime parameter map — all rule thresholds by regime
 export const REGIME_PARAMS = {
   RANGING: {
-    rangeWidthPct:        1.5,
+    rangeWidthPct:        2.0,
     skewDown:             0.30,
     skewUp:               0.70,
     proxThresholdLower:   0.72,
@@ -33,7 +33,7 @@ export const REGIME_PARAMS = {
     progressiveBasisDecayMinThreshold: 0.98,   // 2% max loss
   },
   BULLISH_TREND: {
-    rangeWidthPct:        3,
+    rangeWidthPct:        3.5,
     skewDown:             0.25,
     skewUp:               0.75,
     proxThresholdLower:   0.80,
@@ -53,7 +53,7 @@ export const REGIME_PARAMS = {
     progressiveBasisDecayMinThreshold: 0.97,   // 3% max loss
   },
   BEARISH_TREND: {
-    rangeWidthPct:        2,
+    rangeWidthPct:        2.5,
     skewDown:             0.45,
     skewUp:               0.55,
     proxThresholdLower:   0.55,
@@ -73,7 +73,7 @@ export const REGIME_PARAMS = {
     progressiveBasisDecayMinThreshold: 0.95,   // 5% max loss
   },
   EXTREME: {
-    rangeWidthPct:        5,
+    rangeWidthPct:        5.5,
     skewDown:             0.50,
     skewUp:               0.50,
     proxThresholdLower:   0.50,
