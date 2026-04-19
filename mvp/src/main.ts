@@ -951,12 +951,19 @@ async function main() {
             actual24hAprPct = positionValueUsdc > 0 ? (actual24hFeesUsdc * 365 / positionValueUsdc) * 100 : 0;
           } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] daily_fee_calc: ${String(e)}`, timestamp: Date.now() })); }
 
-          // Calculate IL
+          // CL-accurate IL (matches executor.closePosition formula at src/live/executor.ts:567-580).
+          // IL = lpValue - hodlValue
+          //   lpValue   = actual LP composition at current price (posComp already fetched above)
+          //   hodlValue = cumulative entry deposits valued at current price
+          // Replaces the V2 full-range analytical approximation (2*sqrt(r)/(1+r) - 1 * posValue),
+          // which systematically underestimates IL for concentrated-liquidity positions.
+          // Single source of truth: matches realizedIlUsdc and Intelligence-page aggregations.
           let ilUsdc = 0;
-          if (livePos && livePos.entryPrice && livePos.entryPrice !== price.price) {
-            const priceRatio = price.price / livePos.entryPrice;
-            const ilPct = 2 * Math.sqrt(priceRatio) / (1 + priceRatio) - 1;
-            ilUsdc = ilPct * positionValueUsdc;
+          if (livePos && livePos.entrySol != null && livePos.entryUsdc != null && positionValueUsdc > 0) {
+            const hodlValue = livePos.entrySol * price.price + livePos.entryUsdc;
+            if (hodlValue > 0) {
+              ilUsdc = positionValueUsdc - hodlValue;
+            }
           }
 
           const liveDataUpdate: LiveData = {

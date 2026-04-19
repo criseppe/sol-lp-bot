@@ -270,10 +270,25 @@ export function checkAutoDeploy(opts: {
 // ── IL Calculator ─────────────────────────────────────────────────────────
 
 /**
- * Calculate impermanent loss for a concentrated liquidity position.
- * Uses the concentrated LP IL formula: IL% = 2*sqrt(r)/(1+r) - 1
- * where r = currentPrice / entryPrice.
- * Returns USD value of IL (negative = loss vs holding).
+ * DEPRECATED (2026-04-19) — V2 full-range analytical IL approximation.
+ *
+ * This is the Uniswap-V2 constant-product IL formula applied to a
+ * concentrated-liquidity position. It systematically UNDERESTIMATES IL
+ * because the CL position's range truncates the constant-product curve.
+ *
+ * Canonical IL source is `executor.closePosition` (src/live/executor.ts
+ * lines 567-580) which computes `lpValue - hodlValue` from the actual
+ * on-chain token composition. The live-cycle dashboard path in main.ts
+ * now uses the same `lpValue - hodlValue` method against
+ * `getPositionComposition()`, so every IL number displayed to the user
+ * uses that canonical formula.
+ *
+ * This function is retained only because src/paper/ledger.ts (paper
+ * mode) does not have an on-chain composition to query. Do not call it
+ * from any live-mode code path.
+ *
+ * Math: IL% = 2*sqrt(r)/(1+r) - 1, where r = currentPrice / entryPrice.
+ * Returns USD value (always <= 0).
  */
 export function calcIL(
   entryPrice: number,
