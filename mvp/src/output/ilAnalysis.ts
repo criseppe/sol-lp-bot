@@ -65,6 +65,13 @@ export interface IlPositionRow {
   closePrice: number;
 }
 
+export interface IlCommentary {
+  currentState: string[];
+  patterns: string[];
+  recommendations: string[];
+  healthScore: number;
+}
+
 export interface IlAnalysisData {
   hero: IlAnalysisHero;
   timeWindows: IlTimeWindow[];
@@ -73,6 +80,7 @@ export interface IlAnalysisData {
   regimeBreakdown: IlRegimeRow[];
   ilDistribution: IlDistributionBucket[];
   positions: IlPositionRow[];
+  commentary: IlCommentary;
   lastUpdated: string;
 }
 
@@ -99,6 +107,152 @@ function healthColor(ratio: number): 'green' | 'yellow' | 'red' {
   if (!isFinite(ratio) || ratio >= 1.5) return 'green';
   if (ratio >= 1.0) return 'yellow';
   return 'red';
+}
+
+// ── Commentary (rules-based, deterministic) ──────────────────────────────
+// IL values are stored NEGATIVE for losses. Use abs(il) where a magnitude
+// comparison is intended. Fees are POSITIVE. Ratios are fees/abs(IL).
+// Commentary updates automatically with the underlying data.
+
+export function generateCommentary(data: Omit<IlAnalysisData, 'commentary'>): IlCommentary {
+  const currentState: string[] = [];
+  const patterns: string[] = [];
+  const recommendations: string[] = [];
+  let healthScore = 5;
+
+  // ── CURRENT STATE ──────────────────────────────────────────────────────
+  const allTimeRatio = data.hero.ratio;
+  const allTimeFees = data.hero.totalFees;
+  const allTimeIlAbs = Math.abs(data.hero.totalIl);
+
+  if (allTimeRatio > 5) {
+    currentState.push(`LP strategy is highly profitable. Fees $${allTimeFees.toFixed(2)} have covered IL $${allTimeIlAbs.toFixed(2)} with ${allTimeRatio.toFixed(1)}x headroom — excellent performance vs HODL.`);
+    healthScore += 2;
+  } else if (allTimeRatio > 2) {
+    currentState.push(`LP strategy is profitable. Fees $${allTimeFees.toFixed(2)} cover IL $${allTimeIlAbs.toFixed(2)} with ${allTimeRatio.toFixed(1)}x ratio — healthy margin.`);
+    healthScore += 1;
+  } else if (allTimeRatio > 1) {
+    currentState.push(`LP strategy marginally profitable. ${allTimeRatio.toFixed(2)}x fees/IL — fees barely covering IL. Monitor closely.`);
+  } else if (allTimeRatio > 0) {
+    currentState.push(`WARNING: fees below IL. Holding tokens would outperform. Ratio ${allTimeRatio.toFixed(2)}x.`);
+    healthScore -= 2;
+  } else {
+    currentState.push(`No realized IL yet — ratio not applicable. Early stage of deployment.`);
+  }
+
+  const netVsHodl = data.hero.netVsHodl;
+  if (netVsHodl > 0) {
+    currentState.push(`Net benefit vs holding tokens: +$${netVsHodl.toFixed(2)}. Providing liquidity has been worth it so far.`);
+  } else {
+    currentState.push(`Net disadvantage vs holding: -$${Math.abs(netVsHodl).toFixed(2)}. Review strategy — LP is behind HODL counterfactual.`);
+    healthScore -= 1;
+  }
+
+  // Today vs 7-day comparison (period labels match computeIlAnalysisData).
+  const today = data.timeWindows.find(w => w.period === 'Today (UTC)');
+  const week = data.timeWindows.find(w => w.period === 'Last 7 days');
+  if (today && week) {
+    const todayIlAbs = Math.abs(today.il);
+    const weekRatio = week.ratio;
+    if (todayIlAbs > 50 && today.ratio < weekRatio * 0.3 && weekRatio > 0) {
+      currentState.push(`Today shows anomalous loss: IL $${todayIlAbs.toFixed(2)} at ${today.ratio.toFixed(2)}x ratio vs 7d avg ${weekRatio.toFixed(2)}x — requires attention.`);
+      healthScore -= 1;
+    } else if (today.ratio < 1.0 && todayIlAbs > 20) {
+      currentState.push(`Today losing: fees $${today.fees.toFixed(2)} below IL $${todayIlAbs.toFixed(2)}. Ratio ${today.ratio.toFixed(2)}x.`);
+    } else if (weekRatio > 0 && today.ratio > weekRatio * 1.5) {
+      currentState.push(`Today above 7d average: ${today.ratio.toFixed(2)}x vs ${weekRatio.toFixed(2)}x — good day.`);
+      healthScore += 1;
+    }
+  }
+
+  // ── PATTERNS ────────────────────────────────────────────────────────────
+  const regimes = data.regimeBreakdown;
+  const totalPositions = regimes.reduce((s, r) => s + r.positions, 0);
+
+  if (regimes.length > 0 && totalPositions > 0) {
+    // "Worst" regime = most-negative avg IL = smallest avgIl.
+    const worstRegime = regimes.reduce((a, b) => (a.avgIl < b.avgIl ? a : b));
+    // "Best" regime by fees/IL ratio (finite only).
+    const rankable = regimes.filter(r => isFinite(r.ratio) && r.ratio > 0);
+    const bestRegime = rankable.length > 0 ? rankable.reduce((a, b) => (a.ratio > b.ratio ? a : b)) : null;
+
+    if (worstRegime && worstRegime.positions >= 5) {
+      const wAbs = Math.abs(worstRegime.avgIl);
+      const tail = worstRegime.ratio > 2 ? `But still profitable (${worstRegime.ratio.toFixed(1)}x fees).` : 'Fees not compensating.';
+      patterns.push(`${worstRegime.regime} has worst avg IL: -$${wAbs.toFixed(2)} per position over ${worstRegime.positions} positions. ${tail}`);
+    }
+    if (bestRegime && bestRegime.positions >= 5 && bestRegime.ratio >= 5 && bestRegime !== worstRegime) {
+      patterns.push(`${bestRegime.regime} performs best: ${bestRegime.ratio.toFixed(1)}x fees/IL over ${bestRegime.positions} positions.`);
+    }
+
+    const dominant = regimes.reduce((a, b) => (a.positions > b.positions ? a : b));
+    const dominantPct = (dominant.positions / totalPositions) * 100;
+    if (dominantPct > 60) {
+      patterns.push(`Bot operates mostly in ${dominant.regime}: ${dominantPct.toFixed(0)}% of all closes. Tuning should prioritize this regime.`);
+    }
+  }
+
+  // IL distribution tail analysis (buckets worse than -$30).
+  const distribution = data.ilDistribution;
+  const tailBuckets = distribution.filter(b =>
+    b.bucket.startsWith('<=') || b.bucket.startsWith('-$50') || b.bucket.startsWith('-$40'),
+  );
+  const tailCount = tailBuckets.reduce((s, b) => s + b.count, 0);
+  const totalCloses = distribution.reduce((s, b) => s + b.count, 0);
+  if (totalCloses >= 20) {
+    if (tailCount > 0) {
+      const tailPct = (tailCount / totalCloses) * 100;
+      if (tailPct > 10) {
+        patterns.push(`${tailCount} catastrophic IL events (each >-$30) of ${totalCloses} closes (${tailPct.toFixed(0)}%). Review position sizing or threshold tuning.`);
+      } else {
+        patterns.push(`${tailCount} large IL events (>-$30) but only ${tailPct.toFixed(1)}% of closes — tail risk contained.`);
+      }
+    } else {
+      patterns.push(`No IL events worse than -$30 across ${totalCloses} closes. Tail cleanly capped.`);
+    }
+  }
+
+  // Event-type asymmetry on recent 20 closes.
+  const recent = data.positions.slice(0, 20);
+  const ups = recent.filter(p => p.eventType === 'T1_UPSIDE');
+  const dns = recent.filter(p => p.eventType === 'T1_DOWNSIDE');
+  if (ups.length >= 3 && dns.length >= 3) {
+    const upsAvg = ups.reduce((s, p) => s + Math.abs(p.il), 0) / ups.length;
+    const dnsAvg = dns.reduce((s, p) => s + Math.abs(p.il), 0) / dns.length;
+    if (upsAvg > dnsAvg * 2) {
+      patterns.push(`T1_UPSIDE recent closes avg -$${upsAvg.toFixed(2)} IL vs T1_DOWNSIDE -$${dnsAvg.toFixed(2)} (${(upsAvg/dnsAvg).toFixed(1)}x asymmetry). Upside exits more costly — consider widening range or raising proxThresholdUpper.`);
+    } else if (dnsAvg > upsAvg * 2) {
+      patterns.push(`T1_DOWNSIDE recent closes avg -$${dnsAvg.toFixed(2)} IL vs T1_UPSIDE -$${upsAvg.toFixed(2)} (${(dnsAvg/upsAvg).toFixed(1)}x asymmetry). Downside exits more costly — consider widening range or raising proxThresholdLower.`);
+    }
+  }
+
+  // ── RECOMMENDATIONS ─────────────────────────────────────────────────────
+  if (today && today.ratio < 1.0 && Math.abs(today.il) > 20) {
+    recommendations.push(`Today's ratio ${today.ratio.toFixed(2)}x is losing. Check: are current thresholds appropriate for current position size? Did market conditions shift (regime, volatility)?`);
+  }
+  if (isFinite(allTimeRatio) && allTimeRatio > 0 && allTimeRatio < 1.5) {
+    recommendations.push(`Overall ratio ${allTimeRatio.toFixed(1)}x is below the healthy 1.5x threshold. Consider: widening ranges, raising Rule 2 thresholds, or reducing position sizes.`);
+  }
+  const rangingRow = regimes.find(r => r.regime === 'RANGING');
+  if (rangingRow && Math.abs(rangingRow.avgIl) > 5 && rangingRow.positions >= 10) {
+    recommendations.push(`RANGING avg IL -$${Math.abs(rangingRow.avgIl).toFixed(2)} per position (${rangingRow.positions} positions). Range widening can reduce this — see /config page regime.RANGING.rangeWidthPct.`);
+  }
+  const worstDays = data.cumulativeChart.reduce((acc, p, i, arr) => {
+    if (i === 0) return acc;
+    const delta = p.il - arr[i-1].il;
+    if (delta < -50) acc.push({ date: p.date, daily: delta });
+    return acc;
+  }, [] as Array<{ date: string; daily: number }>);
+  if (worstDays.length > 0) {
+    recommendations.push(`${worstDays.length} day(s) in the last 30d had daily IL worse than -$50 (e.g. ${worstDays[worstDays.length-1].date}: -$${Math.abs(worstDays[worstDays.length-1].daily).toFixed(2)}). Consider enabling defensive downtrend mode (currently OFF) if these correlate with sustained drops.`);
+  }
+  if (healthScore >= 7 && recommendations.length === 0) {
+    recommendations.push(`Strategy performing well. No tuning changes recommended — continue monitoring.`);
+  }
+
+  healthScore = Math.max(0, Math.min(10, healthScore));
+
+  return { currentState, patterns, recommendations, healthScore };
 }
 
 // ── Data layer ───────────────────────────────────────────────────────────
@@ -242,7 +396,7 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
     };
   });
 
-  return {
+  const core: Omit<IlAnalysisData, 'commentary'> = {
     hero: {
       netVsHodl: round2(netVsHodl),
       totalFees: round2(totalFees),
@@ -259,6 +413,7 @@ export function computeIlAnalysisData(db: Database.Database): IlAnalysisData {
     positions,
     lastUpdated: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
   };
+  return { ...core, commentary: generateCommentary(core) };
 }
 
 function getCurrentSolPrice(db: Database.Database): number {
@@ -449,7 +604,14 @@ export function renderIlAnalysisHtml(data: IlAnalysisData): string {
 .hero .meta{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;font-size:11px;color:#8b949e;margin-top:8px}
 .hero .meta span b{color:#c9d1d9}
 .placeholder{background:#0d1117;border:1px dashed #30363d;border-radius:6px;padding:10px;text-align:center;color:#8b949e;font-size:11px;font-style:italic}
-@media(max-width:700px){.hero .big{font-size:28px}.hero{padding:16px 8px}}
+.observation,.pattern,.recommendation{padding:8px 12px;margin:6px 0;border-left:3px solid;border-radius:4px;font-size:12px;line-height:1.5}
+.observation{border-color:#58a6ff;background:rgba(88,166,255,0.08);color:#c9d1d9}
+.pattern{border-color:#a855f7;background:rgba(168,85,247,0.08);color:#c9d1d9}
+.recommendation{border-color:#eab308;background:rgba(234,179,8,0.08);color:#c9d1d9}
+.health-score{font-size:13px;margin-top:12px;text-align:center;color:#8b949e}
+.empty{color:#8b949e;font-style:italic;font-size:11px;text-align:center;padding:12px 0}
+.footnote{font-size:10px;color:#8b949e;margin-top:12px;font-style:italic;text-align:center}
+@media(max-width:700px){.hero .big{font-size:28px}.hero{padding:16px 8px}.observation,.pattern,.recommendation{font-size:11px;padding:6px 10px}}
 </style>
 </head>
 <body>
@@ -479,10 +641,11 @@ ${NAV_HTML}
   </div>
 </div>
 
-<!-- SECTION 2: AI commentary placeholder -->
+<!-- SECTION 2: Commentary — current state -->
 <div class="card full" style="margin-bottom:12px">
-  <h2>Commentary</h2>
-  <div class="placeholder">AI commentary &amp; pattern detection coming in Phase 2.<br>For now, see the regime breakdown and distribution below.</div>
+  <h2>Current State</h2>
+  ${data.commentary.currentState.map(o => `<p class="observation">${esc(o)}</p>`).join('')}
+  <p class="health-score">Health Score: <b style="color:${healthScoreColor(data.commentary.healthScore)}">${data.commentary.healthScore} / 10</b></p>
 </div>
 
 <!-- SECTION 3: Time windows + Section 4: Ratio health -->
@@ -538,10 +701,35 @@ ${NAV_HTML}
   </div>
 </div>
 
+<!-- SECTION 9: Patterns detected -->
+<div class="card full" style="margin-top:12px">
+  <h2>Patterns Detected</h2>
+  ${data.commentary.patterns.length === 0
+    ? '<p class="empty">No significant patterns detected yet.</p>'
+    : data.commentary.patterns.map(p => `<p class="pattern">${esc(p)}</p>`).join('')
+  }
+</div>
+
+<!-- SECTION 10: Recommendations -->
+<div class="card full" style="margin-top:12px">
+  <h2>Recommendations</h2>
+  ${data.commentary.recommendations.length === 0
+    ? '<p class="empty">Strategy performing well. No changes recommended.</p>'
+    : data.commentary.recommendations.map(r => `<p class="recommendation">${esc(r)}</p>`).join('')
+  }
+  <p class="footnote">Recommendations are rule-based heuristics computed from the data above. Always verify with broader context before making changes.</p>
+</div>
+
 <div style="text-align:center;color:#8b949e;font-size:10px;margin-top:16px;padding-bottom:16px">
   Last updated ${esc(data.lastUpdated)} &middot; auto-refresh every 60s
 </div>
 </body></html>`;
+}
+
+function healthScoreColor(score: number): string {
+  if (score >= 7) return '#22c55e';
+  if (score >= 4) return '#eab308';
+  return '#ef4444';
 }
 
 function regimeBadgeBg(regime: string): string {
