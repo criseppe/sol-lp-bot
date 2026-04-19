@@ -633,11 +633,11 @@ export function startDashboard(port: number): DashboardServer {
     } catch (err) { console.error('[API Error]', err); res.status(500).json({ error: 'internal server error' }); }
   });
 
-  // Arcade — temporarily offline
-  app.get('/arcade', (_req, res) => {
+  // Arcade — temporarily offline (auth-protected; other read endpoints below 646 get global requireAuth)
+  app.get('/arcade', requireAuth, (_req, res) => {
     res.status(503).send(`<html><head><title>Arcade — Offline</title><style>body{background:#0d1117;color:#8b949e;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px}h1{color:#ffcc00;font-size:24px}p{font-size:14px}</style></head><body><h1>[ ARCADE OFFLINE ]</h1><p>INSERT COIN LATER</p></body></html>`);
   });
-  app.get('/api/arcade-stats', (_req, res) => {
+  app.get('/api/arcade-stats', requireAuth, (_req, res) => {
     res.status(503).json({ error: 'arcade offline' });
   });
 

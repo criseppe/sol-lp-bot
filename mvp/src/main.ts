@@ -589,30 +589,33 @@ async function main() {
       const idleSolHolding = 0; // approximate — exact value would need balance check
       const basisBefore = sirCostBasis || swapPrice;
       const pnlCalc = calculateSwapPnl(direction as any, solAmt, swapPrice, basisBefore, idleSolHolding);
-      // COST_BASIS: tracked — update DB-persisted cost basis on every USDC→SOL buy swap
-      if (direction === 'buy_sol') {
-        costBasisState = updateCostBasis(db, solAmt, swapPrice, `swap onSwap (${event.reason.slice(0, 60)})`);
-        sirCostBasis = costBasisState.solCostBasis;
-      } else {
-        // Harvest fee-SOL sells: fee SOL was never added to sol_total_acquired,
-        // so reducing the tracked pool would shrink totals below real capital acquisitions.
-        const isHarvestSell = /harvest/i.test(event.reason);
-        if (isHarvestSell) {
-          console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Harvest sell — skipping reduce (${solAmt.toFixed(4)} SOL fee-income, not capital)`, timestamp: Date.now() }));
-          costBasisState = readCostBasis(db);
+      // COST_BASIS: tracked — update DB-persisted cost basis on every USDC→SOL buy swap.
+      // Atomic: cost-basis write + swap_ledger insert must commit together to prevent drift.
+      db.transaction(() => {
+        if (direction === 'buy_sol') {
+          costBasisState = updateCostBasis(db, solAmt, swapPrice, `swap onSwap (${event.reason.slice(0, 60)})`);
           sirCostBasis = costBasisState.solCostBasis;
         } else {
-          reduceCostBasisHoldings(db, solAmt, `swap sell (${event.reason.slice(0, 40)})`);
-          costBasisState = readCostBasis(db);
-          sirCostBasis = costBasisState.solCostBasis;
+          // Harvest fee-SOL sells: fee SOL was never added to sol_total_acquired,
+          // so reducing the tracked pool would shrink totals below real capital acquisitions.
+          const isHarvestSell = /harvest/i.test(event.reason);
+          if (isHarvestSell) {
+            console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Harvest sell — skipping reduce (${solAmt.toFixed(4)} SOL fee-income, not capital)`, timestamp: Date.now() }));
+            costBasisState = readCostBasis(db);
+            sirCostBasis = costBasisState.solCostBasis;
+          } else {
+            reduceCostBasisHoldings(db, solAmt, `swap sell (${event.reason.slice(0, 40)})`);
+            costBasisState = readCostBasis(db);
+            sirCostBasis = costBasisState.solCostBasis;
+          }
         }
-      }
-      insertSwapLedger(db, {
-        timestamp: event.timestamp, direction, sol_amount: solAmt, usdc_amount: usdcAmt,
-        price: swapPrice, reason: event.reason, pnl_usdc: pnlCalc.pnlUsdc,
-        cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
-        tx_signature: event.txSignature, fee_lamports: event.feeLamports, price_impact_pct: event.priceImpactPct,
-      });
+        insertSwapLedger(db, {
+          timestamp: event.timestamp, direction, sol_amount: solAmt, usdc_amount: usdcAmt,
+          price: swapPrice, reason: event.reason, pnl_usdc: pnlCalc.pnlUsdc,
+          cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
+          tx_signature: event.txSignature, fee_lamports: event.feeLamports, price_impact_pct: event.priceImpactPct,
+        });
+      })();
     };
 
     // Restore live position from DB if exists
@@ -1010,14 +1013,17 @@ async function main() {
               const pnl = (effectivePrice - sirCostBasis) * solSold;
               console.log(JSON.stringify({ level: 'info', msg: `Manual swap detected: sold ${solSold.toFixed(2)} SOL → $${usdcReceived.toFixed(0)} USDC @ $${effectivePrice.toFixed(2)} (basis $${sirCostBasis.toFixed(2)}, P&L $${pnl.toFixed(2)})`, timestamp: Date.now() }));
               try {
-                insertSwapLedger(db, {
-                  timestamp: Date.now(), direction: 'sell_sol', sol_amount: solSold, usdc_amount: usdcReceived,
-                  price: effectivePrice, reason: 'Manual swap from phone (SOL→USDC)', pnl_usdc: pnl,
-                  cost_basis_before: sirCostBasis, cost_basis_after: sirCostBasis, source: 'manual',
-                });
-                reduceCostBasisHoldings(db, solSold, 'manual_sell');
-                costBasisState = readCostBasis(db);
-                sirCostBasis = costBasisState.solCostBasis;
+                // Atomic: ledger + cost-basis writes together so a crash can't orphan one.
+                db.transaction(() => {
+                  insertSwapLedger(db, {
+                    timestamp: Date.now(), direction: 'sell_sol', sol_amount: solSold, usdc_amount: usdcReceived,
+                    price: effectivePrice, reason: 'Manual swap from phone (SOL→USDC)', pnl_usdc: pnl,
+                    cost_basis_before: sirCostBasis, cost_basis_after: sirCostBasis, source: 'manual',
+                  });
+                  reduceCostBasisHoldings(db, solSold, 'manual_sell');
+                  costBasisState = readCostBasis(db);
+                  sirCostBasis = costBasisState.solCostBasis;
+                })();
               } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_sell_detect: ${String(e)}`, timestamp: Date.now() })); }
             }
             // Manual USDC→SOL buy: USDC dropped, SOL increased
@@ -1027,16 +1033,20 @@ async function main() {
               const effectivePrice = usdcSpent / solBought;
               console.log(JSON.stringify({ level: 'info', msg: `Manual swap detected: bought ${solBought.toFixed(2)} SOL with $${usdcSpent.toFixed(0)} USDC @ $${effectivePrice.toFixed(2)}`, timestamp: Date.now() }));
               try {
-                insertSwapLedger(db, {
-                  timestamp: Date.now(), direction: 'buy_sol', sol_amount: solBought, usdc_amount: usdcSpent,
-                  price: effectivePrice, reason: 'Manual swap from phone (USDC→SOL)', pnl_usdc: 0,
-                  cost_basis_before: sirCostBasis, cost_basis_after: sirCostBasis, source: 'manual',
-                });
-                // Update cost basis (module-level state + sirCostBasis so next upsertBotState doesn't stomp DB)
-                const result = updateCostBasis(db, solBought, effectivePrice, 'manual_buy');
-                costBasisState = result;
-                sirCostBasis = result.solCostBasis;
-                console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Manual buy detected — costBasisState refreshed (basis $${result.solCostBasis.toFixed(2)})`, timestamp: Date.now() }));
+                let result: typeof costBasisState;
+                // Atomic: ledger + cost-basis writes together.
+                db.transaction(() => {
+                  insertSwapLedger(db, {
+                    timestamp: Date.now(), direction: 'buy_sol', sol_amount: solBought, usdc_amount: usdcSpent,
+                    price: effectivePrice, reason: 'Manual swap from phone (USDC→SOL)', pnl_usdc: 0,
+                    cost_basis_before: sirCostBasis, cost_basis_after: sirCostBasis, source: 'manual',
+                  });
+                  // Update cost basis (module-level state + sirCostBasis so next upsertBotState doesn't stomp DB)
+                  result = updateCostBasis(db, solBought, effectivePrice, 'manual_buy');
+                  costBasisState = result;
+                  sirCostBasis = result.solCostBasis;
+                })();
+                console.log(JSON.stringify({ level: 'info', msg: `[CostBasis] Manual buy detected — costBasisState refreshed (basis $${result!.solCostBasis.toFixed(2)})`, timestamp: Date.now() }));
               } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_buy_detect: ${String(e)}`, timestamp: Date.now() })); }
             }
           }
@@ -2677,20 +2687,22 @@ async function runLiveCycle(price: number): Promise<void> {
           await liveExecutor.doSwapPublic(MINTS.USDC, MINTS.SOL, Math.floor(sirResult.amountUsdc * 1e6), `SIR: buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
         }
         // COST_BASIS: tracked — SIR USDC→SOL buy updates weighted average cost basis
-        if (sirResult.direction === 'buy_sol') {
-          costBasisState = updateCostBasis(db, solAmount, price, `SIR buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
-          sirCostBasis = costBasisState.solCostBasis;
-        } else {
-          sirCostBasis = pnlCalc.newBasis;
-        }
+        // Atomic: cost-basis update (buy path) + ledger insert must commit together.
+        db.transaction(() => {
+          if (sirResult.direction === 'buy_sol') {
+            costBasisState = updateCostBasis(db, solAmount, price, `SIR buy SOL to target ${(sirTarget * 100).toFixed(0)}%`);
+            sirCostBasis = costBasisState.solCostBasis;
+          } else {
+            sirCostBasis = pnlCalc.newBasis;
+          }
+          // Track in swap ledger
+          insertSwapLedger(db, {
+            timestamp: now, direction: sirResult.direction, sol_amount: solAmount,
+            usdc_amount: sirResult.amountUsdc, price, reason: `SIR: ${sirResult.direction} to target ${(sirTarget * 100).toFixed(0)}%`,
+            pnl_usdc: pnlCalc.pnlUsdc, cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
+          });
+        })();
         lastSirSwapTime = now;
-
-        // Track in swap ledger
-        insertSwapLedger(db, {
-          timestamp: now, direction: sirResult.direction, sol_amount: solAmount,
-          usdc_amount: sirResult.amountUsdc, price, reason: `SIR: ${sirResult.direction} to target ${(sirTarget * 100).toFixed(0)}%`,
-          pnl_usdc: pnlCalc.pnlUsdc, cost_basis_before: basisBefore, cost_basis_after: sirCostBasis,
-        });
         if (pnlCalc.pnlUsdc != null) {
           console.log(JSON.stringify({ level: 'info', msg: `SIR swap P&L: ${pnlCalc.pnlUsdc >= 0 ? '+' : ''}$${pnlCalc.pnlUsdc.toFixed(2)} (sold at $${price.toFixed(2)}, basis $${basisBefore.toFixed(2)})`, timestamp: now }));
         }

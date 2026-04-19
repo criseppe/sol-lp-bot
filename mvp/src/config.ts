@@ -400,14 +400,16 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
       : false; }
 
   // Progressive basis decay
-  { const v = n('progressiveBasisDecayEnabled'); if (v != null) runtime.progressiveBasisDecayEnabled = v !== 0; }
+  { const vs = g('progressiveBasisDecayEnabled');
+    if (vs != null) runtime.progressiveBasisDecayEnabled = (vs === 'true' || vs === '1'); }
   const pbdS = nv('progressiveBasisDecayStartHours', 0.0, 48);         if (pbdS != null) runtime.progressiveBasisDecayStartHours = pbdS;
   const pbdP = nv('progressiveBasisDecayPerInterval', 0.0001, 0.01);   if (pbdP != null) runtime.progressiveBasisDecayPerInterval = pbdP;
   const pbdI = nv('progressiveBasisDecayIntervalMinutes', 1, 60);      if (pbdI != null) runtime.progressiveBasisDecayIntervalMinutes = pbdI;
   const pbdM = nv('progressiveBasisDecayMinThreshold', 0.80, 0.99);    if (pbdM != null) runtime.progressiveBasisDecayMinThreshold = pbdM;
 
   // Strategic SOL Rebalance
-  { const v = n('strategicRebalanceEnabled'); if (v != null) runtime.strategicRebalanceEnabled = v !== 0; }
+  { const vs = g('strategicRebalanceEnabled');
+    if (vs != null) runtime.strategicRebalanceEnabled = (vs === 'true' || vs === '1'); }
   const srIdle = nv('strategicRebalanceIdleMinutes', 5, 1440);        if (srIdle != null) runtime.strategicRebalanceIdleMinutes = srIdle;
   const srMult = nv('strategicRebalanceBasisMultiplier', 0.90, 1.00);  if (srMult != null) runtime.strategicRebalanceBasisMultiplier = srMult;
   const srMin  = nv('strategicRebalanceMinSolSharePct', 0.50, 1.00);   if (srMin  != null) runtime.strategicRebalanceMinSolSharePct = srMin;
@@ -526,6 +528,28 @@ export function exportConfig(): Record<string, string> {
   out['extremeRsiLow'] = String(runtime.extremeRsiLow);
   out['extremeRsiHigh'] = String(runtime.extremeRsiHigh);
   out['extremeAtrThreshold'] = String(runtime.extremeAtrThreshold);
+
+  // Previously missing keys — round-trip gap filled 2026-04-19
+  out['solConvertMinSolPct'] = String(runtime.solConvertMinSolPct);
+  out['t1DownsideAgeGuardEnabled'] = String(runtime.t1DownsideAgeGuardEnabled);
+  out['t1DownsideEmergencyOffset'] = String(runtime.t1DownsideEmergencyOffset);
+  out['priorityFeeLamports'] = String(runtime.priorityFeeLamports);
+  out['computeBudgetLimit'] = String(runtime.computeBudgetLimit);
+  out['skipPreflight'] = String(runtime.skipPreflight);
+  out['dynamicAdjustmentsEnabled'] = String(runtime.dynamicAdjustmentsEnabled);
+  out['progressiveBasisDecayEnabled'] = String(runtime.progressiveBasisDecayEnabled);
+  out['progressiveBasisDecayStartHours'] = String(runtime.progressiveBasisDecayStartHours);
+  out['progressiveBasisDecayPerInterval'] = String(runtime.progressiveBasisDecayPerInterval);
+  out['progressiveBasisDecayIntervalMinutes'] = String(runtime.progressiveBasisDecayIntervalMinutes);
+  out['progressiveBasisDecayMinThreshold'] = String(runtime.progressiveBasisDecayMinThreshold);
+  out['strategicRebalanceEnabled'] = String(runtime.strategicRebalanceEnabled);
+  out['strategicRebalanceIdleMinutes'] = String(runtime.strategicRebalanceIdleMinutes);
+  out['strategicRebalanceBasisMultiplier'] = String(runtime.strategicRebalanceBasisMultiplier);
+  out['strategicRebalanceMinSolSharePct'] = String(runtime.strategicRebalanceMinSolSharePct);
+  out['strategicRebalanceMaxPortfolioPct'] = String(runtime.strategicRebalanceMaxPortfolioPct);
+  out['strategicRebalanceCooldownHours'] = String(runtime.strategicRebalanceCooldownHours);
+  out['strategicRebalanceTargetSolSharePct'] = String(runtime.strategicRebalanceTargetSolSharePct);
+  out['strategicRebalanceMinUsdcGain'] = String(runtime.strategicRebalanceMinUsdcGain);
 
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {

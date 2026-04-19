@@ -189,7 +189,16 @@ export class LiveExecutor {
           feeLamports: result.feeLamports,
           priceImpactPct: result.priceImpactPct,
         });
-      } catch {}
+      } catch (e) {
+        console.log(JSON.stringify({
+          level: 'error',
+          msg: '[FinancialOp] onSwap handler threw — swap ledger / cost basis may be inconsistent',
+          reason, txSignature: result.txSignature,
+          error: e instanceof Error ? e.message : String(e),
+          stack: e instanceof Error ? e.stack : undefined,
+          timestamp: Date.now(),
+        }));
+      }
     }
     return result;
   }
@@ -224,6 +233,7 @@ export class LiveExecutor {
     }
 
     // Validate tick arrays exist before opening — avoids 0x1781 simulation failures
+    let tickAbortReason: string | null = null;
     try {
       const fetcher = this.client.getFetcher();
       const currentTick = poolData.tickCurrentIndex;
@@ -237,14 +247,27 @@ export class LiveExecutor {
         // Init all 3 ticks (lower, upper, current)
         const retryInit = await whirlpool.initTickArrayForTicks(ticksToCheck);
         if (retryInit) {
-          try { await this.execTx(retryInit); } catch {}
+          try { await this.execTx(retryInit); } catch (e) {
+            console.log(JSON.stringify({ level: 'error', msg: 'Tick array retry initTx failed', error: e instanceof Error ? e.message : String(e), timestamp: Date.now() }));
+          }
           await new Promise(r => setTimeout(r, 5000));
+        }
+        // Re-check after retry; if still missing, abort open to avoid on-chain 0x1781.
+        const recheck = await Promise.all(allPDAs.map(p => fetcher.getTickArray(p[0].publicKey, IGNORE_CACHE)));
+        const stillMissing = recheck.map((a, i) => !a ? ticksToCheck[i] : null).filter(Boolean);
+        if (stillMissing.length > 0) {
+          tickAbortReason = `Tick arrays still missing after retry init: [${stillMissing.join(',')}]`;
+        } else {
+          console.log(JSON.stringify({ level: 'info', msg: 'Tick arrays initialized + validated after retry', timestamp: Date.now() }));
         }
       } else {
         console.log(JSON.stringify({ level: 'info', msg: 'Tick arrays validated ✅ (lower + upper + current)', timestamp: Date.now() }));
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `Tick array validation failed: ${err instanceof Error ? err.message : String(err)}. Proceeding anyway.`, timestamp: Date.now() }));
+    }
+    if (tickAbortReason) {
+      throw new Error(`${tickAbortReason}. Aborting open to prevent on-chain failure.`);
     }
 
     const usdcMint = new PublicKey(MINTS.USDC);
@@ -564,7 +587,8 @@ export class LiveExecutor {
       priceUpper: this.currentPosition.priceUpper,
     };
 
-    // 4. Validate tick arrays before close (same 0x1781/0x1782 issue as open)
+    // 4. Validate tick arrays before close (same 0x1781/0x1782 issue as open).
+    // Close path is best-effort: close must proceed even if init fails; log context for debugging.
     try {
       const tickSpacing = poolData.tickSpacing;
       const currentTick = poolData.tickCurrentIndex;
@@ -572,10 +596,14 @@ export class LiveExecutor {
       const initTx = await whirlpool.initTickArrayForTicks(ticksToCheck);
       if (initTx) {
         console.log(JSON.stringify({ level: 'info', msg: 'Close: initializing tick arrays', timestamp: Date.now() }));
-        try { await this.execTx(initTx); } catch {}
+        try { await this.execTx(initTx); } catch (e) {
+          console.log(JSON.stringify({ level: 'warn', msg: 'Close: tick array initTx failed (will attempt close anyway)', error: e instanceof Error ? e.message : String(e), timestamp: Date.now() }));
+        }
         await new Promise(r => setTimeout(r, 3000));
       }
-    } catch {}
+    } catch (e) {
+      console.log(JSON.stringify({ level: 'warn', msg: 'Close: tick array validation threw (will attempt close anyway)', error: e instanceof Error ? e.message : String(e), timestamp: Date.now() }));
+    }
 
     // 5. Close on-chain
     const solBefore = await this.getSolBalance();
@@ -924,6 +952,7 @@ export class LiveExecutor {
     const { tickLower, tickUpper } = this.currentPosition;
 
     // Validate tick arrays exist before add-liquidity — avoids 0x1781 simulation failures
+    let adTickAbortReason: string | null = null;
     try {
       const poolData = whirlpool.getData();
       const tickSpacing = poolData.tickSpacing;
@@ -937,12 +966,22 @@ export class LiveExecutor {
         console.log(JSON.stringify({ level: 'warn', msg: `[AutoDeploy] Tick arrays missing for ticks: [${missing.join(',')}]. Initializing + waiting 5s...`, timestamp: Date.now() }));
         const retryInit = await whirlpool.initTickArrayForTicks(ticksToCheck);
         if (retryInit) {
-          try { await this.execTx(retryInit); } catch {}
+          try { await this.execTx(retryInit); } catch (e) {
+            console.log(JSON.stringify({ level: 'error', msg: '[AutoDeploy] Tick array retry initTx failed', error: e instanceof Error ? e.message : String(e), timestamp: Date.now() }));
+          }
           await new Promise(r => setTimeout(r, 5000));
+        }
+        const recheck = await Promise.all(allPDAs.map(p => fetcher.getTickArray(p[0].publicKey, IGNORE_CACHE)));
+        const stillMissing = recheck.map((a, i) => !a ? ticksToCheck[i] : null).filter(Boolean);
+        if (stillMissing.length > 0) {
+          adTickAbortReason = `[AutoDeploy] Tick arrays still missing after retry init: [${stillMissing.join(',')}]`;
         }
       }
     } catch (err) {
       console.log(JSON.stringify({ level: 'warn', msg: `[AutoDeploy] Tick array validation failed: ${err instanceof Error ? err.message : String(err)}. Proceeding anyway.`, timestamp: Date.now() }));
+    }
+    if (adTickAbortReason) {
+      throw new Error(`${adTickAbortReason}. Aborting add-liquidity to prevent on-chain failure.`);
     }
 
     let solBal = await this.getSolBalance();
