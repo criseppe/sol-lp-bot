@@ -2293,32 +2293,40 @@ ${NAV_HTML}
         ${(() => {
           const varEnabled = runtime.varEnabled;
           const sirEnabled = runtime.sirEnabled;
-          // VAR deploy or static regime deploy
           const deployPct = varEnabled
             ? Math.max(0.25, Math.min(0.90, 0.95 - (live.marketSignals?.vol1h ?? 0.003) * 5))
             : (runtime.regimeParams[live.regime as keyof typeof runtime.regimeParams] ?? { deployPct: 1.0 }).deployPct;
-          const targetIdlePct = (1 - Math.max(0.10, deployPct)) * 100;
-          // Read target SOL % from runtime config (updated every 1 min from DB)
           const targetSolPct = Math.round(
             live.regime === 'EXTREME' ? runtime.idleTargetSolPctExtreme * 100 :
             live.regime === 'BEARISH_TREND' ? runtime.idleTargetSolPctBearish * 100 :
             live.regime === 'BULLISH_TREND' ? runtime.idleTargetSolPctBullish * 100 :
             runtime.idleTargetSolPctRanging * 100
           );
+          const tolPct = Math.round((runtime.idleRebalanceDeviationPct ?? 0.15) * 100);
           const walletSolVal = live.solBalance * live.solPrice;
           const walletTotal = walletSolVal + live.usdcBalance;
           const walletSolPct = walletTotal > 0 ? (walletSolVal / walletTotal * 100) : 0;
           const walletUsdcPct = walletTotal > 0 ? (live.usdcBalance / walletTotal * 100) : 0;
-          const walletPctOfTotal = live.totalValueWithPosition > 0 ? (walletTotal / live.totalValueWithPosition * 100) : 0;
           const solDeviation = Math.abs(walletSolPct - targetSolPct);
-          const solDeviationCol = solDeviation > 15 ? '#ef4444' : solDeviation > 10 ? '#eab308' : '#22c55e';
-          const idleDeviation = Math.abs(walletPctOfTotal - targetIdlePct);
-          const idleCol = idleDeviation > 10 ? '#eab308' : '#22c55e';
-          return `<div style="font-size:10px;margin-top:4px">
-            <span style="color:${idleCol};font-weight:bold">${fmt(walletPctOfTotal, 0)}% of portfolio</span> <span style="color:#8b949e">· Target: ${fmt(targetIdlePct, 0)}% idle ${varEnabled ? '(VAR)' : '(' + live.regime + ')'}</span>
+          const solDeviationCol = solDeviation > tolPct ? '#ef4444' : solDeviation > tolPct * 0.8 ? '#eab308' : '#22c55e';
+          const devStatus = solDeviation > tolPct ? 'REBALANCE' : solDeviation > tolPct * 0.8 ? 'near trigger' : 'within band';
+          // Deployable = wallet - reserve floor; deploy cap = deployPct × (deployable + position)
+          const resFloor = live.reserveFloor ?? 0;
+          const idleUsdcAbove = Math.max(0, live.usdcBalance - resFloor);
+          const deployableIdle = walletSolVal + idleUsdcAbove;
+          const deployableTotal = deployableIdle + (live.positionValueUsdc || 0);
+          const deployCap = deployableTotal * deployPct;
+          const posVal = live.positionValueUsdc || 0;
+          const headroom = deployCap - posVal;
+          const headroomCol = headroom >= 700 ? '#22c55e' : headroom >= 0 ? '#eab308' : '#ef4444';
+          return `<div style="font-size:10px;margin-top:4px;color:#8b949e">
+            Reserve: <span style="color:#c9d1d9">$${fmt(resFloor)}</span> (protected) · Idle buffer: <span style="color:#c9d1d9">$${fmt(deployableIdle)}</span>
           </div>
           <div style="font-size:10px;margin-top:2px">
-            <span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span> <span style="color:${solDeviationCol}">· Target: ${targetSolPct}% SOL ${sirEnabled ? '(SIR)' : ''}</span>
+            <span style="color:#22c55e;font-weight:bold">${fmt(walletSolPct, 0)}% SOL</span> / <span style="color:#58a6ff;font-weight:bold">${fmt(walletUsdcPct, 0)}% USDC</span> <span style="color:#8b949e">· Target: ${targetSolPct}% SOL ±${tolPct}%${sirEnabled ? ' (SIR)' : ''}</span> <span style="color:${solDeviationCol}">· Dev ${fmt(solDeviation, 0)}% ${devStatus}</span>
+          </div>
+          <div style="font-size:10px;margin-top:2px;color:#8b949e">
+            Deploy cap: <span style="color:#c9d1d9">$${fmt(deployCap)}</span> (${fmt(deployPct * 100, 0)}% × $${fmt(deployableTotal)} ${varEnabled ? 'VAR' : live.regime}) · LP: <span style="color:#c9d1d9">$${fmt(posVal)}</span> · Headroom: <span style="color:${headroomCol};font-weight:bold">${headroom < 0 ? '-' : ''}$${fmt(Math.abs(headroom))}</span>
           </div>`;
         })()}
       </div>
