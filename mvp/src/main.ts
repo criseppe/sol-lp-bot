@@ -2305,9 +2305,11 @@ async function runLiveCycle(price: number): Promise<void> {
       const effectiveCooldownMs = momentumOverride ? Math.min(regimeCooldownMs, momentumCooldownMs) : regimeCooldownMs;
       const timeSinceLast = now - solConversionLastTs;
 
-      // Per-regime basis multiplier (null = disabled for this regime)
-      const regimeBasisMult: Record<string, number | null> = { RANGING: 1.000, BULLISH_TREND: 1.010, BEARISH_TREND: 1.005, EXTREME: null };
-      const regimeMult = regimeBasisMult[liveRegime] ?? null;
+      // Per-regime basis multiplier — now configurable via regime.<regime>.solConvertBasisMultiplier.
+      // EXTREME historically had null (disabled); preserved by treating exact 0 as "disabled" sentinel.
+      const regimeParams0 = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
+      const regimeMultRaw = (regimeParams0 as any).solConvertBasisMultiplier;
+      const regimeMult: number | null = (regimeMultRaw == null || regimeMultRaw === 0) ? null : regimeMultRaw;
       const effectiveMult = regimeMult != null ? regimeMult * runtime.solConversionBasisMultiplier : null;
       // Progressive basis decay state — used both as threshold source and as regime-gate bypass.
       const decayState = getProgressiveDecayState(basis, price, now);
@@ -2354,8 +2356,9 @@ async function runLiveCycle(price: number): Promise<void> {
         const positionSize = totalPortfolio * params.deployPct * (taDeployMultiplier ?? 1.0);
         const targetUsdcForDeploy = positionSize * (params.usdcDepositPct ?? 0.35);
 
-        if (walletSolValue <= totalPortfolio * 0.20) {
-          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: SOL not heavy (${(walletSolValue / totalPortfolio * 100).toFixed(0)}% of portfolio, need >20%)`, timestamp: now }));
+        const minSolPct = runtime.solConvertMinSolPct ?? 0.20;
+        if (walletSolValue <= totalPortfolio * minSolPct) {
+          console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: SOL not heavy (${(walletSolValue / totalPortfolio * 100).toFixed(0)}% of portfolio, need >${(minSolPct * 100).toFixed(0)}%)`, timestamp: now }));
         } else if (deployableUsdc >= targetUsdcForDeploy) {
           console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: USDC sufficient ($${deployableUsdc.toFixed(0)} deployable >= $${targetUsdcForDeploy.toFixed(0)} target)`, timestamp: now }));
         } else {

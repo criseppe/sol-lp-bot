@@ -134,6 +134,7 @@ export const runtime = {
   solConvertTargetDeployMinBullish: 30, // minutes to fully convert idle SOL in BULLISH
   solConvertTargetDeployMinBearish: 90, // minutes to fully convert idle SOL in BEARISH
   solConvertTargetDeployMinExtreme: 240, // minutes to fully convert idle SOL in EXTREME
+  solConvertMinSolPct: 0.20, // SOL-heavy gate: only fire SolConvert if walletSolValue > this fraction of wallet total
 
   // Pre-open SOL→USDC sell (conditional). Fires only when wallet is SOL-heavy at open
   // AND price is at or above basis (no loss realization). Contradicts the prior
@@ -202,6 +203,7 @@ const REGIME_KEYS = ['RANGING', 'BULLISH_TREND', 'BEARISH_TREND', 'EXTREME'] as 
 const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
   'rangeWidthPct', 'skewDown', 'skewUp', 'proxThresholdLower', 'proxThresholdUpper',
   'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold', 'reserveFloorPct',
+  'solConvertBasisMultiplier',
 ];
 
 /**
@@ -255,6 +257,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const scTdB = nv('solConvertTargetDeployMinBullish', 10, 120); if (scTdB != null) runtime.solConvertTargetDeployMinBullish = scTdB;
   const scTdBe = nv('solConvertTargetDeployMinBearish', 30, 240); if (scTdBe != null) runtime.solConvertTargetDeployMinBearish = scTdBe;
   const scTdE = nv('solConvertTargetDeployMinExtreme', 60, 480); if (scTdE != null) runtime.solConvertTargetDeployMinExtreme = scTdE;
+  const scMinSol = nv('solConvertMinSolPct', 0, 1); if (scMinSol != null) runtime.solConvertMinSolPct = scMinSol;
 
   // Pre-open SOL sell
   const vPOSSEn = g('preOpenSolSellEnabled'); if (vPOSSEn === 'true' || vPOSSEn === 'false') runtime.preOpenSolSellEnabled = vPOSSEn === 'true';
@@ -373,6 +376,7 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
     proxThresholdLower: [0.1, 1], proxThresholdUpper: [0.1, 1],
     deployPct: [0.01, 1], solReentrySplit: [0, 1],
     harvestIntervalDays: [0.1, 30], harvestSolConvertPct: [0, 1],
+    solConvertBasisMultiplier: [0.95, 1.10],
   };
   for (const regime of REGIME_KEYS) {
     for (const field of REGIME_PARAM_FIELDS) {

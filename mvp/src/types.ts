@@ -55,6 +55,7 @@ export interface RegimeParams {
   basisGateThreshold: number; // price must be >= basis * threshold to open (e.g. 0.999 = 0.1% buffer)
   proximityDeployThreshold: number; // max proximity to lower bound before auto-deploy skips (0-1)
   reserveFloorPct: number; // reserve floor as fraction of portfolio (0-1)
+  solConvertBasisMultiplier: number; // price must be >= basis × this (per-regime) before SolConvert fires (non-decay path)
 }
 
 export interface RangeBounds {

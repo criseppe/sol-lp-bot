@@ -27,6 +27,7 @@ export const REGIME_PARAMS = {
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.55,
     reserveFloorPct: 0.10,
+    solConvertBasisMultiplier: 1.000,
   },
   BULLISH_TREND: {
     rangeWidthPct:        3,
@@ -43,6 +44,7 @@ export const REGIME_PARAMS = {
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.60,
     reserveFloorPct: 0.12,
+    solConvertBasisMultiplier: 1.010,
   },
   BEARISH_TREND: {
     rangeWidthPct:        2,
@@ -59,6 +61,7 @@ export const REGIME_PARAMS = {
     basisGateThreshold:   0.992,
     proximityDeployThreshold: 0.45,
     reserveFloorPct: 0.18,
+    solConvertBasisMultiplier: 1.005,
   },
   EXTREME: {
     rangeWidthPct:        5,
@@ -75,6 +78,7 @@ export const REGIME_PARAMS = {
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.40,
     reserveFloorPct: 0.20,
+    solConvertBasisMultiplier: 1.000,
   },
 } as const;
 
