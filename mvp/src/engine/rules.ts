@@ -1,6 +1,7 @@
 import type { Regime, RegimeParams, PaperPosition, ProximityState, RangeBounds } from '../types.js';
 import { REGIME_PARAMS, REENTRY } from '../constants.js';
 import { runtime } from '../config.js';
+import { getCurrentDyn } from './dynamicScaling.js';
 
 export interface ReentryDecision {
   should: boolean;
@@ -201,7 +202,8 @@ export function checkAutoDeploy(opts: {
     reserveFloor,
   } = opts;
 
-  const solReserve = runtime.solReserve;
+  // Phase 19: dynamic SOL reserve (falls back to floor before first cycle)
+  const solReserve = getCurrentDyn().solReserveSol ?? runtime.solReserveFloor;
   const idleSol = Math.max(0, walletSol - solReserve);
   const idleUsdcRaw = Math.max(0, walletUsdc - reserveFloor);
   const idleUsdc = idleSol * currentPrice + idleUsdcRaw;

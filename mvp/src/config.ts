@@ -21,9 +21,16 @@ export const runtime = {
 
   // Capital & Reserves
   maxLiveCapitalUsdc: 25000,
-  solReserve: 0.1,
-  usdcReserve: 1,
+  // Phase 19: renamed to *Floor. These are the ABSOLUTE minimum values used
+  // when dynamic scaling would compute something smaller. Dynamic values are
+  // max(floor, operatingCapital * pct). See src/engine/dynamicScaling.ts.
+  solReserveFloor: 0.1,              // SOL
+  usdcReserveFloor: 5,               // USD
   minPositionSizeUsdc: RISK.MIN_POSITION_SIZE_USDC as number,
+
+  // Phase 19 scaling controls
+  pauseThresholdUsdc: 100,           // below this wallet equity the bot pauses (no ops)
+  dynamicScalingEnabled: true,       // master switch; false → always use floors
 
   // Auto Deploy
   autoDeployCheckMinutes: 5,
@@ -31,7 +38,7 @@ export const runtime = {
   autoDeployCooldownMinutes: 30,
   minIdleUsdc: 5,
   minIdleSol: 0.05,
-  minDeployUsdc: 10,
+  minDeployUsdcFloor: 50,            // Phase 19: floor for dynamic min-deploy (was minDeployUsdc=10)
   deployRatioTolerance: 0.02,
 
   // Re-entry (Rule 3) — DEPRECATED pullback fields kept for compat
@@ -77,7 +84,7 @@ export const runtime = {
 
   // Idle wallet rebalance — maintain target SOL/USDC split per regime
   idleRebalanceEnabled: true,
-  idleRebalanceMinUsdc: 100,                 // min idle value to trigger ($)
+  idleRebalanceMinUsdcFloor: 50,             // Phase 19: floor for dynamic idle-rebalance min (was idleRebalanceMinUsdc=100)
   idleRebalanceSolKeep: 0.15,                // always keep this much SOL for gas
   idleRebalanceDeviationPct: 0.15,           // only rebalance if >15% off target
   // Target idle SOL % per regime (rest is USDC)
@@ -264,9 +271,19 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
 
   // Capital & reserves
   const v6 = nv('maxLiveCapitalUsdc', 10, 1000000); if (v6 != null) runtime.maxLiveCapitalUsdc = v6;
-  const v7 = nv('solReserve', 0.01, 10); if (v7 != null) runtime.solReserve = v7;
-  const v8 = nv('usdcReserve', 0, 100); if (v8 != null) runtime.usdcReserve = v8;
+  // Phase 19: read *Floor keys with old-name fallback (backwards compat).
+  { const nw = nv('solReserveFloor', 0.01, 10); const old = nv('solReserve', 0.01, 10);
+    const v = nw ?? old; if (v != null) runtime.solReserveFloor = v; }
+  { const nw = nv('usdcReserveFloor', 0, 100); const old = nv('usdcReserve', 0, 100);
+    const v = nw ?? old; if (v != null) runtime.usdcReserveFloor = v; }
   const v9 = nv('minPositionSizeUsdc', 1, 10000); if (v9 != null) runtime.minPositionSizeUsdc = v9;
+
+  // Phase 19 scaling controls
+  const vPT = nv('pauseThresholdUsdc', 0, 10000); if (vPT != null) runtime.pauseThresholdUsdc = vPT;
+  { const vs = g('dynamicScalingEnabled');
+    if (vs === 'true' || vs === '1' || vs === 'false' || vs === '0') {
+      runtime.dynamicScalingEnabled = (vs === 'true' || vs === '1');
+    } }
 
   // Auto deploy
   const v10 = nv('autoDeployCheckMinutes', 1, 60); if (v10 != null) runtime.autoDeployCheckMinutes = v10;
@@ -274,7 +291,8 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const v11 = nv('autoDeployCooldownMinutes', 0, 1440); if (v11 != null) runtime.autoDeployCooldownMinutes = v11;
   const v12 = nv('minIdleUsdc', 0.1, 10000); if (v12 != null) runtime.minIdleUsdc = v12;
   const v13 = nv('minIdleSol', 0.001, 100); if (v13 != null) runtime.minIdleSol = v13;
-  const v14 = nv('minDeployUsdc', 1, 10000); if (v14 != null) runtime.minDeployUsdc = v14;
+  { const nw = nv('minDeployUsdcFloor', 1, 10000); const old = nv('minDeployUsdc', 1, 10000);
+    const v = nw ?? old; if (v != null) runtime.minDeployUsdcFloor = v; }
   const v15 = nv('deployRatioTolerance', 0.001, 0.5); if (v15 != null) runtime.deployRatioTolerance = v15;
 
   // SOL conversion
@@ -362,7 +380,8 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vRCREn = g('regimeChangeRefreshEnabled'); if (vRCREn === 'true' || vRCREn === 'false') runtime.regimeChangeRefreshEnabled = vRCREn === 'true';
   const vRCRTol = nv('regimeRefreshTolerance', 0, 0.05); if (vRCRTol != null) runtime.regimeRefreshTolerance = vRCRTol;
   const vRCRInt = nv('regimeRefreshMinSwitchIntervalSec', 0, 86400); if (vRCRInt != null) runtime.regimeRefreshMinSwitchIntervalSec = vRCRInt;
-  const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
+  { const nw = nv('idleRebalanceMinUsdcFloor', 10, 10000); const old = nv('idleRebalanceMinUsdc', 10, 10000);
+    const v = nw ?? old; if (v != null) runtime.idleRebalanceMinUsdcFloor = v; }
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
   const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
   const vIRRanging = nv('idleTargetSolPctRanging', 0, 1); if (vIRRanging != null) runtime.idleTargetSolPctRanging = vIRRanging;
@@ -509,14 +528,20 @@ export function exportConfig(): Record<string, string> {
   out['pythMaxConfidencePct'] = String(runtime.pythMaxConfidencePct);
   out['pythMaxStalenessSec'] = String(runtime.pythMaxStalenessSec);
   out['maxLiveCapitalUsdc'] = String(runtime.maxLiveCapitalUsdc);
-  out['solReserve'] = String(runtime.solReserve);
-  out['usdcReserve'] = String(runtime.usdcReserve);
+  // Phase 19: emit new *Floor keys, plus old names for 1-release backwards compat.
+  out['solReserveFloor'] = String(runtime.solReserveFloor);
+  out['usdcReserveFloor'] = String(runtime.usdcReserveFloor);
+  out['solReserve'] = String(runtime.solReserveFloor);         // deprecated alias
+  out['usdcReserve'] = String(runtime.usdcReserveFloor);       // deprecated alias
+  out['pauseThresholdUsdc'] = String(runtime.pauseThresholdUsdc);
+  out['dynamicScalingEnabled'] = String(runtime.dynamicScalingEnabled);
   out['minPositionSizeUsdc'] = String(runtime.minPositionSizeUsdc);
   out['autoDeployCheckMinutes'] = String(runtime.autoDeployCheckMinutes);
   out['autoDeployCooldownMinutes'] = String(runtime.autoDeployCooldownMinutes);
   out['minIdleUsdc'] = String(runtime.minIdleUsdc);
   out['minIdleSol'] = String(runtime.minIdleSol);
-  out['minDeployUsdc'] = String(runtime.minDeployUsdc);
+  out['minDeployUsdcFloor'] = String(runtime.minDeployUsdcFloor);
+  out['minDeployUsdc'] = String(runtime.minDeployUsdcFloor);   // deprecated alias
   out['deployRatioTolerance'] = String(runtime.deployRatioTolerance);
   out['solConversionEnabled'] = runtime.solConversionEnabled ? '1' : '0';
   out['solConversionCooldownMin'] = String(runtime.solConversionCooldownMin);
@@ -556,7 +581,8 @@ export function exportConfig(): Record<string, string> {
   out['swapProvider'] = runtime.swapProvider;
   out['positionMaxAgeHours'] = String(runtime.positionMaxAgeHours);
   out['idleRebalanceEnabled'] = String(runtime.idleRebalanceEnabled);
-  out['idleRebalanceMinUsdc'] = String(runtime.idleRebalanceMinUsdc);
+  out['idleRebalanceMinUsdcFloor'] = String(runtime.idleRebalanceMinUsdcFloor);
+  out['idleRebalanceMinUsdc'] = String(runtime.idleRebalanceMinUsdcFloor); // deprecated alias
   out['idleRebalanceSolKeep'] = String(runtime.idleRebalanceSolKeep);
   out['idleRebalanceDeviationPct'] = String(runtime.idleRebalanceDeviationPct);
   out['idleTargetSolPctRanging'] = String(runtime.idleTargetSolPctRanging);

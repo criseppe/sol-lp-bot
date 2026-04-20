@@ -23,6 +23,7 @@ import { bootstrapCostBasis, updateCostBasis, readCostBasis, recalculateFromCurr
 import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeployGate, checkReserveFloor } from './reserve/reserveManager.js';
 import { checkDefensiveTriggers, checkDefensiveExit, updateEntryPriceLow, makeInitialState, type DefensiveState } from './engine/defensive.js';
 import * as regimeRefresh from './engine/regimeRefresh.js';
+import * as dynamicScaling from './engine/dynamicScaling.js';
 
 // ── Process-level safety nets ─────────────────────────────────────────────
 // Prevent stray promise rejections or exceptions (e.g. Solana web3.js retry
@@ -76,7 +77,7 @@ runtime.maxLiveCapitalUsdc = parseFloat(process.env.MAX_LIVE_CAPITAL_USDC ?? '25
 runtime.rangeWidthOverride = process.env.RANGE_WIDTH_OVERRIDE ? parseFloat(process.env.RANGE_WIDTH_OVERRIDE) : null;
 runtime.minIdleUsdc = parseFloat(process.env.MIN_IDLE_USDC ?? '5');
 runtime.minIdleSol = parseFloat(process.env.MIN_IDLE_SOL ?? '0.05');
-runtime.minDeployUsdc = parseFloat(process.env.MIN_DEPLOY_USDC ?? '10');
+runtime.minDeployUsdcFloor = parseFloat(process.env.MIN_DEPLOY_USDC ?? '50');
 runtime.deployRatioTolerance = parseFloat(process.env.DEPLOY_RATIO_TOLERANCE ?? '0.02');
 
 // ── 2. INIT DATABASE ──────────────────────────────────────────────────────
@@ -96,6 +97,10 @@ const savedState = getBotState(db);
 let liveExecutor: LiveExecutor | null = null;
 let liveRegime: Regime = 'RANGING';
 let liveBotState: BotState = 'IDLE';
+// Phase 19: pause state carried from wallet validation. If paused at startup,
+// main cycle should emit a heartbeat and skip operations until recovered.
+let startupPaused = false;
+let startupPauseReason: string = '';
 let lastUpsideExitPrice = 0;
 let lastUpsideExitTs = 0;
 // Regime-Change Refresh (RCR) in-memory state (restored from DB below)
@@ -455,9 +460,11 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
   const solShare = (balances.sol * price) / portfolio;
   if (solShare < runtime.strategicRebalanceMinSolSharePct) return false;
 
+  // Phase 19: dynamic thresholds snapshot for this check
+  const dyn = dynamicScaling.getCurrentDyn();
   const reserveFloor = getReserveState(db).floor;
   const availableAboveFloor = Math.max(0, balances.usdc - reserveFloor);
-  if (availableAboveFloor >= runtime.minDeployUsdc) return false; // enough USDC to deploy normally
+  if (availableAboveFloor >= dyn.minDeployUsdc) return false; // enough USDC to deploy normally
 
   const targetUsdc = portfolio * (1 - runtime.strategicRebalanceTargetSolSharePct);
   const usdcGap = targetUsdc - balances.usdc;
@@ -465,12 +472,12 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
 
   // Ensure swap produces enough USDC to actually clear reserveFloor + minDeployUsdc.
   // Without this floor, the max-portfolio-pct cap can bind and leave USDC still below deploy threshold.
-  const usdcNeeded = reserveFloor + runtime.minDeployUsdc - balances.usdc;
+  const usdcNeeded = reserveFloor + dyn.minDeployUsdc - balances.usdc;
   const requiredUsdc = Math.max(usdcGap, usdcNeeded * 1.05); // 5% buffer over strict need
 
   const solNeeded = (requiredUsdc / price) * 1.01;                                       // +1% slippage buffer
   const solMaxPct = (portfolio * runtime.strategicRebalanceMaxPortfolioPct) / price;      // cap by max portfolio %
-  const solMaxAvailable = Math.max(0, balances.sol - runtime.solReserve);                 // never drop below SOL reserve
+  const solMaxAvailable = Math.max(0, balances.sol - dyn.solReserveSol);                  // never drop below SOL reserve
 
   const solToSell = Math.min(solNeeded, solMaxPct, solMaxAvailable);
 
@@ -479,8 +486,8 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
   // Warn if maxPortfolioPct cap binds below what we need to actually deploy next cycle
   const projectedUsdc = balances.usdc + (solToSell * price);
   const projectedAvailable = projectedUsdc - reserveFloor;
-  if (projectedAvailable < runtime.minDeployUsdc) {
-    console.log(JSON.stringify({ level: 'warn', msg: `[StrategicRebalance] Warning: maxPortfolioPct cap binds, projected USDC $${projectedAvailable.toFixed(2)} insufficient for minDeployUsdc $${runtime.minDeployUsdc}. Consider raising strategicRebalanceMaxPortfolioPct.`, timestamp: now }));
+  if (projectedAvailable < dyn.minDeployUsdc) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[StrategicRebalance] Warning: maxPortfolioPct cap binds, projected USDC $${projectedAvailable.toFixed(2)} insufficient for minDeployUsdc $${dyn.minDeployUsdc.toFixed(2)}. Consider raising strategicRebalanceMaxPortfolioPct.`, timestamp: now }));
   }
 
   const reason = `Strategic rebalance: unstick SOL-heavy idle (share ${(solShare * 100).toFixed(0)}%, price $${price.toFixed(2)} < basis×${runtime.strategicRebalanceBasisMultiplier.toFixed(3)} $${basisFloor.toFixed(2)}, idle ${((now - strategicIdleStartTs) / 60000).toFixed(0)}min)`;
@@ -572,7 +579,12 @@ async function main() {
       timestamp: Date.now(),
     }));
 
-    validateWalletForLive(balances.sol, balances.usdc, runtime.maxLiveCapitalUsdc, solPrice);
+    const walletCheck = validateWalletForLive(balances.sol, balances.usdc, runtime.maxLiveCapitalUsdc, solPrice, runtime.pauseThresholdUsdc);
+    if (walletCheck.paused) {
+      startupPaused = true;
+      startupPauseReason = walletCheck.pauseReason ?? 'unknown';
+      console.log(JSON.stringify({ level: 'warn', msg: `[Startup] Bot paused at startup: ${startupPauseReason}. Will retry each cycle.`, timestamp: Date.now() }));
+    }
     liveExecutor = new LiveExecutor(conn, wallet, WHIRLPOOL_ADDRESS);
 
     // Restore gas stats from DB (persisted on every state save and shutdown)
@@ -1753,6 +1765,39 @@ async function runLiveCycle(price: number): Promise<void> {
   liveRecentPrices.push(price);
   if (liveRecentPrices.length > 10) liveRecentPrices.shift();
 
+  // ── Phase 19: dynamic scaling — compute operating state & params ────────
+  // Uses the latest liveData snapshot (refreshed each cycle by the dashboard
+  // block). On the very first cycle (before any snapshot), falls through to
+  // the module-level floor defaults and continues normally.
+  const walletEquityNow = currentLiveData?.totalValueWithPosition;
+  if (walletEquityNow != null && walletEquityNow > 0) {
+    const opState = dynamicScaling.computeOperatingState(
+      walletEquityNow,
+      runtime.maxLiveCapitalUsdc,
+      runtime.pauseThresholdUsdc,
+    );
+    const dynNew = dynamicScaling.computeDynamicParams(
+      opState,
+      price,
+      {
+        minDeployUsdcFloor: runtime.minDeployUsdcFloor,
+        solReserveFloor: runtime.solReserveFloor,
+        idleRebalanceMinUsdcFloor: runtime.idleRebalanceMinUsdcFloor,
+        usdcReserveFloor: runtime.usdcReserveFloor,
+      },
+      runtime.dynamicScalingEnabled,
+    );
+    dynamicScaling.setCurrent(opState, dynNew);
+    if (opState.paused) {
+      console.log(JSON.stringify({
+        level: 'warn',
+        msg: `[Bot] Paused — ${opState.pauseReason}. Wallet $${walletEquityNow.toFixed(2)} < pauseThreshold $${runtime.pauseThresholdUsdc}. Skipping cycle operations.`,
+        timestamp: now,
+      }));
+      return;
+    }
+  }
+
   // ── Defensive Downtrend Mode (Phase C core) ─────────────────────────────
   // When enabled: detect sustained drawdown and stop LP operations.
   // Gating (AUTO_DEPLOY / open / idle-rebal buy) is applied at each site.
@@ -2484,7 +2529,7 @@ async function runLiveCycle(price: number): Promise<void> {
         enabled: autoDeployEnabled,
         minIdleUsdc: runtime.minIdleUsdc,
         minIdleSol: runtime.minIdleSol,
-        minDeployUsdc: runtime.minDeployUsdc,
+        minDeployUsdc: dynamicScaling.getCurrentDyn().minDeployUsdc,
         deployRatioTolerance: params.deployRatioTolerance ?? runtime.deployRatioTolerance,
         reserveFloor: getReserveState(db).floor,
       });
@@ -2735,7 +2780,7 @@ async function runLiveCycle(price: number): Promise<void> {
       try {
         const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
         const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
-        const idleUsdc = Math.max(0, balances.usdc - runtime.usdcReserve);
+        const idleUsdc = Math.max(0, balances.usdc - dynamicScaling.getCurrentDyn().usdcReserveUsdc);
         const idleTotal = idleSol * price + idleUsdc;
         const targetSolPct = ({
           'RANGING': runtime.idleTargetSolPctRanging,
@@ -2797,10 +2842,10 @@ async function runLiveCycle(price: number): Promise<void> {
     try {
       const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
       const idleSol = Math.max(0, balances.sol - runtime.idleRebalanceSolKeep);
-      const idleUsdc = Math.max(0, balances.usdc - runtime.usdcReserve);
+      const idleUsdc = Math.max(0, balances.usdc - dynamicScaling.getCurrentDyn().usdcReserveUsdc);
       const idleTotal = idleSol * price + idleUsdc;
 
-      if (idleTotal >= runtime.idleRebalanceMinUsdc) {
+      if (idleTotal >= dynamicScaling.getCurrentDyn().idleRebalanceMinUsdc) {
         // Get target SOL % for current regime
         const targetSolPct =
           liveRegime === 'EXTREME' ? runtime.idleTargetSolPctExtreme :
@@ -3047,7 +3092,9 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
   const balances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
   const totalWalletUsdc = balances.sol * price + balances.usdc;
-  const reserveUsdc = runtime.solReserve * price + runtime.usdcReserve;
+  // Phase 19: dynamic reserves
+  const dynAtOpen = dynamicScaling.getCurrentDyn();
+  const reserveUsdc = dynAtOpen.solReserveSol * price + dynAtOpen.usdcReserveUsdc;
   const deployUsdc = Math.min(totalWalletUsdc * effectiveDeployPct, totalWalletUsdc - reserveUsdc);
   if (deployUsdc < 5) {
     console.log(JSON.stringify({ level: 'warn', msg: 'insufficient funds to open position', sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));

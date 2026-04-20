@@ -13,6 +13,7 @@ import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSn
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
+import { getCurrentDyn } from '../engine/dynamicScaling.js';
 import { renderWallet2Html } from './wallet2Html.js';
 
 const TZ = 'Europe/Berlin';
@@ -2531,8 +2532,8 @@ ${defensiveBannerHtml}
     <div class="row"><span class="label">Est. Max Yield 24h</span><span class="value" style="color:#8b949e">$${fmt(live.estDailyFeesUsdc, 4)} <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
     <div class="row"><span class="label">Est. Max APR</span><span class="value" style="color:#8b949e">${fmt(live.estAprPct, 1)}% <span style="font-size:10px;font-weight:normal">(ceiling)</span></span></div>
     ${(() => {
-      const idleSol = Math.max(0, live.solBalance - runtime.solReserve);
-      const idleUsdcRaw = Math.max(0, live.usdcBalance - runtime.usdcReserve);
+      const idleSol = Math.max(0, live.solBalance - getCurrentDyn().solReserveSol);
+      const idleUsdcRaw = Math.max(0, live.usdcBalance - getCurrentDyn().usdcReserveUsdc);
       const idleUsdc = idleSol * live.solPrice + idleUsdcRaw;
       const idealPrice = live.positionRange ? Math.sqrt(live.positionRange.lower * live.positionRange.upper).toFixed(2) : '--';
       const deviation = live.positionRange ? Math.abs(live.solPrice / Math.sqrt(live.positionRange.lower * live.positionRange.upper) - 1) * 100 : 0;
@@ -2589,10 +2590,6 @@ ${defensiveBannerHtml}
           <div style="font-size:11px;color:#8b949e">${fmt(live.gasSol, 6)} SOL (${live.txCount} txs)</div>
         </div>
       </div>
-    </div>
-    <div style="border-top:1px solid #21262d;margin-top:8px;padding-top:12px;text-align:center">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Net PnL (Fees - IL - Gas)</div>
-      ${(() => { const totalIl = live.ilUsdc + live.realizedIlUsdc; const net = live.totalFeesUsdc + totalIl - live.gasUsdc; return `<div style="font-size:24px;font-weight:bold;color:${net >= 0 ? '#22c55e' : '#ef4444'}">${net >= 0 ? '+' : '-'}$${fmt(Math.abs(net))}</div><div style="font-size:11px;color:#8b949e">${net >= 0 ? 'Profitable' : 'Underwater'} | Fees $${fmt(live.totalFeesUsdc)} - IL $${fmt(Math.abs(totalIl))} - Gas $${fmt(live.gasUsdc, 4)}</div>`; })()}
     </div>
   </div>
 
@@ -4442,8 +4439,9 @@ ${NAV_HTML}
   <table>
     <tr><th>Parameter</th><th style="color:#30363d">Default</th><th>Value</th><th>Description</th><th>Example</th></tr>
     ${field('maxLiveCapitalUsdc', c.maxLiveCapitalUsdc, 25000, 'Max live capital ($)', 'Safety cap. Bot refuses to start if wallet exceeds this.', 'At $25k: accommodates grown portfolio. At $500: stops on accidental deposits.')}
-    ${field('solReserve', c.solReserve, 0.1, 'SOL reserve', 'Always kept for gas + rent. Never deposited.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
-    ${field('usdcReserve', c.usdcReserve, 1, 'USDC reserve ($)', 'Minimum USDC always in wallet.', 'At $5: more buffer. At $0: risk token account errors.')}
+    ${field('solReserveFloor', c.solReserveFloor, 0.1, 'SOL reserve floor', 'Phase 19: floor — dynamic value = max(floor, capital × 0.17%). Always kept for gas + rent.', 'At 0.2: more buffer for rapid rebalancing (~$17 idle).')}
+    ${field('usdcReserveFloor', c.usdcReserveFloor, 5, 'USDC reserve floor ($)', 'Phase 19: floor — dynamic value = max(floor, capital × 0.02%).', 'At $5: more buffer. At $0: risk token account errors.')}
+    ${field('pauseThresholdUsdc', c.pauseThresholdUsdc, 100, 'Pause threshold ($)', 'Bot pauses operations when wallet equity falls below this.', 'At $100: default safety floor. Raise to 500 for tighter guard.')}
     ${field('minPositionSizeUsdc', c.minPositionSizeUsdc, 100, 'Min position size ($)', 'Won&#39;t open below this. Prevents dust positions.', 'At $500: only meaningful positions. At $50: allows small deploys.')}
   </table>
 </div>
@@ -4457,7 +4455,7 @@ ${NAV_HTML}
     ${field('autoDeployCooldownMinutes', c.autoDeployCooldownMinutes, 30, 'Cooldown (min)', 'Minimum time between deployments.', 'At 15 min: faster cleanup of swap leftovers. At 60: less activity.')}
     ${field('minIdleUsdc', c.minIdleUsdc, 5, 'Min idle USDC ($)', 'Min idle USDC after reserve to trigger deploy.', 'At $20: ignores small amounts. At $1: deploys tiny leftovers.')}
     ${field('minIdleSol', c.minIdleSol, 0.05, 'Min idle SOL', 'Min idle SOL after reserve to trigger deploy.', 'At 0.5 SOL (~$42): only meaningful amounts. At 0.01: deploys dust.')}
-    ${field('minDeployUsdc', c.minDeployUsdc, 10, 'Min deploy ($)', 'Min total deployable value to trigger.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
+    ${field('minDeployUsdcFloor', c.minDeployUsdcFloor, 50, 'Min deploy floor ($)', 'Phase 19: floor — dynamic value = max(floor, capital × 2.0%). Min total deployable value to trigger auto-deploy.', 'At $50: only worthwhile deploys. At $5: deploys very small amounts.')}
     ${field('deployRatioTolerance', c.deployRatioTolerance, 0.02, 'Price ratio tolerance', 'Max deviation from geometric mean (0-1). Wider = more deploy opportunities.', 'At 0.05: deploys even near range edges. At 0.01: only near center.')}
   </table>
 </div>
@@ -4557,7 +4555,7 @@ ${NAV_HTML}
       <td style="padding:6px 8px;color:#8b949e;font-size:11px">Maintain target SOL/USDC split in idle wallet per regime. Triggers once per regime change.</td>
       <td style="padding:6px 8px;color:#8b949e;font-size:11px">Off: idle capital stays as-is. On: rebalances on regime change.</td>
     </tr>
-    ${field('idleRebalanceMinUsdc', c.idleRebalanceMinUsdc, 100, 'Min idle value ($)', 'Only trigger if total idle value exceeds this threshold.', 'At $50: triggers on smaller amounts. At $200: only large idle balances.')}
+    ${field('idleRebalanceMinUsdcFloor', c.idleRebalanceMinUsdcFloor, 50, 'Min idle value floor ($)', 'Phase 19: floor — dynamic value = max(floor, capital × 1.2%). Only trigger idle rebalance if total idle value exceeds this threshold.', 'At $50: triggers on smaller amounts. At $200: only large idle balances.')}
     ${field('idleRebalanceSolKeep', c.idleRebalanceSolKeep, 0.15, 'SOL to keep', 'Always keep this much SOL for gas regardless of target.', 'At 0.05: minimal gas reserve. At 0.5: more SOL kept back.')}
     ${field('idleRebalanceDeviationPct', c.idleRebalanceDeviationPct, 0.20, 'Deviation trigger', 'Only rebalance if wallet is more than this % off the regime target.', 'At 0.10: triggers more often. At 0.30: only large imbalances.')}
     ${field('idleTargetSolPctRanging', c.idleTargetSolPctRanging, 0.50, 'RANGING target SOL %', 'Target SOL share of idle wallet in RANGING. 0.50 = balanced.', 'At 0.40: slight USDC bias. At 0.60: slight SOL bias.')}

@@ -23,10 +23,12 @@ const USDC_DECIMALS = 6;
 function getLiquiditySlippage(): Percentage { return Percentage.fromFraction(runtime.liquiditySlippageBps ?? 100, 10000); }
 function getSwapBuffer(): number { return 1 + runtime.swapBufferPct / 100; }
 
-// Dynamic reserves — read from runtime config (updated via /config page)
+// Dynamic reserves — Phase 19: read from live dyn state (wallet-aware).
+// Falls back to the floor when main cycle hasn't computed yet (startup / pre-cycle).
 import { runtime } from '../config.js';
-function getSolReserve(): number { return runtime.solReserve; }
-function getUsdcReserve(): number { return runtime.usdcReserve; }
+import { getCurrentDyn } from '../engine/dynamicScaling.js';
+function getSolReserve(): number { return getCurrentDyn().solReserveSol ?? runtime.solReserveFloor; }
+function getUsdcReserve(): number { return getCurrentDyn().usdcReserveUsdc ?? runtime.usdcReserveFloor; }
 
 export interface LivePosition {
   positionMint: PublicKey;

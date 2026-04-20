@@ -33,15 +33,56 @@ export async function getWalletBalances(
   return { sol: lamports / LAMPORTS_PER_SOL, usdc, totalUsdc: 0, solPrice: 0 };
 }
 
-export function validateWalletForLive(sol: number, usdc: number, maxCapitalUsdc: number, solPrice = 150): void {
+export interface WalletValidationResult {
+  ok: boolean;
+  paused: boolean;
+  pauseReason?: string;
+  overCap: boolean;
+  walletEquityUsd: number;
+}
+
+export function validateWalletForLive(
+  sol: number,
+  usdc: number,
+  maxCapitalUsdc: number,
+  solPrice = 150,
+  pauseThresholdUsdc = 100,
+): WalletValidationResult {
   const estimatedTotal = sol * solPrice + usdc;
-  if (estimatedTotal > maxCapitalUsdc) {
-    throw new Error(
-      `Wallet balance (~$${estimatedTotal.toFixed(0)}) exceeds safety cap ($${maxCapitalUsdc}). ` +
-      `Reduce balance or increase MAX_LIVE_CAPITAL_USDC.`,
-    );
-  }
+
+  // Hard refusal: insufficient SOL for fees. Without this the bot can't even
+  // sign transactions, so pause is meaningless — abort.
   if (sol < 0.01) {
     throw new Error('Insufficient SOL for transaction fees (need at least 0.01 SOL).');
   }
+
+  // Phase 19: over-cap is no longer fatal. The bot operates with
+  // min(walletEquity, maxCap); excess sits in the wallet untouched.
+  const overCap = estimatedTotal > maxCapitalUsdc;
+  if (overCap) {
+    console.log(JSON.stringify({
+      level: 'info',
+      msg: `[Wallet] Balance ~$${estimatedTotal.toFixed(0)} exceeds cap $${maxCapitalUsdc}. Operating on $${maxCapitalUsdc}; excess $${(estimatedTotal - maxCapitalUsdc).toFixed(0)} held idle.`,
+      timestamp: Date.now(),
+    }));
+  }
+
+  // Phase 19: below pauseThreshold, bot pauses gracefully (no ops) rather
+  // than crashing or operating at unsafe dust amounts.
+  if (estimatedTotal < pauseThresholdUsdc) {
+    console.log(JSON.stringify({
+      level: 'warn',
+      msg: `[Wallet] Balance ~$${estimatedTotal.toFixed(2)} below pause threshold $${pauseThresholdUsdc}. Bot will pause (no operations) until funded.`,
+      timestamp: Date.now(),
+    }));
+    return {
+      ok: true,
+      paused: true,
+      pauseReason: 'wallet_below_pause_threshold',
+      overCap,
+      walletEquityUsd: estimatedTotal,
+    };
+  }
+
+  return { ok: true, paused: false, overCap, walletEquityUsd: estimatedTotal };
 }
