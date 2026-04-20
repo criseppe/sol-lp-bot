@@ -1074,41 +1074,40 @@ async function main() {
               ? (price.price - livePos.entryPrice) * (positionSol + balances.sol)
               : null,
             swapDrift: (() => {
-              // Source: swap_ledger_onchain. Window: [entryTime − 120s, now], which
-              // captures the pre-open swap (typically entryTime − 5..30s) plus every
-              // rebalance swap during the active position. The 120s pre-open window
-              // is a fallback because rebalance_events has no tx_signature column to
-              // join against; any unrelated bot swap in that narrow window would be
-              // rare in practice. If the Helius on-chain indexer hasn't caught up
-              // yet, the query returns 0 rows → null → card shows "--".
+              // Source: swap_ledger (bot's own real-time swap log). Written inline by
+              // the swap executor so there is no indexer lag, unlike swap_ledger_onchain
+              // which is populated asynchronously by the Helius reconciler and can lag
+              // by hours. Window: [entryTime − 120s, now] — captures the pre-open swap
+              // (typically entryTime − 5..30s) plus every rebalance during the active
+              // position. The 120s pre-open lookback is the fallback the spec allows
+              // because rebalance_events has no tx_signature column to join on.
               if (!livePos?.entryTime) return null;
-              const windowStartSec = Math.floor((livePos.entryTime - 120_000) / 1000);
+              const windowStartMs = livePos.entryTime - 120_000;
               try {
                 const rows = db.prepare(
-                  `SELECT direction, sol_delta, usdc_delta, implied_price
-                   FROM swap_ledger_onchain
-                   WHERE block_time >= ?
-                   ORDER BY block_time ASC`,
-                ).all(windowStartSec) as Array<{
-                  direction: string; sol_delta: number; usdc_delta: number; implied_price: number;
+                  `SELECT direction, sol_amount, usdc_amount, price
+                   FROM swap_ledger
+                   WHERE timestamp >= ?
+                   ORDER BY timestamp ASC`,
+                ).all(windowStartMs) as Array<{
+                  direction: string; sol_amount: number; usdc_amount: number; price: number;
                 }>;
                 if (rows.length === 0) return null;
                 let solBought = 0, usdcSpent = 0, buyUsdAtPrice = 0, buyCount = 0;
                 let solSold = 0, usdcReceived = 0, sellUsdAtPrice = 0, sellCount = 0;
                 for (const r of rows) {
-                  if (r.direction === 'BUY_SOL') {
-                    const sol = Math.abs(r.sol_delta);
-                    const usdc = Math.abs(r.usdc_delta);
+                  const dir = (r.direction || '').toLowerCase();
+                  const sol = Math.abs(r.sol_amount);
+                  const usdc = Math.abs(r.usdc_amount);
+                  if (dir === 'buy_sol') {
                     solBought += sol;
                     usdcSpent += usdc;
-                    buyUsdAtPrice += sol * r.implied_price;
+                    buyUsdAtPrice += sol * r.price;
                     buyCount++;
-                  } else if (r.direction === 'SELL_SOL') {
-                    const sol = Math.abs(r.sol_delta);
-                    const usdc = Math.abs(r.usdc_delta);
+                  } else if (dir === 'sell_sol') {
                     solSold += sol;
                     usdcReceived += usdc;
-                    sellUsdAtPrice += sol * r.implied_price;
+                    sellUsdAtPrice += sol * r.price;
                     sellCount++;
                   }
                 }

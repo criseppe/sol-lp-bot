@@ -2607,7 +2607,7 @@ ${defensiveBannerHtml}
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Swap Drift (this position)</div>
         ${live.swapDrift == null
           ? `<div style="font-size:20px;font-weight:bold;color:#8b949e">--</div>
-             <div style="font-size:11px;color:#8b949e">no on-chain swaps indexed</div>`
+             <div style="font-size:11px;color:#8b949e">no swaps yet</div>`
           : (() => {
               const d = live.swapDrift;
               const col = d.swapPnl < 0 ? '#ef4444' : '#22c55e';
