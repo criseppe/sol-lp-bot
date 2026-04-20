@@ -58,7 +58,6 @@ export interface RegimeParams {
   deployRatioTolerance: number; // max price deviation from range center for auto-deploy (0-1)
   basisGateThreshold: number; // price must be >= basis * threshold to open (e.g. 0.999 = 0.1% buffer)
   proximityDeployThreshold: number; // max proximity to lower bound before auto-deploy skips (0-1)
-  reserveFloorPct: number; // reserve floor as fraction of portfolio (0-1)
   solConvertBasisMultiplier: number; // price must be >= basis × this (per-regime) before SolConvert fires (non-decay path)
   progressiveBasisDecayStartHours: number;    // per-regime grace period before decay starts
   progressiveBasisDecayPerInterval: number;   // per-regime decrement per interval (0.001 = 0.1%)

@@ -192,20 +192,18 @@ export function checkAutoDeploy(opts: {
   minIdleSol: number;
   minDeployUsdc: number;
   deployRatioTolerance: number;
-  reserveFloor: number;
 }): AutoDeployCheck {
   const {
     currentPrice, priceLower, priceUpper,
     walletSol, walletUsdc, positionValueUsdc,
     regime, params, lastDeployTime, now, enabled,
     minIdleUsdc, minIdleSol, minDeployUsdc, deployRatioTolerance,
-    reserveFloor,
   } = opts;
 
   // Phase 19: dynamic SOL reserve (falls back to floor before first cycle)
   const solReserve = getCurrentDyn().solReserveSol ?? runtime.solReserveFloor;
   const idleSol = Math.max(0, walletSol - solReserve);
-  const idleUsdcRaw = Math.max(0, walletUsdc - reserveFloor);
+  const idleUsdcRaw = walletUsdc;
   const idleUsdc = idleSol * currentPrice + idleUsdcRaw;
   const idealPrice = Math.sqrt(priceLower * priceUpper);
   const totalValueUsdc = idleUsdc + positionValueUsdc;

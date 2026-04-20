@@ -332,26 +332,22 @@ export class LiveExecutor {
           console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] Post-upside SOL buy skipped — price $${currentPrice.toFixed(2)} > basis cap $${postUpsideCap.toFixed(2)} (basis $${basisForCap.toFixed(2)} × ${(1 + maxBuyAboveBasis).toFixed(3)}). Opening SOL-constrained to protect cost basis.`, timestamp: Date.now() }));
           // Fall through to deposit with available SOL/USDC — do NOT enter the buy/skip-by-floor branch.
         } else {
-        // Need more SOL — buy with USDC. Partial-buy: swap as much as the floor allows
-        // instead of all-or-nothing. Post-upside relaxes floor (default 50%) for fuller deployment.
-        const reserveFloorBuy = this.getReserveFloor ? this.getReserveFloor() : 0;
-        const floorMultiplier = this.isPostUpsideOpen ? runtime.postUpsideFloorMultiplier : 1.0;
-        const effectiveFloor = reserveFloorBuy * floorMultiplier;
+        // Need more SOL — buy with USDC. Partial-buy: swap as much as free USDC allows
+        // (minus the ATA dust already subtracted via getUsdcReserve()). Reserve floor
+        // concept removed in Phase 20 — only dust + idealUsdc side of deposit are held back.
         const fullSwapUsdc = solDeficit * currentPrice * 0.95;
-        const usdcAvailableForSwap = Math.max(0, usdcBal - idealUsdc - effectiveFloor);
+        const usdcAvailableForSwap = Math.max(0, usdcBal - idealUsdc - getUsdcReserve());
         const hardCap = Math.max(0, usdcAvailable - 2);
         const usdcToSwap = Math.min(fullSwapUsdc, usdcAvailableForSwap, hardCap);
 
         if (usdcToSwap < 50) {
-          console.log(JSON.stringify({ level: 'warn', msg: `[PreOpen] Insufficient USDC above floor for SOL buy: wallet $${usdcBal.toFixed(0)} − idealUsdc $${idealUsdc.toFixed(0)} − floor $${effectiveFloor.toFixed(0)} = $${usdcAvailableForSwap.toFixed(0)} (need ≥$50). Depositing with available ratio instead.`, timestamp: Date.now() }));
-          alertFloorCheckBlocked({ usdcRemaining: usdcAvailableForSwap, floor: effectiveFloor, regime: this.getCurrentRegime?.() ?? 'UNKNOWN', price: currentPrice });
+          console.log(JSON.stringify({ level: 'warn', msg: `[PreOpen] Insufficient USDC for SOL buy: wallet $${usdcBal.toFixed(0)} − idealUsdc $${idealUsdc.toFixed(0)} − dust $${getUsdcReserve().toFixed(0)} = $${usdcAvailableForSwap.toFixed(0)} (need ≥$50). Depositing with available ratio instead.`, timestamp: Date.now() }));
+          alertFloorCheckBlocked({ usdcRemaining: usdcAvailableForSwap, floor: getUsdcReserve(), regime: this.getCurrentRegime?.() ?? 'UNKNOWN', price: currentPrice });
         } else {
           const solToBuy = usdcToSwap / currentPrice;
           const isPartial = usdcToSwap < fullSwapUsdc - 0.01;
           const usdcAfterBuy = usdcBal - usdcToSwap - idealUsdc;
-          const floorLabel = this.isPostUpsideOpen ? `relaxed floor $${effectiveFloor.toFixed(0)}` : `floor $${reserveFloorBuy.toFixed(0)}`;
-          const modeLabel = this.isPostUpsideOpen ? ' (post-upside relaxed floor)' : '';
-          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL buy: ${isPartial ? 'PARTIAL' : 'FULL'} — ${solToBuy.toFixed(3)} SOL ($${usdcToSwap.toFixed(2)})${modeLabel}. Ideal deficit: ${solDeficit.toFixed(2)} SOL ($${fullSwapUsdc.toFixed(0)}). USDC after: $${usdcAfterBuy.toFixed(0)} (${floorLabel}).`, timestamp: Date.now() }));
+          console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL buy: ${isPartial ? 'PARTIAL' : 'FULL'} — ${solToBuy.toFixed(3)} SOL ($${usdcToSwap.toFixed(2)}). Ideal deficit: ${solDeficit.toFixed(2)} SOL ($${fullSwapUsdc.toFixed(0)}). USDC after: $${usdcAfterBuy.toFixed(0)} (dust $${getUsdcReserve().toFixed(0)}).`, timestamp: Date.now() }));
           await this.doSwap(MINTS.USDC, MINTS.SOL, Math.floor(usdcToSwap * 1e6), `Pre-open: ${isPartial ? 'partial' : 'full'} USDC -> SOL (${solToBuy.toFixed(2)} SOL of ${solDeficit.toFixed(2)} needed)`);
           await new Promise(r => setTimeout(r, 4000));
           solBal = await this.getSolBalance();
@@ -408,9 +404,8 @@ export class LiveExecutor {
           }
         }
 
-        const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
-        const availableUsdc = Math.max(0, usdcAvailable - reserveFloor);
-        console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL-heavy wallet — depositing SOL-constrained. Wallet USDC: $${usdcAvailable.toFixed(2)}, Reserve floor: $${reserveFloor.toFixed(2)}, Available for deposit: $${availableUsdc.toFixed(2)}`, timestamp: Date.now() }));
+        const availableUsdc = usdcAvailable;
+        console.log(JSON.stringify({ level: 'info', msg: `[PreOpen] SOL-heavy wallet — depositing SOL-constrained. Wallet USDC: $${usdcAvailable.toFixed(2)}, Available for deposit: $${availableUsdc.toFixed(2)}`, timestamp: Date.now() }));
         if (!sellExecuted && basis > 0 && currentPrice > basis) {
           alertShadowSell({ solAmount: excessSol, usdcValue: excessUsd, price: currentPrice, marginPct, basis, regime: this.getCurrentRegime?.() ?? 'UNKNOWN' });
         }
@@ -994,18 +989,13 @@ export class LiveExecutor {
     let solAvailable = Math.max(0, solBal - solReserve);
     let usdcAvailable = Math.max(0, usdcBal - usdcReserve);
 
-    // Reserve-aware idle capital check — match rules.ts formula: idle = SOL value + USDC above floor.
-    // Why: rules.ts greenlights deploy based on total idle (SOL+USDC); executor must use the same
-    // measure or dashboard "idle capital" disagrees with what auto-deploy actually evaluates.
-    const reserveFloor = this.getReserveFloor ? this.getReserveFloor() : 0;
-    const idleUsdcRaw = Math.max(0, usdcBal - reserveFloor);
+    // Idle capital = SOL value + all wallet USDC (reserve concept removed, Phase 20).
+    const idleUsdcRaw = usdcBal;
     const idleUsdc = solAvailable * currentPrice + idleUsdcRaw;
     if (idleUsdc < 100) {
-      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — insufficient idle capital. Wallet USDC: $${usdcBal.toFixed(2)}, Floor: $${reserveFloor.toFixed(2)}, USDC above floor: $${idleUsdcRaw.toFixed(2)}, SOL value: $${(solAvailable * currentPrice).toFixed(2)}, Total idle: $${idleUsdc.toFixed(2)}`, timestamp: Date.now() }));
+      console.log(JSON.stringify({ level: 'info', msg: `[AutoDeploy] Skipped — insufficient idle capital. Wallet USDC: $${usdcBal.toFixed(2)}, SOL value: $${(solAvailable * currentPrice).toFixed(2)}, Total idle: $${idleUsdc.toFixed(2)}`, timestamp: Date.now() }));
       return null;
     }
-    // Cap usdcAvailable at USDC-only above floor (SOL portion is handled via solAvailable separately)
-    usdcAvailable = Math.min(usdcAvailable, idleUsdcRaw);
 
     // Proximity guard — don't deploy capital near range edges (about to exit).
     // Formula B (centre-relative): proxB = max(0, (centre - price) / halfWidth).

@@ -246,7 +246,7 @@ export const runtime = {
 const REGIME_KEYS = ['RANGING', 'BULLISH_TREND', 'BEARISH_TREND', 'EXTREME'] as const;
 const REGIME_PARAM_FIELDS: (keyof RegimeParams)[] = [
   'rangeWidthPct', 'skewDown', 'skewUp', 'proxThresholdLower', 'proxThresholdUpper',
-  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold', 'reserveFloorPct',
+  'deployPct', 'solReentrySplit', 'harvestIntervalDays', 'harvestSolConvertPct', 'usdcDepositPct', 'deployRatioTolerance', 'basisGateThreshold', 'proximityDeployThreshold',
   'solConvertBasisMultiplier',
   'progressiveBasisDecayStartHours', 'progressiveBasisDecayPerInterval', 'progressiveBasisDecayMinThreshold',
 ];

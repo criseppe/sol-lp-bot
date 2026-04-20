@@ -18,7 +18,7 @@ export const REGIME_PARAMS = {
     skewUp:               0.70,
     proxThresholdLower:   0.72,
     proxThresholdUpper:   0.88,
-    deployPct:            1.00,
+    deployPct:            0.90,
     solReentrySplit:      0.50,
     harvestIntervalDays:  7,
     harvestSolConvertPct: 0.50,
@@ -26,7 +26,6 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.020,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.55,
-    reserveFloorPct: 0.10,
     solConvertBasisMultiplier: 1.000,
     progressiveBasisDecayStartHours: 0.25,     // 15 min grace
     progressiveBasisDecayPerInterval: 0.001,   // 0.1% per interval
@@ -38,7 +37,7 @@ export const REGIME_PARAMS = {
     skewUp:               0.75,
     proxThresholdLower:   0.80,
     proxThresholdUpper:   0.92,
-    deployPct:            0.85,
+    deployPct:            0.88,
     solReentrySplit:      0.50,
     harvestIntervalDays:  4,
     harvestSolConvertPct: 0.70,
@@ -46,7 +45,6 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.035,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.60,
-    reserveFloorPct: 0.12,
     solConvertBasisMultiplier: 1.010,
     progressiveBasisDecayStartHours: 0.50,     // 30 min grace — dips likely reverse
     progressiveBasisDecayPerInterval: 0.0005,  // 0.05% per interval — slow
@@ -58,7 +56,7 @@ export const REGIME_PARAMS = {
     skewUp:               0.55,
     proxThresholdLower:   0.55,
     proxThresholdUpper:   0.82,
-    deployPct:            0.75,
+    deployPct:            0.82,
     solReentrySplit:      0.30,
     harvestIntervalDays:  2,
     harvestSolConvertPct: 1.00,
@@ -66,7 +64,6 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.030,
     basisGateThreshold:   0.992,
     proximityDeployThreshold: 0.45,
-    reserveFloorPct: 0.18,
     solConvertBasisMultiplier: 1.005,
     progressiveBasisDecayStartHours: 0.083,    // 5 min grace — dips likely persist
     progressiveBasisDecayPerInterval: 0.002,   // 0.2% per interval — fast
@@ -78,7 +75,7 @@ export const REGIME_PARAMS = {
     skewUp:               0.50,
     proxThresholdLower:   0.50,
     proxThresholdUpper:   0.80,
-    deployPct:            0.25,
+    deployPct:            0.40,
     solReentrySplit:      0.20,
     harvestIntervalDays:  1,
     harvestSolConvertPct: 1.00,
@@ -86,7 +83,6 @@ export const REGIME_PARAMS = {
     deployRatioTolerance: 0.050,
     basisGateThreshold:   0.995,
     proximityDeployThreshold: 0.40,
-    reserveFloorPct: 0.20,
     solConvertBasisMultiplier: 1.000,
     progressiveBasisDecayStartHours: 0.167,    // 10 min grace
     progressiveBasisDecayPerInterval: 0.0015,  // 0.15% per interval

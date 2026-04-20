@@ -2819,57 +2819,33 @@ ${defensiveBannerHtml}
   })() : ''}
 
   ${(() => {
-    const resCurrent = live.reserveCurrent ?? 0;
-    const resFloor = live.reserveFloor ?? 0;
-    const resState = live.reserveState ?? 'EMPTY';
-    const deficit = Math.max(0, resFloor - resCurrent);
-    const refillPct = resFloor > 0 ? Math.min(100, (resCurrent / resFloor) * 100) : 0;
+    // Reserve concept removed (Phase 20). Card now shows gas-reserve dust only.
+    const dyn = getCurrentDyn();
+    const solReserveSol = dyn.solReserveSol ?? 0;
+    const usdcDust = dyn.usdcReserveUsdc ?? 0;
+    const price = live.solPrice ?? 0;
+    const solReserveUsdc = solReserveSol * price;
+    const walletSol = live.solBalance ?? 0;
     const walletUsdc = live.usdcBalance ?? 0;
-    const aboveFloor = walletUsdc - resFloor;
-    const stateColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
-    const stateBg = resState === 'FULL' ? 'rgba(34,197,94,0.15)' : resState === 'REFILLING' ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.15)';
-    const barColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
-    const borderColor = resState === 'FULL' ? '#22c55e' : resState === 'REFILLING' ? '#eab308' : '#ef4444';
-    const aboveFloorColor = aboveFloor >= 0 ? '#22c55e' : '#ef4444';
-    const aboveFloorSign = aboveFloor >= 0 ? '+' : '-';
-    const aboveFloorLabel = aboveFloor >= 0 ? 'Above floor' : 'Below floor';
-    const lastUpdatedStr = live.reserveLastUpdated > 0
-      ? new Date(live.reserveLastUpdated).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Berlin' })
-      : '—';
-    return `<div class="card full" style="border-color:${borderColor}">
-      <h2>Reserve Monitor</h2>
+    return `<div class="card full" style="border-color:#30363d">
+      <h2>Gas Reserve</h2>
       <div class="m-stack-3" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 12px;font-size:12px;margin-bottom:8px">
         <div style="text-align:center">
-          <div style="color:#8b949e;font-size:10px">Reserve</div>
-          <div style="color:#c9d1d9;font-weight:bold">$${fmt(resCurrent)}</div>
+          <div style="color:#8b949e;font-size:10px">SOL reserve</div>
+          <div style="color:#c9d1d9;font-weight:bold">${solReserveSol.toFixed(3)} SOL</div>
+          <div style="color:#8b949e;font-size:10px">($${fmt(solReserveUsdc, 0)})</div>
         </div>
         <div style="text-align:center">
-          <div style="color:#8b949e;font-size:10px">Floor</div>
-          <div style="color:#c9d1d9;font-weight:bold">$${fmt(resFloor, 0)}</div>
+          <div style="color:#8b949e;font-size:10px">USDC dust</div>
+          <div style="color:#c9d1d9;font-weight:bold">$${fmt(usdcDust, 0)}</div>
         </div>
         <div style="text-align:center">
-          <div style="color:#8b949e;font-size:10px">State</div>
-          <div style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:bold;color:${stateColor};background:${stateBg}">${resState}</div>
+          <div style="color:#8b949e;font-size:10px">Wallet</div>
+          <div style="color:#c9d1d9;font-weight:bold">${walletSol.toFixed(2)} SOL</div>
+          <div style="color:#8b949e;font-size:10px">$${fmt(walletUsdc, 0)} USDC</div>
         </div>
       </div>
-      <div style="background:#21262d;border-radius:4px;height:16px;overflow:hidden;position:relative;margin-bottom:4px">
-        <div style="background:${barColor};height:100%;width:${refillPct.toFixed(1)}%;border-radius:4px;transition:width 0.3s"></div>
-        <div style="position:absolute;top:0;left:0;right:0;text-align:center;font-size:10px;line-height:16px;color:#c9d1d9">$${fmt(resCurrent, 0)} of $${fmt(resFloor, 0)} (${refillPct.toFixed(1)}%)</div>
-      </div>
-      <div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px;margin-top:8px">
-        <div style="display:flex;justify-content:space-between">
-          <span style="color:#8b949e">Wallet USDC</span>
-          <span style="color:#c9d1d9">$${fmt(walletUsdc, 0)}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between">
-          <span style="color:#8b949e">${aboveFloorLabel}</span>
-          <span style="color:${aboveFloorColor};font-weight:bold">${aboveFloorSign}$${fmt(Math.abs(aboveFloor), 0)}</span>
-        </div>
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px">
-        <span style="color:#8b949e">Updated</span>
-        <span style="color:#8b949e">${lastUpdatedStr} CET</span>
-      </div>
+      <div style="font-size:11px;color:#8b949e;margin-top:6px">Regime reserve floor removed — idle capital deployed directly per regime deployPct.</div>
     </div>`;
   })()}
 
@@ -4244,7 +4220,6 @@ function renderConfigHtml(): string {
     { key: 'deployRatioTolerance', label: 'Deploy ratio tolerance', desc: 'Max price deviation from midpoint for auto-deploy to fire (0-1).', ex: '0.020→0.050: deploys even near range edges. At 0.01: only near center.' },
     { key: 'basisGateThreshold', label: 'Basis gate threshold', desc: 'Price must be >= basis × threshold to open position. Lower = more permissive.', ex: '0.999 = 0.1% buffer. 0.995 = 0.5% buffer. 0.992 = 0.8% buffer.' },
     { key: 'proximityDeployThreshold', label: 'Prox deploy threshold', desc: 'Max proximity to lower bound before auto-deploy pauses (0-1).', ex: '0.40→0.55: deploys closer to edge. 0.40: pauses when 40% to lower bound.' },
-    { key: 'reserveFloorPct', label: 'Reserve floor %', desc: 'Reserve floor as fraction of total portfolio. Higher = more USDC held back from deployment.', ex: '0.10 = 10% reserve. 0.18 = 18%. 0.20 = 20%. Higher in bearish regimes for safety.' },
     { key: 'solConvertBasisMultiplier', label: 'SolConvert basis mult', desc: 'Price must be > basis x this to fire SolConvert in this regime. 1.000 = sell at basis, 1.025 = 2.5% profit required.', ex: '1.000 permissive. 1.005 = 0.5% margin. 1.025 = tight gate for bearish regimes.' },
     { key: 'progressiveBasisDecayStartHours', label: 'Decay grace (h)', desc: 'Per-regime grace period (hours) below basis before progressive decay activates. Overrides global.', ex: '0.25 = decay starts after 15 min. 1.0 = 1h grace. 0 = immediate.' },
     { key: 'progressiveBasisDecayPerInterval', label: 'Decay per interval', desc: 'Per-regime decay step each interval. 0.001 = 0.1% reduction per interval after grace.', ex: '0.001 = gentle. 0.005 = aggressive. Used by SolConvert threshold.' },
@@ -4980,7 +4955,7 @@ signals all point to the same conclusion.</div>
         { label: 'Capital Deploy (R5)', vals: [R.RANGING.deployPct, R.BULLISH_TREND.deployPct, R.BEARISH_TREND.deployPct, R.EXTREME.deployPct], fmt: pct },
         { label: 'Harvest (R6)', vals: [R.RANGING.harvestIntervalDays, R.BULLISH_TREND.harvestIntervalDays, R.BEARISH_TREND.harvestIntervalDays, R.EXTREME.harvestIntervalDays], fmt: (v: number) => `${v}d` },
         { label: 'SOL&#x2192;USDC Harvest', vals: [R.RANGING.harvestSolConvertPct, R.BULLISH_TREND.harvestSolConvertPct, R.BEARISH_TREND.harvestSolConvertPct, R.EXTREME.harvestSolConvertPct], fmt: pct },
-        { label: 'Reserve Floor', vals: [R.RANGING.reserveFloorPct, R.BULLISH_TREND.reserveFloorPct, R.BEARISH_TREND.reserveFloorPct, R.EXTREME.reserveFloorPct], fmt: pct },
+        { label: 'Reserve Floor', vals: [0, 0, 0, 0], fmt: pct },
         { label: 'Prox Deploy Threshold', vals: [R.RANGING.proximityDeployThreshold, R.BULLISH_TREND.proximityDeployThreshold, R.BEARISH_TREND.proximityDeployThreshold, R.EXTREME.proximityDeployThreshold], fmt: pct },
         { label: 'Basis Gate', vals: [R.RANGING.basisGateThreshold, R.BULLISH_TREND.basisGateThreshold, R.BEARISH_TREND.basisGateThreshold, R.EXTREME.basisGateThreshold], fmt: (v: number) => v.toFixed(3) },
       ];
@@ -5355,12 +5330,7 @@ exists and is earning fees.</div>
     <p style="margin-bottom:8px"><b>Dynamic Cap:</b> Cap = idleSolValue &divide; targetCycles. Target cycles scale by regime:
     RANGING&nbsp;=&nbsp;6 (fast), BULLISH&nbsp;=&nbsp;9, BEARISH&nbsp;=&nbsp;18, EXTREME&nbsp;=&nbsp;48 (conservative). Floor&nbsp;$200, ceiling&nbsp;$5000.</p>
     <p style="margin-bottom:8px"><b>Momentum Override:</b> In BEARISH/EXTREME, SolConvert normally blocked by regime gate. Override fires when price rises &ge;2% in 30&nbsp;minutes AND price is &ge;0.5% above cost basis. This captures recovery bounces without waiting for regime change.</p>
-    <p style="margin-bottom:8px"><b>Reserve Floor (regime-aware):</b>
-    RANGING&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.RANGING.reserveFloorPct * 100)}%,
-    BULLISH&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.BULLISH_TREND.reserveFloorPct * 100)}%,
-    BEARISH&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.BEARISH_TREND.reserveFloorPct * 100)}%,
-    EXTREME&nbsp;=&nbsp;${Math.round(REGIME_PARAMS.EXTREME.reserveFloorPct * 100)}%.
-    Reserve floor is recalculated each cycle based on total portfolio value &times; regime %. USDC below this floor is never deployed or swapped.</p>
+    <p style="margin-bottom:8px"><b>Reserve Floor:</b> REMOVED (Phase 20). Capital allocation now controlled solely by regime deployPct. Gas reserve preserved via solReserveSol.</p>
     <p style="margin-bottom:0"><b>Basis Gate (unified):</b>
     All regimes use ${REGIME_PARAMS.RANGING.basisGateThreshold} (${((1 - REGIME_PARAMS.RANGING.basisGateThreshold) * 100).toFixed(1)}% buffer) except BEARISH at ${REGIME_PARAMS.BEARISH_TREND.basisGateThreshold} (${((1 - REGIME_PARAMS.BEARISH_TREND.basisGateThreshold) * 100).toFixed(1)}% buffer).
     SOL sells are blocked when price is below basis &times; threshold.</p>

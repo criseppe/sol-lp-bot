@@ -462,17 +462,15 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
   if (portfolio < minPortfolioGate) return false;
   const solShare = (balances.sol * price) / portfolio;
   if (solShare < runtime.strategicRebalanceMinSolSharePct) return false;
-  const reserveFloor = getReserveState(db).floor;
-  const availableAboveFloor = Math.max(0, balances.usdc - reserveFloor);
-  if (availableAboveFloor >= dyn.minDeployUsdc) return false; // enough USDC to deploy normally
+  if (balances.usdc >= dyn.minDeployUsdc) return false; // enough USDC to deploy normally
 
   const targetUsdc = portfolio * (1 - runtime.strategicRebalanceTargetSolSharePct);
   const usdcGap = targetUsdc - balances.usdc;
   if (usdcGap < runtime.strategicRebalanceMinUsdcGain) return false;
 
-  // Ensure swap produces enough USDC to actually clear reserveFloor + minDeployUsdc.
+  // Ensure swap produces enough USDC to clear minDeployUsdc.
   // Without this floor, the max-portfolio-pct cap can bind and leave USDC still below deploy threshold.
-  const usdcNeeded = reserveFloor + dyn.minDeployUsdc - balances.usdc;
+  const usdcNeeded = dyn.minDeployUsdc - balances.usdc;
   const requiredUsdc = Math.max(usdcGap, usdcNeeded * 1.05); // 5% buffer over strict need
 
   const solNeeded = (requiredUsdc / price) * 1.01;                                       // +1% slippage buffer
@@ -485,9 +483,8 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
 
   // Warn if maxPortfolioPct cap binds below what we need to actually deploy next cycle
   const projectedUsdc = balances.usdc + (solToSell * price);
-  const projectedAvailable = projectedUsdc - reserveFloor;
-  if (projectedAvailable < dyn.minDeployUsdc) {
-    console.log(JSON.stringify({ level: 'warn', msg: `[StrategicRebalance] Warning: maxPortfolioPct cap binds, projected USDC $${projectedAvailable.toFixed(2)} insufficient for minDeployUsdc $${dyn.minDeployUsdc.toFixed(2)}. Consider raising strategicRebalanceMaxPortfolioPct.`, timestamp: now }));
+  if (projectedUsdc < dyn.minDeployUsdc) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[StrategicRebalance] Warning: maxPortfolioPct cap binds, projected USDC $${projectedUsdc.toFixed(2)} insufficient for minDeployUsdc $${dyn.minDeployUsdc.toFixed(2)}. Consider raising strategicRebalanceMaxPortfolioPct.`, timestamp: now }));
   }
 
   const reason = `Strategic rebalance: unstick SOL-heavy idle (share ${(solShare * 100).toFixed(0)}%, price $${price.toFixed(2)} < basis×${runtime.strategicRebalanceBasisMultiplier.toFixed(3)} $${basisFloor.toFixed(2)}, idle ${((now - strategicIdleStartTs) / 60000).toFixed(0)}min)`;
@@ -620,7 +617,7 @@ async function main() {
       if (!reserveSnap.floor || reserveSnap.floor === 0) {
         // First ever run — use wallet-only value as temporary floor
         // Will be corrected by in-cycle seed (Location 2) on first cycle
-        const floor = computeFloor(balances.totalUsdc, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
+        const floor = computeFloor(balances.totalUsdc);
         if (reserveSnap.current === 0) {
           const seed = Math.min(balances.usdc, floor);
           updateReserve(db, seed, floor);
@@ -875,7 +872,7 @@ async function main() {
 
       // Recalculate reserve floor if portfolio has grown/shrunk significantly
       const totalPortfolio = balances.sol * (balances.solPrice ?? 84) + balances.usdc + (pos ? pos.entrySol * (balances.solPrice ?? 84) + (pos.entryUsdc ?? 0) : 0);
-      checkReserveFloor(db, totalPortfolio, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
+      checkReserveFloor(db, totalPortfolio);
     }
   }
 
@@ -1300,7 +1297,7 @@ async function main() {
         const { pruneOldPriceTicks } = await import('./db/sqlite.js');
         pruneOldPriceTicks(db, 30);
         pruneOldData(db);
-        if (currentLiveData?.totalValueWithPosition) checkReserveFloor(db, currentLiveData.totalValueWithPosition, (runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime)).reserveFloorPct);
+        if (currentLiveData?.totalValueWithPosition) checkReserveFloor(db, currentLiveData.totalValueWithPosition);
         console.log(JSON.stringify({ level: 'info', msg: 'daily prune + reserve floor check', timestamp: now2 }));
       }
     } catch (err) {
@@ -2024,10 +2021,9 @@ async function runLiveCycle(price: number): Promise<void> {
           timestamp: now,
         }));
       }
-      // Update reserve floor for new regime
-      const newFloorPct = (runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime)).reserveFloorPct ?? 0.20;
+      // Reserve floor concept removed (Phase 20) — no-op retained for legacy callers
       if (currentLiveData?.totalValueWithPosition) {
-        checkReserveFloor(db, currentLiveData.totalValueWithPosition, newFloorPct);
+        checkReserveFloor(db, currentLiveData.totalValueWithPosition);
       }
       const dailyMetrics = closes.length >= 3 ? detectRegimeWithMetrics(closes, runtime.trendThreshold) : null;
       insertRegimeChange(db, {
@@ -2542,7 +2538,6 @@ async function runLiveCycle(price: number): Promise<void> {
         minIdleSol: runtime.minIdleSol,
         minDeployUsdc: dynamicScaling.getCurrentDyn().minDeployUsdc,
         deployRatioTolerance: params.deployRatioTolerance ?? runtime.deployRatioTolerance,
-        reserveFloor: getReserveState(db).floor,
       });
 
       if (deployCheck.shouldDeploy) {
@@ -2691,8 +2686,7 @@ async function runLiveCycle(price: number): Promise<void> {
         const scBalances = await getWalletBalances(conn, (liveExecutor as any).wallet.publicKey);
         const walletSolValue = scBalances.sol * price;
         const totalPortfolio = walletSolValue + scBalances.usdc;
-        const reserveFloor = getReserveState(db).floor;
-        const deployableUsdc = Math.max(0, scBalances.usdc - reserveFloor);
+        const deployableUsdc = scBalances.usdc;
         const params = runtime.regimeParams[liveRegime] ?? getRegimeParams(liveRegime);
         const positionSize = totalPortfolio * params.deployPct * (taDeployMultiplier ?? 1.0);
         const targetUsdcForDeploy = positionSize * (params.usdcDepositPct ?? 0.35);
@@ -3109,8 +3103,8 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   const totalWalletUsdc = balances.sol * price + balances.usdc;
   // Phase 19: dynamic reserves
   const dynAtOpen = dynamicScaling.getCurrentDyn();
-  const reserveUsdc = dynAtOpen.solReserveSol * price + dynAtOpen.usdcReserveUsdc;
-  const deployUsdc = Math.min(totalWalletUsdc * effectiveDeployPct, totalWalletUsdc - reserveUsdc);
+  const gasReserveUsdc = dynAtOpen.solReserveSol * price + dynAtOpen.usdcReserveUsdc;
+  const deployUsdc = Math.min(totalWalletUsdc * effectiveDeployPct, totalWalletUsdc - gasReserveUsdc);
   // Phase 19: dynamic minimum deploy threshold (scales with capital)
   const deployMinThresh = dynAtOpen.deployMinThresholdUsdc ?? runtime.deployMinThresholdUsdcFloor;
   if (deployUsdc < deployMinThresh) {
