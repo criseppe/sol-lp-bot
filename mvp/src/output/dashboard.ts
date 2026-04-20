@@ -126,6 +126,17 @@ export interface LiveData {
   // Unrealized USD delta on total SOL held (position + wallet) vs entry price.
   // Null when no position.
   solPriceImpact: number | null;
+  // Rebalancing swap drift across the life of the current position (includes
+  // pre-open swap captured via a 120s lookback). Null when no position or no
+  // on-chain swaps indexed for the window yet. swapPnl = ΣUSDC received on
+  // SELL legs − ΣUSDC spent on BUY legs.
+  swapDrift: {
+    swapPnl: number;
+    vwapBuy: number | null;
+    vwapSell: number | null;
+    buyCount: number;
+    sellCount: number;
+  } | null;
   estDailyFeesUsdc: number;
   estAprPct: number;
   actual24hFeesUsdc: number;
@@ -2412,9 +2423,10 @@ ${pool ? `<div class="card" style="margin-top:12px">
 .ctrl-blue{background:#2563eb;color:white}.ctrl-blue:hover{background:#1d4ed8}
 .stop-confirm{display:none;background:#1c1917;border:2px solid #dc2626;border-radius:8px;padding:16px;margin-top:12px;text-align:center}
 .ctrl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
-.pos-pnl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px}
-.pos-pnl-cell{text-align:center;padding:12px 0}
+.pos-pnl-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.pos-pnl-cell{text-align:center;padding:12px 6px}
 .pos-pnl-cell:not(:last-child){border-right:1px solid #21262d}
+@media(max-width:1100px){.pos-pnl-grid{grid-template-columns:1fr 1fr}.pos-pnl-cell:nth-child(odd){border-right:1px solid #21262d!important}.pos-pnl-cell:nth-child(even){border-right:none!important}.pos-pnl-cell{border-bottom:1px solid #21262d;padding:10px 4px}}
 .wallet-split{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:12px;border-top:1px solid #21262d;padding-top:12px}
 .wallet-half{text-align:center}
 .wallet-half:first-child{border-right:1px solid #21262d}
@@ -2583,13 +2595,29 @@ ${defensiveBannerHtml}
           : `<div style="font-size:20px;font-weight:bold;color:#ef4444">-$${fmt(live.gasSinceOpenUsdc, 4)}</div>
              <div style="font-size:11px;color:#8b949e">${fmt(live.gasSinceOpenSol ?? 0, 6)} SOL since open</div>`}
       </div>
-      <div class="pos-pnl-cell" style="border-right:none">
+      <div class="pos-pnl-cell">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">SOL Price Impact</div>
         ${live.solPriceImpact == null || live.entryPrice == null
           ? `<div style="font-size:20px;font-weight:bold;color:#8b949e">--</div>
              <div style="font-size:11px;color:#8b949e">no position</div>`
           : `<div style="font-size:20px;font-weight:bold;color:${live.solPriceImpact < 0 ? '#ef4444' : '#22c55e'}">${live.solPriceImpact < 0 ? '-' : '+'}$${fmt(Math.abs(live.solPriceImpact), 4)}</div>
              <div style="font-size:11px;color:#8b949e">SOL Δ vs entry ($${fmt(live.entryPrice)})</div>`}
+      </div>
+      <div class="pos-pnl-cell" style="border-right:none">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Swap Drift (this position)</div>
+        ${live.swapDrift == null
+          ? `<div style="font-size:20px;font-weight:bold;color:#8b949e">--</div>
+             <div style="font-size:11px;color:#8b949e">no on-chain swaps indexed</div>`
+          : (() => {
+              const d = live.swapDrift;
+              const col = d.swapPnl < 0 ? '#ef4444' : '#22c55e';
+              const sign = d.swapPnl < 0 ? '-' : '+';
+              const vwapBuyStr = d.vwapBuy != null ? `buy vwap $${fmt(d.vwapBuy)} (${d.buyCount})` : `buy — (0)`;
+              const vwapSellStr = d.vwapSell != null ? `sell vwap $${fmt(d.vwapSell)} (${d.sellCount})` : `sell — (0)`;
+              return `<div style="font-size:20px;font-weight:bold;color:${col}">${sign}$${fmt(Math.abs(d.swapPnl), 4)}</div>
+                      <div style="font-size:11px;color:#8b949e">${vwapBuyStr}</div>
+                      <div style="font-size:11px;color:#8b949e">${vwapSellStr}</div>`;
+            })()}
       </div>
     </div>
   </div>

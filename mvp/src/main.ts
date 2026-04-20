@@ -1073,6 +1073,57 @@ async function main() {
             solPriceImpact: (livePos?.entryPrice != null)
               ? (price.price - livePos.entryPrice) * (positionSol + balances.sol)
               : null,
+            swapDrift: (() => {
+              // Source: swap_ledger_onchain. Window: [entryTime − 120s, now], which
+              // captures the pre-open swap (typically entryTime − 5..30s) plus every
+              // rebalance swap during the active position. The 120s pre-open window
+              // is a fallback because rebalance_events has no tx_signature column to
+              // join against; any unrelated bot swap in that narrow window would be
+              // rare in practice. If the Helius on-chain indexer hasn't caught up
+              // yet, the query returns 0 rows → null → card shows "--".
+              if (!livePos?.entryTime) return null;
+              const windowStartSec = Math.floor((livePos.entryTime - 120_000) / 1000);
+              try {
+                const rows = db.prepare(
+                  `SELECT direction, sol_delta, usdc_delta, implied_price
+                   FROM swap_ledger_onchain
+                   WHERE block_time >= ?
+                   ORDER BY block_time ASC`,
+                ).all(windowStartSec) as Array<{
+                  direction: string; sol_delta: number; usdc_delta: number; implied_price: number;
+                }>;
+                if (rows.length === 0) return null;
+                let solBought = 0, usdcSpent = 0, buyUsdAtPrice = 0, buyCount = 0;
+                let solSold = 0, usdcReceived = 0, sellUsdAtPrice = 0, sellCount = 0;
+                for (const r of rows) {
+                  if (r.direction === 'BUY_SOL') {
+                    const sol = Math.abs(r.sol_delta);
+                    const usdc = Math.abs(r.usdc_delta);
+                    solBought += sol;
+                    usdcSpent += usdc;
+                    buyUsdAtPrice += sol * r.implied_price;
+                    buyCount++;
+                  } else if (r.direction === 'SELL_SOL') {
+                    const sol = Math.abs(r.sol_delta);
+                    const usdc = Math.abs(r.usdc_delta);
+                    solSold += sol;
+                    usdcReceived += usdc;
+                    sellUsdAtPrice += sol * r.implied_price;
+                    sellCount++;
+                  }
+                }
+                const swapPnl = sellUsdAtPrice - buyUsdAtPrice;
+                return {
+                  swapPnl,
+                  vwapBuy: solBought > 0 ? usdcSpent / solBought : null,
+                  vwapSell: solSold > 0 ? usdcReceived / solSold : null,
+                  buyCount,
+                  sellCount,
+                };
+              } catch {
+                return null;
+              }
+            })(),
             estDailyFeesUsdc,
             estAprPct,
             actual24hFeesUsdc,
