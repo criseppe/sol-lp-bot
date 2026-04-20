@@ -32,6 +32,14 @@ export const runtime = {
   pauseThresholdUsdc: 100,           // below this wallet equity the bot pauses (no ops)
   dynamicScalingEnabled: true,       // master switch; false → always use floors
 
+  // Phase 19B: additional 6 dynamic param floors
+  strategicRebalanceMinPortfolioUsdcFloor: 100,
+  solConvertMinAmountUsdcFloor: 50,
+  manualSwapDetectionMinSolFloor: 0.5,
+  manualSwapDetectionMinUsdcFloor: 10,
+  idleRebalanceMinImbalanceUsdcFloor: 5,
+  deployMinThresholdUsdcFloor: 5,
+
   // Auto Deploy
   autoDeployCheckMinutes: 5,
   autoDeployCheckIntervalSec: 10, // seconds between auto-deploy attempts (within main cycle)
@@ -284,6 +292,13 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
     if (vs === 'true' || vs === '1' || vs === 'false' || vs === '0') {
       runtime.dynamicScalingEnabled = (vs === 'true' || vs === '1');
     } }
+  // Phase 19B floors
+  const vSRMinP = nv('strategicRebalanceMinPortfolioUsdcFloor', 0, 100000); if (vSRMinP != null) runtime.strategicRebalanceMinPortfolioUsdcFloor = vSRMinP;
+  const vSCMinA = nv('solConvertMinAmountUsdcFloor', 0, 10000); if (vSCMinA != null) runtime.solConvertMinAmountUsdcFloor = vSCMinA;
+  const vMSSol = nv('manualSwapDetectionMinSolFloor', 0, 100); if (vMSSol != null) runtime.manualSwapDetectionMinSolFloor = vMSSol;
+  const vMSUsdc = nv('manualSwapDetectionMinUsdcFloor', 0, 10000); if (vMSUsdc != null) runtime.manualSwapDetectionMinUsdcFloor = vMSUsdc;
+  const vIRIm = nv('idleRebalanceMinImbalanceUsdcFloor', 0, 10000); if (vIRIm != null) runtime.idleRebalanceMinImbalanceUsdcFloor = vIRIm;
+  const vDMT = nv('deployMinThresholdUsdcFloor', 0, 10000); if (vDMT != null) runtime.deployMinThresholdUsdcFloor = vDMT;
 
   // Auto deploy
   const v10 = nv('autoDeployCheckMinutes', 1, 60); if (v10 != null) runtime.autoDeployCheckMinutes = v10;
@@ -535,6 +550,13 @@ export function exportConfig(): Record<string, string> {
   out['usdcReserve'] = String(runtime.usdcReserveFloor);       // deprecated alias
   out['pauseThresholdUsdc'] = String(runtime.pauseThresholdUsdc);
   out['dynamicScalingEnabled'] = String(runtime.dynamicScalingEnabled);
+  // Phase 19B floors
+  out['strategicRebalanceMinPortfolioUsdcFloor'] = String(runtime.strategicRebalanceMinPortfolioUsdcFloor);
+  out['solConvertMinAmountUsdcFloor'] = String(runtime.solConvertMinAmountUsdcFloor);
+  out['manualSwapDetectionMinSolFloor'] = String(runtime.manualSwapDetectionMinSolFloor);
+  out['manualSwapDetectionMinUsdcFloor'] = String(runtime.manualSwapDetectionMinUsdcFloor);
+  out['idleRebalanceMinImbalanceUsdcFloor'] = String(runtime.idleRebalanceMinImbalanceUsdcFloor);
+  out['deployMinThresholdUsdcFloor'] = String(runtime.deployMinThresholdUsdcFloor);
   out['minPositionSizeUsdc'] = String(runtime.minPositionSizeUsdc);
   out['autoDeployCheckMinutes'] = String(runtime.autoDeployCheckMinutes);
   out['autoDeployCooldownMinutes'] = String(runtime.autoDeployCooldownMinutes);

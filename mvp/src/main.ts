@@ -456,12 +456,12 @@ async function checkStrategicRebalance(price: number, currentPos: any): Promise<
   if (price >= basisFloor) return false; // SolConvert would fire instead
 
   const portfolio = balances.sol * price + balances.usdc;
-  if (portfolio < 100) return false;
-  const solShare = (balances.sol * price) / portfolio;
-  if (solShare < runtime.strategicRebalanceMinSolSharePct) return false;
-
   // Phase 19: dynamic thresholds snapshot for this check
   const dyn = dynamicScaling.getCurrentDyn();
+  const minPortfolioGate = dyn.strategicRebalanceMinPortfolioUsdc ?? runtime.strategicRebalanceMinPortfolioUsdcFloor;
+  if (portfolio < minPortfolioGate) return false;
+  const solShare = (balances.sol * price) / portfolio;
+  if (solShare < runtime.strategicRebalanceMinSolSharePct) return false;
   const reserveFloor = getReserveState(db).floor;
   const availableAboveFloor = Math.max(0, balances.usdc - reserveFloor);
   if (availableAboveFloor >= dyn.minDeployUsdc) return false; // enough USDC to deploy normally
@@ -1134,8 +1134,11 @@ async function main() {
             const totalUsdcDiff = balances.usdc - prevBalUsdc;
             const solDiff = totalSolDiff - botSolDeltaThisCycle;
             const usdcDiff = totalUsdcDiff - botUsdcDeltaThisCycle;
+            // Phase 19: dynamic manual-swap detection thresholds (scale with capital)
+            const manualSolThresh = dynamicScaling.getCurrentDyn().manualSwapDetectionMinSol ?? runtime.manualSwapDetectionMinSolFloor;
+            const manualUsdcThresh = dynamicScaling.getCurrentDyn().manualSwapDetectionMinUsdc ?? runtime.manualSwapDetectionMinUsdcFloor;
             // Manual SOL→USDC sell: SOL dropped, USDC increased (not from position close)
-            if (solDiff < -0.5 && usdcDiff > 10 && liveBotState === 'ACTIVE') {
+            if (solDiff < -manualSolThresh && usdcDiff > manualUsdcThresh && liveBotState === 'ACTIVE') {
               const solSold = Math.abs(solDiff);
               const usdcReceived = usdcDiff;
               const effectivePrice = usdcReceived / solSold;
@@ -1156,7 +1159,7 @@ async function main() {
               } catch (e) { console.log(JSON.stringify({ level: 'error', msg: `[FinancialOp] manual_sell_detect: ${String(e)}`, timestamp: Date.now() })); }
             }
             // Manual USDC→SOL buy: USDC dropped, SOL increased
-            if (usdcDiff < -10 && solDiff > 0.5 && liveBotState === 'ACTIVE') {
+            if (usdcDiff < -manualUsdcThresh && solDiff > manualSolThresh && liveBotState === 'ACTIVE') {
               const solBought = solDiff;
               const usdcSpent = Math.abs(usdcDiff);
               const effectivePrice = usdcSpent / solBought;
@@ -1780,10 +1783,18 @@ async function runLiveCycle(price: number): Promise<void> {
       opState,
       price,
       {
+        // Phase 19A
         minDeployUsdcFloor: runtime.minDeployUsdcFloor,
         solReserveFloor: runtime.solReserveFloor,
         idleRebalanceMinUsdcFloor: runtime.idleRebalanceMinUsdcFloor,
         usdcReserveFloor: runtime.usdcReserveFloor,
+        // Phase 19B
+        strategicRebalanceMinPortfolioUsdcFloor: runtime.strategicRebalanceMinPortfolioUsdcFloor,
+        solConvertMinAmountUsdcFloor: runtime.solConvertMinAmountUsdcFloor,
+        manualSwapDetectionMinSolFloor: runtime.manualSwapDetectionMinSolFloor,
+        manualSwapDetectionMinUsdcFloor: runtime.manualSwapDetectionMinUsdcFloor,
+        idleRebalanceMinImbalanceUsdcFloor: runtime.idleRebalanceMinImbalanceUsdcFloor,
+        deployMinThresholdUsdcFloor: runtime.deployMinThresholdUsdcFloor,
       },
       runtime.dynamicScalingEnabled,
     );
@@ -2725,8 +2736,10 @@ async function runLiveCycle(price: number): Promise<void> {
           const convertUsdc = Math.min(needed, maxFromSol, effectiveCap);
           const convertSol = convertUsdc / price;
 
-          if (convertUsdc < 50) {
-            console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: amount too small ($${convertUsdc.toFixed(2)} < $50 min)`, timestamp: now }));
+          // Phase 19: dynamic SolConvert minimum (floor-clamped percent of operating capital)
+          const solConvertMin = dynamicScaling.getCurrentDyn().solConvertMinAmountUsdc ?? runtime.solConvertMinAmountUsdcFloor;
+          if (convertUsdc < solConvertMin) {
+            console.log(JSON.stringify({ level: 'info', msg: `[SolConvert] Skipped: amount too small ($${convertUsdc.toFixed(2)} < $${solConvertMin.toFixed(2)} min)`, timestamp: now }));
           } else {
             const sellAllowed = !liveExecutor!.shouldAllowSwap || liveExecutor!.shouldAllowSwap('sell_sol', convertSol, price);
             if (!sellAllowed) {
@@ -2903,7 +2916,9 @@ async function runLiveCycle(price: number): Promise<void> {
               runtime.idleRebalanceMaxUsdc,
             );
             const usdcToSwap = Math.min(diffUsdc, idleUsdc, idleRebalanceCap);
-            if (usdcToSwap > 1 && diffUsdc > 5) {
+            // Phase 19: dynamic imbalance threshold (scales with capital)
+            const idleImbalanceMin = dynamicScaling.getCurrentDyn().idleRebalanceMinImbalanceUsdc ?? runtime.idleRebalanceMinImbalanceUsdcFloor;
+            if (usdcToSwap > 1 && diffUsdc > idleImbalanceMin) {
               // Defensive Downtrend Mode (Phase C) blocks USDC→SOL buys.
               if (defensiveState.active) {
                 console.log(JSON.stringify({ level: 'info', msg: `[DEFENSIVE] BLOCK: idle-rebal USDC→SOL blocked (trigger=${defensiveState.enteredTrigger}, deviation=${(Math.abs(deviation) * 100).toFixed(0)}%)`, timestamp: now }));
@@ -3096,8 +3111,10 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
   const dynAtOpen = dynamicScaling.getCurrentDyn();
   const reserveUsdc = dynAtOpen.solReserveSol * price + dynAtOpen.usdcReserveUsdc;
   const deployUsdc = Math.min(totalWalletUsdc * effectiveDeployPct, totalWalletUsdc - reserveUsdc);
-  if (deployUsdc < 5) {
-    console.log(JSON.stringify({ level: 'warn', msg: 'insufficient funds to open position', sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));
+  // Phase 19: dynamic minimum deploy threshold (scales with capital)
+  const deployMinThresh = dynAtOpen.deployMinThresholdUsdc ?? runtime.deployMinThresholdUsdcFloor;
+  if (deployUsdc < deployMinThresh) {
+    console.log(JSON.stringify({ level: 'warn', msg: `insufficient funds to open position: deployUsdc $${deployUsdc.toFixed(2)} < min $${deployMinThresh.toFixed(2)}`, sol: balances.sol, usdc: balances.usdc, timestamp: Date.now() }));
     return;
   }
 

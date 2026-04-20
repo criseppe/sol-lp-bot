@@ -13,7 +13,7 @@ import { type DailyPnlRow, type LiveSnapshotRow, type DailySummaryRow, getLiveSn
 import { Connection, PublicKey } from '@solana/web3.js';
 import { REGIME_PARAMS } from '../constants.js';
 import { runtime, exportConfig, applyConfigFromDb } from '../config.js';
-import { getCurrentDyn } from '../engine/dynamicScaling.js';
+import { getCurrentDyn, getCurrentOperatingState } from '../engine/dynamicScaling.js';
 import { renderWallet2Html } from './wallet2Html.js';
 
 const TZ = 'Europe/Berlin';
@@ -879,10 +879,15 @@ export function startDashboard(port: number): DashboardServer {
     // position close/reopen where the same fees get double-counted.
     // Step 1: compute raw hourly deltas — SOL valued at current price
     const hfCurrentPrice = currentLive?.solPrice ?? (daySnaps.length > 0 ? daySnaps[daySnaps.length - 1].price : 0);
+    // Phase 19: dynamic pending-fee sanity bound — max(1000, 10% of wallet equity).
+    // Small wallets keep a conservative absolute floor; large wallets scale up so
+    // legitimately high pending fees aren't treated as display bugs.
+    const walletEquityForBound = getCurrentOperatingState().walletEquity || 0;
+    const pendingFeeMax = Math.max(1000, walletEquityForBound * 0.1);
     const totalFn = (s: any) => {
       const pSol = (s.pending_fees_sol || 0);
       const pUsdc = (s.pending_fees_usdc || 0);
-      const skip = pSol * hfCurrentPrice > 1000; // skip bogus pending values
+      const skip = pSol * hfCurrentPrice > pendingFeeMax; // skip bogus pending values
       return (s.cum_fees_sol || 0) * hfCurrentPrice + (s.cum_fees_usdc || 0) + (skip ? 0 : pSol * hfCurrentPrice + pUsdc);
     };
     for (let i = 0; i < daySnaps.length; i++) {
