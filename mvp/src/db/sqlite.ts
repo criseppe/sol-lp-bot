@@ -50,6 +50,12 @@ export interface BotStateRow {
   defensive_entered_trigger?: string | null;
   defensive_entry_price_low?: number | null;
   defensive_cooldown_until?: number | null;
+  // Regime-Change Refresh (RCR)
+  marked_for_switch?: number;            // 0/1
+  mark_timestamp?: number | null;
+  mark_target_regime?: Regime | string | null;
+  entry_regime?: Regime | string | null;
+  last_switch_timestamp?: number | null;
 }
 
 export interface DailyPnlRow {
@@ -298,6 +304,13 @@ export function initDb(dbPath: string): Database.Database {
   migrate(`ALTER TABLE bot_state ADD COLUMN defensive_entry_price_low REAL`);
   migrate(`ALTER TABLE bot_state ADD COLUMN defensive_cooldown_until INTEGER`);
 
+  // Migration: Regime-Change Refresh (RCR) state
+  migrate(`ALTER TABLE bot_state ADD COLUMN marked_for_switch INTEGER DEFAULT 0`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN mark_timestamp INTEGER`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN mark_target_regime TEXT`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN entry_regime TEXT`);
+  migrate(`ALTER TABLE bot_state ADD COLUMN last_switch_timestamp INTEGER`);
+
   // Portfolio snapshots — 4-hourly value tracking for arcade page
   db.exec(`CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,8 +460,8 @@ export function upsertBotState(db: Database.Database, state: BotStateRow): void 
   // Preserve defensive_* columns if caller omits them (INSERT OR REPLACE would NULL them).
   const prior = getBotState(db);
   db.prepare(`
-    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts, defensive_active, defensive_entered_at, defensive_entered_price, defensive_entered_trigger, defensive_entry_price_low, defensive_cooldown_until)
-    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated, @last_upside_exit_price, @last_upside_exit_ts, @defensive_active, @defensive_entered_at, @defensive_entered_price, @defensive_entered_trigger, @defensive_entry_price_low, @defensive_cooldown_until)
+    INSERT OR REPLACE INTO bot_state (id, state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts, defensive_active, defensive_entered_at, defensive_entered_price, defensive_entered_trigger, defensive_entry_price_low, defensive_cooldown_until, marked_for_switch, mark_timestamp, mark_target_regime, entry_regime, last_switch_timestamp)
+    VALUES (1, @state, @regime, @position_json, @ledger_json, @naive_json, @updated_at, @cum_fees_sol, @cum_fees_usdc, @realized_il, @tx_count, @cum_gas_lamports, @pullback_active, @pullback_peak, @pullback_start, @last_harvest_time, @sol_cost_basis, @sol_total_acquired, @sol_total_cost, @cost_basis_last_updated, @usdc_reserve, @usdc_reserve_floor, @reserve_state, @reserve_last_updated, @last_upside_exit_price, @last_upside_exit_ts, @defensive_active, @defensive_entered_at, @defensive_entered_price, @defensive_entered_trigger, @defensive_entry_price_low, @defensive_cooldown_until, @marked_for_switch, @mark_timestamp, @mark_target_regime, @entry_regime, @last_switch_timestamp)
   `).run({
     ...state,
     ledger_json: state.ledger_json ?? null,
@@ -478,11 +491,16 @@ export function upsertBotState(db: Database.Database, state: BotStateRow): void 
     defensive_entered_trigger: state.defensive_entered_trigger ?? (prior?.defensive_entered_trigger ?? null),
     defensive_entry_price_low: state.defensive_entry_price_low ?? (prior?.defensive_entry_price_low ?? null),
     defensive_cooldown_until: state.defensive_cooldown_until ?? (prior?.defensive_cooldown_until ?? null),
+    marked_for_switch: state.marked_for_switch ?? (prior?.marked_for_switch ?? 0),
+    mark_timestamp: state.mark_timestamp ?? (prior?.mark_timestamp ?? null),
+    mark_target_regime: state.mark_target_regime ?? (prior?.mark_target_regime ?? null),
+    entry_regime: state.entry_regime ?? (prior?.entry_regime ?? null),
+    last_switch_timestamp: state.last_switch_timestamp ?? (prior?.last_switch_timestamp ?? null),
   });
 }
 
 export function getBotState(db: Database.Database): BotStateRow | null {
-  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts, defensive_active, defensive_entered_at, defensive_entered_price, defensive_entered_trigger, defensive_entry_price_low, defensive_cooldown_until FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
+  const row = db.prepare(`SELECT state, regime, position_json, ledger_json, naive_json, updated_at, cum_fees_sol, cum_fees_usdc, realized_il, tx_count, cum_gas_lamports, pullback_active, pullback_peak, pullback_start, last_harvest_time, sol_cost_basis, sol_total_acquired, sol_total_cost, cost_basis_last_updated, usdc_reserve, usdc_reserve_floor, reserve_state, reserve_last_updated, last_upside_exit_price, last_upside_exit_ts, defensive_active, defensive_entered_at, defensive_entered_price, defensive_entered_trigger, defensive_entry_price_low, defensive_cooldown_until, marked_for_switch, mark_timestamp, mark_target_regime, entry_regime, last_switch_timestamp FROM bot_state WHERE id = 1`).get() as BotStateRow | undefined;
   return row ?? null;
 }
 

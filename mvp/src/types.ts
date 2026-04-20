@@ -23,7 +23,11 @@ export type EventType =
   | 'CYCLE_SKIP'
   | 'LIQUIDITY_ADDED'
   | 'AUTO_DEPLOY'
-  | 'STRATEGIC_REBALANCE';
+  | 'STRATEGIC_REBALANCE'
+  | 'REGIME_SWITCH_MARKED'
+  | 'REGIME_SWITCH_UNMARKED'
+  | 'REGIME_SWITCH_EXECUTED'
+  | 'REGIME_SWITCH_SUPPRESSED';
 
 export interface PythPrice {
   price: number;

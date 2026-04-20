@@ -22,6 +22,7 @@ import { insertSwapLedger, backfillSwapLedgerCostBasis } from './db/sqlite.js';
 import { bootstrapCostBasis, updateCostBasis, readCostBasis, recalculateFromCurrentHoldings, reduceCostBasisHoldings } from './tracking/costBasis.js';
 import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeployGate, checkReserveFloor } from './reserve/reserveManager.js';
 import { checkDefensiveTriggers, checkDefensiveExit, updateEntryPriceLow, makeInitialState, type DefensiveState } from './engine/defensive.js';
+import * as regimeRefresh from './engine/regimeRefresh.js';
 
 // ── Process-level safety nets ─────────────────────────────────────────────
 // Prevent stray promise rejections or exceptions (e.g. Solana web3.js retry
@@ -97,6 +98,12 @@ let liveRegime: Regime = 'RANGING';
 let liveBotState: BotState = 'IDLE';
 let lastUpsideExitPrice = 0;
 let lastUpsideExitTs = 0;
+// Regime-Change Refresh (RCR) in-memory state (restored from DB below)
+let rcrMarkedForSwitch: boolean = (savedState?.marked_for_switch ?? 0) === 1;
+let rcrMarkTimestamp: number | null = savedState?.mark_timestamp ?? null;
+let rcrMarkTargetRegime: Regime | null = (savedState?.mark_target_regime ?? null) as Regime | null;
+let rcrEntryRegime: Regime | null = (savedState?.entry_regime ?? null) as Regime | null;
+let rcrLastSwitchTs: number | null = savedState?.last_switch_timestamp ?? null;
 let liveLastHarvestTime = savedState?.last_harvest_time || Date.now(); // default to now, not epoch 0
 let liveLastRegimeCheck = 0;
 let liveLastRegimeEvalLog = 0;
@@ -201,6 +208,15 @@ if (savedState?.last_upside_exit_ts) {
   console.log(JSON.stringify({ level: 'info', msg: `Upside exit state restored: price=$${lastUpsideExitPrice.toFixed(2)}, at ${new Date(lastUpsideExitTs).toISOString()}`, timestamp: Date.now() }));
 }
 
+// Log restored RCR state (so a restart while marked is visible)
+if (rcrMarkedForSwitch || rcrEntryRegime) {
+  console.log(JSON.stringify({
+    level: 'info',
+    msg: `[RCR] State restored: marked=${rcrMarkedForSwitch}, entry_regime=${rcrEntryRegime}, target=${rcrMarkTargetRegime}, mark_ts=${rcrMarkTimestamp ? new Date(rcrMarkTimestamp).toISOString() : 'null'}, last_switch_ts=${rcrLastSwitchTs ? new Date(rcrLastSwitchTs).toISOString() : 'null'}`,
+    timestamp: Date.now(),
+  }));
+}
+
 // Pre-populate price history for flash crash detection
 try {
   const recentSnaps = db.prepare(`SELECT price FROM regime_snapshots ORDER BY ts DESC LIMIT 10`).all() as { price: number }[];
@@ -275,6 +291,33 @@ function queryPriceAt(targetTs: number, windowMs = 300_000): number | null {
 // Helper: upside exit fields for every state save
 function upsideExitFields() {
   return { last_upside_exit_price: lastUpsideExitPrice, last_upside_exit_ts: lastUpsideExitTs, last_harvest_time: liveLastHarvestTime };
+}
+
+// Helper: Regime-Change Refresh fields for every state save
+function rcrFields() {
+  return {
+    marked_for_switch: rcrMarkedForSwitch ? 1 : 0,
+    mark_timestamp: rcrMarkTimestamp,
+    mark_target_regime: rcrMarkTargetRegime,
+    entry_regime: rcrEntryRegime,
+    last_switch_timestamp: rcrLastSwitchTs,
+  };
+}
+
+// Targeted write of RCR columns only. Avoids threading rcrFields() through
+// every existing upsertBotState call.
+function persistRcrState(): void {
+  try {
+    db.prepare(`UPDATE bot_state SET marked_for_switch=?, mark_timestamp=?, mark_target_regime=?, entry_regime=?, last_switch_timestamp=? WHERE id=1`).run(
+      rcrMarkedForSwitch ? 1 : 0,
+      rcrMarkTimestamp,
+      rcrMarkTargetRegime,
+      rcrEntryRegime,
+      rcrLastSwitchTs,
+    );
+  } catch (e) {
+    console.log(JSON.stringify({ level: 'warn', msg: `[RCR] persist failed: ${String(e)}`, timestamp: Date.now() }));
+  }
 }
 
 // Helper: cost basis fields for every state save (prevents INSERT OR REPLACE from zeroing them)
@@ -693,6 +736,13 @@ async function main() {
           });
           liveBotState = 'ACTIVE';
           liveRegime = (savedState.regime ?? 'RANGING') as Regime;
+          // Backfill entry_regime if never set (first bot run after RCR deploy).
+          // Current regime is the best available proxy for an already-open position.
+          if (!rcrEntryRegime) {
+            rcrEntryRegime = liveRegime;
+            persistRcrState();
+            console.log(JSON.stringify({ level: 'info', msg: `[RCR] entry_regime backfilled from restored position: ${rcrEntryRegime}`, timestamp: Date.now() }));
+          }
           console.log(JSON.stringify({ level: 'info', msg: 'live position restored', positionMint: pos.positionMint, timestamp: Date.now() }));
           // Restore last regime change time so stability gate works after restart
           try {
@@ -1885,6 +1935,39 @@ async function runLiveCycle(price: number): Promise<void> {
       const oldRegime = liveRegime;
       liveRegime = newRegime;
       console.log(JSON.stringify({ level: 'info', msg: 'LIVE regime change', from: oldRegime, to: newRegime, method: ta != null ? 'TA-first' : 'enhanced-fallback', deployMultiplier, timestamp: now }));
+
+      // Regime-Change Refresh: mark/unmark/update when regime flips mid-position
+      const rcrPos = liveExecutor?.getCurrentPosition() ?? null;
+      const rcrAction = regimeRefresh.checkRegimeChange({
+        newRegime,
+        prevRegime: oldRegime,
+        entryRegime: rcrEntryRegime,
+        markedForSwitch: rcrMarkedForSwitch,
+        markTarget: rcrMarkTargetRegime,
+        hasOpenPosition: !!rcrPos,
+        enabled: runtime.regimeChangeRefreshEnabled,
+      });
+      if (rcrAction) {
+        if (rcrAction.action === 'MARK') {
+          rcrMarkedForSwitch = true;
+          rcrMarkTimestamp = now;
+          rcrMarkTargetRegime = rcrAction.to;
+        } else if (rcrAction.action === 'UPDATE_TARGET') {
+          rcrMarkTargetRegime = rcrAction.to;
+        } else {
+          // UNMARK
+          rcrMarkedForSwitch = false;
+          rcrMarkTimestamp = null;
+          rcrMarkTargetRegime = null;
+        }
+        persistRcrState();
+        regimeRefresh.logMarkEvent(db, { action: rcrAction, entryRegime: rcrEntryRegime, price });
+        console.log(JSON.stringify({
+          level: 'info',
+          msg: `[RCR] ${rcrAction.action}: entry=${rcrEntryRegime} newRegime=${newRegime} target=${rcrMarkTargetRegime} marked=${rcrMarkedForSwitch}`,
+          timestamp: now,
+        }));
+      }
       // Update reserve floor for new regime
       const newFloorPct = (runtime.regimeParams[newRegime] ?? getRegimeParams(newRegime)).reserveFloorPct ?? 0.20;
       if (currentLiveData?.totalValueWithPosition) {
@@ -2170,6 +2253,46 @@ async function runLiveCycle(price: number): Promise<void> {
     await reconcileReserveAfterOpen('ID');
     idleRebalancePending = true;
     return;
+  }
+
+  // Regime-Change Refresh: if marked, check whether price is back near entry
+  // (switch eligible). Runs before T1/OOR checks so a friendly drift-back can
+  // trigger a zero-IL switch instead of waiting for a normal exit.
+  if (rcrMarkedForSwitch && runtime.regimeChangeRefreshEnabled) {
+    const trig = regimeRefresh.checkSwitchTrigger({
+      markedForSwitch: rcrMarkedForSwitch,
+      entryPrice: currentPos.entryPrice,
+      currentPrice: price,
+      now,
+      lastSwitchTs: rcrLastSwitchTs,
+      config: regimeRefresh.getRefreshConfig(),
+    });
+    if (trig.ready) {
+      const markedAt = rcrMarkTimestamp;
+      const entryRegimeAtSwitch = rcrEntryRegime;
+      const targetRegime = rcrMarkTargetRegime;
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: `[RCR] Switch eligible (${trig.reason}). entry=${entryRegimeAtSwitch} → target=${targetRegime}. Executing close+reopen at $${price.toFixed(2)} (entry $${currentPos.entryPrice.toFixed(2)}).`,
+        timestamp: now,
+      }));
+      rcrLastSwitchTs = now;
+      rcrMarkedForSwitch = false;
+      rcrMarkTimestamp = null;
+      rcrMarkTargetRegime = null;
+      persistRcrState();
+      regimeRefresh.logExecutedEvent(db, {
+        entryRegime: entryRegimeAtSwitch,
+        targetRegime,
+        entryPrice: currentPos.entryPrice,
+        switchPrice: price,
+        markedAt,
+        currentRegime: liveRegime,
+      });
+      await liveCloseAndReopen(price, 'POSITION_CLOSED',
+        `Regime-Change Refresh: ${entryRegimeAtSwitch} → ${targetRegime}. Price within ${(runtime.regimeRefreshTolerance * 100).toFixed(2)}% of entry $${currentPos.entryPrice.toFixed(2)} (current $${price.toFixed(2)}).`);
+      return;
+    }
   }
 
   // Proximity check
@@ -2947,6 +3070,13 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
     liveBotState = 'ACTIVE';
     positionChangedThisCycle = true;  // guard reconciler from attributing LP deposit to manual swap
 
+    // Regime-Change Refresh: fresh position — reset mark state, record entry regime
+    rcrEntryRegime = liveRegime;
+    rcrMarkedForSwitch = false;
+    rcrMarkTimestamp = null;
+    rcrMarkTargetRegime = null;
+    persistRcrState();
+
     const comp = await liveExecutor.getPositionComposition();
     const depositedSol = comp?.sol ?? 0;
     const depositedUsdc = comp?.usdc ?? 0;
@@ -2991,6 +3121,27 @@ async function liveOpenPosition(price: number, eventType: EventType, triggerReas
 
 async function liveClosePosition(price: number, eventType: EventType, triggerReason?: string): Promise<boolean> {
   if (!liveExecutor) return false;
+  // Regime-Change Refresh: if a close fires while marked (for any non-RCR reason,
+  // since RCR clears the mark before calling close), log SUPPRESSED and clear state.
+  if (rcrMarkedForSwitch) {
+    const prevTarget = rcrMarkTargetRegime;
+    regimeRefresh.logSuppressedEvent(db, {
+      reason: `normal close: ${eventType}`,
+      regime: liveRegime,
+      entryRegime: rcrEntryRegime,
+      markTarget: prevTarget,
+      price,
+    });
+    rcrMarkedForSwitch = false;
+    rcrMarkTimestamp = null;
+    rcrMarkTargetRegime = null;
+    persistRcrState();
+    console.log(JSON.stringify({
+      level: 'info',
+      msg: `[RCR] Mark suppressed by normal close: eventType=${eventType}, target was ${prevTarget}`,
+      timestamp: Date.now(),
+    }));
+  }
   try {
     // Pre-close harvest: collect fees before closing to ensure they route through reserve
     try {

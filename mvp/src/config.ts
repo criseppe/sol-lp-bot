@@ -106,6 +106,13 @@ export const runtime = {
   // Legacy toggle (mapped to regimeReopenEnabled)
   regimeChangeReopenEnabled: true,
 
+  // ── Regime-Change Refresh (RCR) ─────────────────────────────────────────
+  // Mark position when regime changes mid-position; switch to new regime's
+  // params when price returns within tolerance of entry (zero-IL adaptation).
+  regimeChangeRefreshEnabled: true,
+  regimeRefreshTolerance: 0.001,             // 0.1% — price must be within this fraction of entry
+  regimeRefreshMinSwitchIntervalSec: 900,    // 15min — churn protection between consecutive switches
+
   // VAR — Volatility-Adaptive Range
   varEnabled: false,
   varMultiplier: 3.0,
@@ -351,6 +358,10 @@ export function applyConfigFromDb(dbConfig: Record<string, string>): void {
   const vRRWH = nv('regimeReopenMaxWaitHigh', 5, 180); if (vRRWH != null) runtime.regimeReopenMaxWaitHigh = vRRWH;
   const vRRWM = nv('regimeReopenMaxWaitMedium', 10, 360); if (vRRWM != null) runtime.regimeReopenMaxWaitMedium = vRRWM;
   const vRMin = nv('regimeMinScoreMargin', 0, 7); if (vRMin != null) runtime.regimeMinScoreMargin = vRMin;
+  // RCR — Regime-Change Refresh
+  const vRCREn = g('regimeChangeRefreshEnabled'); if (vRCREn === 'true' || vRCREn === 'false') runtime.regimeChangeRefreshEnabled = vRCREn === 'true';
+  const vRCRTol = nv('regimeRefreshTolerance', 0, 0.05); if (vRCRTol != null) runtime.regimeRefreshTolerance = vRCRTol;
+  const vRCRInt = nv('regimeRefreshMinSwitchIntervalSec', 0, 86400); if (vRCRInt != null) runtime.regimeRefreshMinSwitchIntervalSec = vRCRInt;
   const vIRMin = nv('idleRebalanceMinUsdc', 10, 10000); if (vIRMin != null) runtime.idleRebalanceMinUsdc = vIRMin;
   const vIRKeep = nv('idleRebalanceSolKeep', 0.01, 5); if (vIRKeep != null) runtime.idleRebalanceSolKeep = vIRKeep;
   const vIRDev = nv('idleRebalanceDeviationPct', 0.05, 0.5); if (vIRDev != null) runtime.idleRebalanceDeviationPct = vIRDev;
@@ -490,6 +501,9 @@ export function exportConfig(): Record<string, string> {
   out['regimeReopenMaxWaitCritical'] = String(runtime.regimeReopenMaxWaitCritical);
   out['regimeReopenMaxWaitHigh'] = String(runtime.regimeReopenMaxWaitHigh);
   out['regimeReopenMaxWaitMedium'] = String(runtime.regimeReopenMaxWaitMedium);
+  out['regimeChangeRefreshEnabled'] = String(runtime.regimeChangeRefreshEnabled);
+  out['regimeRefreshTolerance'] = String(runtime.regimeRefreshTolerance);
+  out['regimeRefreshMinSwitchIntervalSec'] = String(runtime.regimeRefreshMinSwitchIntervalSec);
   out['regimeWindowDays'] = String(runtime.regimeWindowDays);
   out['trendThreshold'] = String(runtime.trendThreshold);
   out['pythMaxConfidencePct'] = String(runtime.pythMaxConfidencePct);
