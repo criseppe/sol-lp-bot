@@ -42,6 +42,11 @@ export interface LivePosition {
   regime: Regime;
   entrySol: number;
   entryUsdc: number;
+  // Snapshot of cumGasLamports AFTER the open tx. Used to compute gas cost
+  // incurred during the lifetime of this specific position (gas-since-open
+  // = current cumGasLamports − entryCumGasLamports). Optional for restore-path
+  // backwards compat with position_json rows written before this field existed.
+  entryCumGasLamports?: number;
 }
 
 export interface SwapEvent {
@@ -528,6 +533,7 @@ export class LiveExecutor {
       regime,
       entrySol: estSol,
       entryUsdc: estUsdc,
+      entryCumGasLamports: this.cumGasLamports,
     };
 
     console.log(JSON.stringify({

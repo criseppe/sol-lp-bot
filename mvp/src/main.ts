@@ -24,6 +24,7 @@ import { getReserveState, updateReserve, computeFloor, routeHarvest, checkDeploy
 import { checkDefensiveTriggers, checkDefensiveExit, updateEntryPriceLow, makeInitialState, type DefensiveState } from './engine/defensive.js';
 import * as regimeRefresh from './engine/regimeRefresh.js';
 import * as dynamicScaling from './engine/dynamicScaling.js';
+import { createOnchainBasisRouter } from './routes/onchainBasis.js';
 
 // ── Process-level safety nets ─────────────────────────────────────────────
 // Prevent stray promise rejections or exceptions (e.g. Solana web3.js retry
@@ -584,6 +585,14 @@ async function main() {
     }
     liveExecutor = new LiveExecutor(conn, wallet, WHIRLPOOL_ADDRESS);
 
+    // ── Standalone on-chain cost basis observer (read-only, disconnected from bot cycle) ──
+    dashboard.mountRouter(createOnchainBasisRouter({
+      connection: conn,
+      walletAddress: wallet.publicKey.toBase58(),
+      db,
+      minBlockTime: 1744243200, // 2026-04-10T00:00:00Z — bot start date
+    }));
+
     // Restore gas stats from DB (persisted on every state save and shutdown)
     liveExecutor.cumGasLamports = (savedState as any)?.cum_gas_lamports ?? 0;
     liveExecutor.txCount = (savedState as any)?.tx_count ?? 0;
@@ -1040,8 +1049,6 @@ async function main() {
             pendingFeesSol,
             pendingFeesUsdc,
             pendingFeesTotal,
-            cumHarvestedFeesSol: liveCumFeesSol,
-            cumHarvestedFeesUsdc: liveCumFeesUsdc,
             totalFeesUsdc,
             solCostBasis: costBasisState.solCostBasis || 0,
             solTracked: costBasisState.solTotalAcquired || 0,
@@ -1053,6 +1060,19 @@ async function main() {
             ilUsdc,
             realizedIlUsdc: liveRealizedIl,
             ...(() => { const g = liveExecutor!.getGasStats(price.price); return { gasSol: g.gasSol, gasUsdc: g.gasUsdc, txCount: g.txCount }; })(),
+            ...(() => {
+              // Gas since the current position opened. Null when no position is open
+              // or when the open-time snapshot is missing (position_json predates this field).
+              if (!livePos || livePos.entryCumGasLamports == null) {
+                return { gasSinceOpenSol: null, gasSinceOpenUsdc: null };
+              }
+              const lamports = Math.max(0, liveExecutor!.cumGasLamports - livePos.entryCumGasLamports);
+              const sol = lamports / 1_000_000_000;
+              return { gasSinceOpenSol: sol, gasSinceOpenUsdc: sol * price.price };
+            })(),
+            solPriceImpact: (livePos?.entryPrice != null)
+              ? (price.price - livePos.entryPrice) * (positionSol + balances.sol)
+              : null,
             estDailyFeesUsdc,
             estAprPct,
             actual24hFeesUsdc,

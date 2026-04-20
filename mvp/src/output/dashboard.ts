@@ -106,8 +106,6 @@ export interface LiveData {
   pendingFeesSol: number;
   pendingFeesUsdc: number;
   pendingFeesTotal: number;
-  cumHarvestedFeesSol: number;
-  cumHarvestedFeesUsdc: number;
   totalFeesUsdc: number;
   solCostBasis: number;
   solTracked: number;
@@ -121,6 +119,13 @@ export interface LiveData {
   gasSol: number;
   gasUsdc: number;
   txCount: number;
+  // Scoped to the currently open position only. Null when no position or
+  // when restoring from pre-feature position_json without an entry snapshot.
+  gasSinceOpenSol: number | null;
+  gasSinceOpenUsdc: number | null;
+  // Unrealized USD delta on total SOL held (position + wallet) vs entry price.
+  // Null when no position.
+  solPriceImpact: number | null;
   estDailyFeesUsdc: number;
   estAprPct: number;
   actual24hFeesUsdc: number;
@@ -176,6 +181,7 @@ export interface DashboardServer {
     dailyPnl?: DailyPnlRow[],
   ): void;
   updateLiveData(live: LiveData): void;
+  mountRouter(router: import('express').Router): void;
   onEmergencyStop(handler: () => Promise<void>): void;
   onPause(handler: () => void): void;
   onResume(handler: () => void): void;
@@ -1909,6 +1915,9 @@ export function startDashboard(port: number): DashboardServer {
     setDb(d) {
       dbRef = d;
     },
+    mountRouter(router) {
+      app.use(router);
+    },
     stop() {
       server.close();
     },
@@ -1989,6 +1998,7 @@ export const NAV_HTML = `
   <a href="/analysis" id="nav-analysis">Agent</a>
   <a href="/intelligence" id="nav-intelligence">Intelligence</a>
   <a href="/il-analysis" id="nav-il-analysis">IL Analysis</a>
+  <a href="/onchain-basis" id="nav-onchain-basis">&#x26D3; Basis</a>
   <a href="/arcade" id="nav-arcade">Arcade</a>
 </div>`;
 
@@ -2402,23 +2412,18 @@ ${pool ? `<div class="card" style="margin-top:12px">
 .ctrl-blue{background:#2563eb;color:white}.ctrl-blue:hover{background:#1d4ed8}
 .stop-confirm{display:none;background:#1c1917;border:2px solid #dc2626;border-radius:8px;padding:16px;margin-top:12px;text-align:center}
 .ctrl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
-.fees-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-.fees-cell{text-align:center;padding:12px 0}
-.fees-cell:not(:last-child){border-right:1px solid #21262d}
-.il-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-.il-cell{text-align:center;padding:8px 0}
+.pos-pnl-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px}
+.pos-pnl-cell{text-align:center;padding:12px 0}
+.pos-pnl-cell:not(:last-child){border-right:1px solid #21262d}
 .wallet-split{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:12px;border-top:1px solid #21262d;padding-top:12px}
 .wallet-half{text-align:center}
 .wallet-half:first-child{border-right:1px solid #21262d}
 @media(max-width:700px){
   .ctrl-grid{grid-template-columns:1fr 1fr;gap:8px}
   .ctrl-btn{padding:10px 8px;font-size:11px;min-height:44px}
-  .fees-grid{grid-template-columns:1fr}
-  .fees-cell{border-right:none!important;border-bottom:1px solid #21262d;padding:10px 0}
-  .fees-cell:last-child{border-bottom:none}
-  .il-grid{grid-template-columns:1fr}
-  .il-cell{border-bottom:1px solid #21262d;padding:10px 0}
-  .il-cell:last-child{border-bottom:none}
+  .pos-pnl-grid{grid-template-columns:1fr}
+  .pos-pnl-cell{border-right:none!important;border-bottom:1px solid #21262d;padding:10px 0}
+  .pos-pnl-cell:last-child{border-bottom:none}
   .wallet-split{grid-template-columns:1fr}
   .wallet-half{padding:8px 0}
   .wallet-half:first-child{border-right:none;border-bottom:1px solid #21262d}
@@ -2549,9 +2554,9 @@ ${defensiveBannerHtml}
   </div>
 
   <div class="card full">
-    <h2>Fees, IL &amp; PnL</h2>
-    <div class="fees-grid">
-      <div class="fees-cell">
+    <h2>Position PnL</h2>
+    <div class="pos-pnl-grid">
+      <div class="pos-pnl-cell">
         <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Pending Fees</div>
         <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.pendingFeesTotal)}</div>
         <div style="font-size:11px;color:#8b949e">${fmt(live.pendingFeesSol, 6)} SOL</div>
@@ -2565,35 +2570,26 @@ ${defensiveBannerHtml}
             '<script>(function(){var el=document.getElementById("fee-trend");var rate=parseFloat(document.getElementById("fee-rate-el").dataset.rate);var prev=parseFloat(localStorage.getItem("feeRate")||"0");if(prev>0&&rate>0){if(rate>prev*1.03){el.textContent="▲";el.style.color="#22c55e";}else if(rate<prev*0.97){el.textContent="▼";el.style.color="#ef4444";}else{el.textContent="▶";el.style.color="#8b949e";}}localStorage.setItem("feeRate",rate.toString());})()</script>';
         })()}
       </div>
-      <div class="fees-cell">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Harvested Fees</div>
-        <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.cumHarvestedFeesSol * live.solPrice + live.cumHarvestedFeesUsdc)}</div>
-        <div style="font-size:11px;color:#8b949e">${fmt(live.cumHarvestedFeesSol, 6)} SOL</div>
-        <div style="font-size:11px;color:#8b949e">${fmt(live.cumHarvestedFeesUsdc, 4)} USDC</div>
+      <div class="pos-pnl-cell">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Potential IL (unrealized)</div>
+        <div style="font-size:20px;font-weight:bold;color:${live.ilUsdc < 0 ? '#ef4444' : '#22c55e'}">${live.ilUsdc < 0 ? '-' : '+'}$${fmt(Math.abs(live.ilUsdc), 4)}</div>
+        <div style="font-size:11px;color:#8b949e">${live.entryPrice ? `Entry $${fmt(live.entryPrice)} → $${fmt(live.solPrice)} (${((live.solPrice - live.entryPrice) / live.entryPrice * 100).toFixed(2)}%)` : '--'}</div>
       </div>
-      <div class="fees-cell" style="border-right:none">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Total Fees (mark-to-market)</div>
-        <div style="font-size:20px;font-weight:bold;color:#22c55e">$${fmt(live.totalFeesUsdc)}</div>
-        <div style="font-size:11px;color:#8b949e">Pending + harvested at current SOL price</div>
+      <div class="pos-pnl-cell">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Gas Fees (this position)</div>
+        ${live.gasSinceOpenUsdc == null
+          ? `<div style="font-size:20px;font-weight:bold;color:#8b949e">--</div>
+             <div style="font-size:11px;color:#8b949e">no snapshot</div>`
+          : `<div style="font-size:20px;font-weight:bold;color:#ef4444">-$${fmt(live.gasSinceOpenUsdc, 4)}</div>
+             <div style="font-size:11px;color:#8b949e">${fmt(live.gasSinceOpenSol ?? 0, 6)} SOL since open</div>`}
       </div>
-    </div>
-    <div style="border-top:1px solid #21262d;margin-top:8px;padding-top:12px">
-      <div class="il-grid">
-        <div class="il-cell">
-          <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Potential IL (unrealized)</div>
-          <div style="font-size:20px;font-weight:bold;color:${live.ilUsdc < 0 ? '#ef4444' : '#22c55e'}">${live.ilUsdc < 0 ? '-' : '+'}$${fmt(Math.abs(live.ilUsdc), 4)}</div>
-          <div style="font-size:11px;color:#8b949e">${live.entryPrice ? `Entry $${fmt(live.entryPrice)} → $${fmt(live.solPrice)} (${((live.solPrice - live.entryPrice) / live.entryPrice * 100).toFixed(2)}%)` : '--'}</div>
-        </div>
-        <div class="il-cell">
-          <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Realized IL (from closes)</div>
-          <div style="font-size:20px;font-weight:bold;color:${live.realizedIlUsdc < 0 ? '#ef4444' : '#22c55e'}">${live.realizedIlUsdc < 0 ? '-' : '+'}$${fmt(Math.abs(live.realizedIlUsdc), 4)}</div>
-          <div style="font-size:11px;color:#8b949e">Cumulative from closed positions</div>
-        </div>
-        <div class="il-cell">
-          <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Gas Fees (on-chain)</div>
-          <div style="font-size:20px;font-weight:bold;color:#ef4444">-$${fmt(live.gasUsdc, 4)}</div>
-          <div style="font-size:11px;color:#8b949e">${fmt(live.gasSol, 6)} SOL (${live.txCount} txs)</div>
-        </div>
+      <div class="pos-pnl-cell" style="border-right:none">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:4px">SOL Price Impact</div>
+        ${live.solPriceImpact == null || live.entryPrice == null
+          ? `<div style="font-size:20px;font-weight:bold;color:#8b949e">--</div>
+             <div style="font-size:11px;color:#8b949e">no position</div>`
+          : `<div style="font-size:20px;font-weight:bold;color:${live.solPriceImpact < 0 ? '#ef4444' : '#22c55e'}">${live.solPriceImpact < 0 ? '-' : '+'}$${fmt(Math.abs(live.solPriceImpact), 4)}</div>
+             <div style="font-size:11px;color:#8b949e">SOL Δ vs entry ($${fmt(live.entryPrice)})</div>`}
       </div>
     </div>
   </div>
